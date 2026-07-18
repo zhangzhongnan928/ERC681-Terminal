@@ -1,0 +1,375 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		05DAC3E3819FD8D3AED82CC8 /* OPKTerminalRPC in Frameworks */ = {isa = PBXBuildFile; productRef = 2BF56EF401912BF58C4AA87D /* OPKTerminalRPC */; };
+		2F13DF7FB8F29D5F70B6668F /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F336BEA05ED67165F7EEB27E /* AppModel.swift */; };
+		37BD6907BFAFECED9C45DCA1 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E2580CFEBF610B95FE105C6 /* AppSettings.swift */; };
+		67D4566FFD8A1CE1298199F6 /* OPKTerminalCore in Frameworks */ = {isa = PBXBuildFile; productRef = FA75F3B1C18EDE2317F306B5 /* OPKTerminalCore */; };
+		CE107B3D5F39B62D29C5AFAF /* StoredInvoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = C793156B47CF83EA94F702DC /* StoredInvoice.swift */; };
+		D956810EF9C3953161BF677F /* QRCodeImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6205D28D194FF1F1ABFEE432 /* QRCodeImage.swift */; };
+		E10950392415D8088C0E0617 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 454F035A1B4282472EBE46B5 /* ContentView.swift */; };
+		E9FEADCFEDC07B1690B88069 /* OPKTerminalApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA8D918A4F1E641C77252BF8 /* OPKTerminalApp.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		0E574FC69C0BC37CED06C39F /* OPKTerminalApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = OPKTerminalApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1E2580CFEBF610B95FE105C6 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
+		454F035A1B4282472EBE46B5 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		6205D28D194FF1F1ABFEE432 /* QRCodeImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeImage.swift; sourceTree = "<group>"; };
+		AA8D918A4F1E641C77252BF8 /* OPKTerminalApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OPKTerminalApp.swift; sourceTree = "<group>"; };
+		C793156B47CF83EA94F702DC /* StoredInvoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoredInvoice.swift; sourceTree = "<group>"; };
+		CEB6EA3CDCC2868247582FAC /* ios */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ios; path = .; sourceTree = SOURCE_ROOT; };
+		F336BEA05ED67165F7EEB27E /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		2CE69B7D3CD61205CFCDD480 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				67D4566FFD8A1CE1298199F6 /* OPKTerminalCore in Frameworks */,
+				05DAC3E3819FD8D3AED82CC8 /* OPKTerminalRPC in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		52A85BAF47912A497CD40199 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				ADE3C8A32D60D37A70F4A34A /* Sources */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		72E854257B611644D0610C24 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				CEB6EA3CDCC2868247582FAC /* ios */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		8703E5FB5C72EB56D36993A5 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				0E574FC69C0BC37CED06C39F /* OPKTerminalApp.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		ADE3C8A32D60D37A70F4A34A /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				F336BEA05ED67165F7EEB27E /* AppModel.swift */,
+				1E2580CFEBF610B95FE105C6 /* AppSettings.swift */,
+				454F035A1B4282472EBE46B5 /* ContentView.swift */,
+				AA8D918A4F1E641C77252BF8 /* OPKTerminalApp.swift */,
+				6205D28D194FF1F1ABFEE432 /* QRCodeImage.swift */,
+				C793156B47CF83EA94F702DC /* StoredInvoice.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		C6A65DFA614F04C09DB686F9 = {
+			isa = PBXGroup;
+			children = (
+				52A85BAF47912A497CD40199 /* App */,
+				72E854257B611644D0610C24 /* Packages */,
+				8703E5FB5C72EB56D36993A5 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		F4BFD273662849820C685188 /* OPKTerminalApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 783D262C827E7BAC27E353C6 /* Build configuration list for PBXNativeTarget "OPKTerminalApp" */;
+			buildPhases = (
+				02BE4F1D8A60CB1606BD1267 /* Sources */,
+				2CE69B7D3CD61205CFCDD480 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = OPKTerminalApp;
+			packageProductDependencies = (
+				FA75F3B1C18EDE2317F306B5 /* OPKTerminalCore */,
+				2BF56EF401912BF58C4AA87D /* OPKTerminalRPC */,
+			);
+			productName = OPKTerminalApp;
+			productReference = 0E574FC69C0BC37CED06C39F /* OPKTerminalApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		4150EA981F4E70969C53DF2C /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					F4BFD273662849820C685188 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = C5C287ACC568CE0B21475EE3 /* Build configuration list for PBXProject "OPKTerminal" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = C6A65DFA614F04C09DB686F9;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				EB503FD7FD856918BF43B45E /* XCLocalSwiftPackageReference "." */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 8703E5FB5C72EB56D36993A5 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				F4BFD273662849820C685188 /* OPKTerminalApp */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		02BE4F1D8A60CB1606BD1267 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2F13DF7FB8F29D5F70B6668F /* AppModel.swift in Sources */,
+				37BD6907BFAFECED9C45DCA1 /* AppSettings.swift in Sources */,
+				E10950392415D8088C0E0617 /* ContentView.swift in Sources */,
+				E9FEADCFEDC07B1690B88069 /* OPKTerminalApp.swift in Sources */,
+				D956810EF9C3953161BF677F /* QRCodeImage.swift in Sources */,
+				CE107B3D5F39B62D29C5AFAF /* StoredInvoice.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		9303481F0A6849E856058C22 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_FILE = App/Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.openpasskey.terminal.ios;
+				PRODUCT_NAME = "OPK Terminal";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		B0BA81E42669EC06DFB34BDF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		E97FED1026278C0E8E0D9474 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		E9C7E87CC610869E606B0F26 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_FILE = App/Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.openpasskey.terminal.ios;
+				PRODUCT_NAME = "OPK Terminal";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		783D262C827E7BAC27E353C6 /* Build configuration list for PBXNativeTarget "OPKTerminalApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9303481F0A6849E856058C22 /* Debug */,
+				E9C7E87CC610869E606B0F26 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		C5C287ACC568CE0B21475EE3 /* Build configuration list for PBXProject "OPKTerminal" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E97FED1026278C0E8E0D9474 /* Debug */,
+				B0BA81E42669EC06DFB34BDF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		EB503FD7FD856918BF43B45E /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		2BF56EF401912BF58C4AA87D /* OPKTerminalRPC */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OPKTerminalRPC;
+		};
+		FA75F3B1C18EDE2317F306B5 /* OPKTerminalCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OPKTerminalCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 4150EA981F4E70969C53DF2C /* Project object */;
+}

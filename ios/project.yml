@@ -1,0 +1,40 @@
+name: OPKTerminal
+options:
+  bundleIdPrefix: com.openpasskey
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+packages:
+  OPKTerminalSDK:
+    path: .
+targets:
+  OPKTerminalApp:
+    type: application
+    platform: iOS
+    supportedDestinations: [iOS, iPad]
+    sources:
+      - path: App/Sources
+    info:
+      path: App/Resources/Info.plist
+    dependencies:
+      - package: OPKTerminalSDK
+        product: OPKTerminalCore
+      - package: OPKTerminalSDK
+        product: OPKTerminalRPC
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.openpasskey.terminal.ios
+        PRODUCT_NAME: OPK Terminal
+        SWIFT_VERSION: 6.0
+        SWIFT_STRICT_CONCURRENCY: complete
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+schemes:
+  OPKTerminalApp:
+    build:
+      targets:
+        OPKTerminalApp: all
+    run:
+      config: Debug
+    archive:
+      config: Release

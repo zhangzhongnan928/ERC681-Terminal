@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "rail": "OPK ERC-20 ERC-681 QR",
+  "protocolVersion": "1.5",
+  "notes": [
+    "Amounts are raw integer token units.",
+    "Receiver derivation is local and uses Keccak-256, not NIST SHA3-256.",
+    "Only the ERC-20 transfer function form is accepted. Native-asset value requests are out of scope."
+  ],
+  "configuration": {
+    "chainId": 84532,
+    "factory": "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
+    "receiverImplementation": "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
+    "vault": "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1",
+    "token": {
+      "address": "0x7ffba642bc902880a737cb1c18a4e9540879e211",
+      "symbol": "AUD",
+      "decimals": 18
+    }
+  },
+  "invoiceVector": {
+    "terminalIdentifier": "0x1111111111111111111111111111111111111111",
+    "timestampSeconds": 1720000000,
+    "nonce": "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "abiEncoded": "0x00000000000000000000000011111111111111111111111111111111111111110000000000000000000000000000000000000000000000000000000066851e00000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "invoiceId": "0x294d3b9eb0136d18f2a3e8aa9c10224029893c244e822a15902256d778f7f729"
+  },
+  "receiverVector": {
+    "salt": "0x87810f9819659ca2d4dd62a4e7b43c87f611148a2ea26782b9b8da39a63353ce",
+    "initCode": "0x604d80600b6000396000f3363d3d373d3d3d363d73daa292b1bf533737c5ce5d27f220273971db3bdc5af43d82803e903d91602b57fd5bf30000000000000000000000001ed67e540e6ab92dc3537a7bba3bcab6fdd69da1",
+    "initCodeBytes": 88,
+    "initCodeHash": "0x59a3a359c30137feff57a746e7430ee4aef036fe41906d52b4f60a78948a2051",
+    "receiver": "0x9107decd2cb06c57c40a663648e19cde1d52f606"
+  },
+  "amountVector": {
+    "display": "12.34",
+    "rawUnits": "12340000000000000000"
+  },
+  "readOnlyAbi": {
+    "implementation()": "0x5c60da1b",
+    "factory()": "0xc45a0155",
+    "isPaymentToken(address)": "0x930eaddc",
+    "decimals()": "0x313ce567",
+    "balanceOf(address)": "0x70a08231",
+    "computeReceiver(address,bytes32)": "0xd113e84b",
+    "Swept(address,address,bytes32,address,uint256,uint256,uint256)": "0xa2d31e9e91eac53d457463f137aa8971cf0e8a7a8f508d61528501b26b80ddce"
+  },
+  "erc681": "ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0x9107decd2cb06c57c40a663648e19cde1d52f606&uint256=12340000000000000000",
+  "mustReject": [
+    "ethereum:0x9107decd2cb06c57c40a663648e19cde1d52f606@84532?value=12340000000000000000",
+    "ethereum:0x7fFbA642bc902880a737cb1c18a4E9540879e211@84532/approve?address=0x9107decd2cb06c57c40a663648e19cde1d52f606&uint256=12340000000000000000",
+    "ethereum:0x7fFbA642bc902880a737cb1c18a4E9540879e211@84532/transfer?address=0x9107decd2cb06c57c40a663648e19cde1d52f606&uint256=0",
+    "ethereum:0x7fFbA642bc902880a737cb1c18a4E9540879e211@1/transfer?address=0x9107decd2cb06c57c40a663648e19cde1d52f606&uint256=12340000000000000000"
+  ]
+}

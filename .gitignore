@@ -1,0 +1,44 @@
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+*.xcuserstate
+**/xcuserdata/
+**/DerivedData/
+
+# Local toolchains and build caches
+.tools/
+.gradle/
+.gradle-user/
+.kotlin/
+**/.gradle/
+**/.gradle-user/
+**/.kotlin/
+**/build/
+**/.build/
+**/.swiftpm/
+android/local.properties
+android/captures/
+
+# Generated distribution artifacts
+artifacts/
+*.apk
+*.aab
+*.ipa
+
+# Environment, credentials, and signing material
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+*.cer
+*.jks
+*.keystore
+*.p12
+*.mobileprovision
+android/key.properties
+google-services.json
+ios/GoogleService-Info.plist

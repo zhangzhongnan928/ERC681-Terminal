@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Simple "OPK" terminal icon -->
+    <path
+        android:fillColor="#00D4AA"
+        android:pathData="M34,34h40v40H34z"
+        android:strokeWidth="0" />
+    <path
+        android:fillColor="#1A1A2E"
+        android:pathData="M38,38h32v32H38z" />
+    <path
+        android:fillColor="#00D4AA"
+        android:pathData="M42,48h6v2h-6z" />
+    <path
+        android:fillColor="#00D4AA"
+        android:pathData="M42,52h10v2h-10z" />
+    <path
+        android:fillColor="#00D4AA"
+        android:pathData="M42,56h8v2h-8z" />
+    <path
+        android:fillColor="#00D4AA"
+        android:pathData="M42,44l3,-3l3,3h-6z" />
+</vector>
