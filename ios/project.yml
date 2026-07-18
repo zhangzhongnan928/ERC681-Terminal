@@ -14,8 +14,15 @@ targets:
     supportedDestinations: [iOS, iPad]
     sources:
       - path: App/Sources
+      - path: App/Resources/Assets.xcassets
+      - path: App/Resources/PrivacyInfo.xcprivacy
     info:
       path: App/Resources/Info.plist
+      properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen: {}
     dependencies:
       - package: OPKTerminalSDK
         product: OPKTerminalCore
@@ -25,6 +32,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.openpasskey.terminal.ios
         PRODUCT_NAME: OPK Terminal
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
+        DEVELOPMENT_TEAM: 3272Q6WG52
         SWIFT_VERSION: 6.0
         SWIFT_STRICT_CONCURRENCY: complete
         TARGETED_DEVICE_FAMILY: "1,2"
