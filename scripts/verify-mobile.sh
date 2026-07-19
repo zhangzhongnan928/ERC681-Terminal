@@ -5,16 +5,25 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 OPK_TOOLS_ROOT=${OPK_LOCAL_TOOLS_ROOT:-"$REPO_ROOT/.tools"}
 
-echo "[1/3] Checking QR-only, keyless source boundary"
+echo "[1/4] Checking payment-QR, configuration-camera, and keyless source boundaries"
 "$SCRIPT_DIR/check-mobile-boundary.sh"
 
 if [[ -z ${JAVA_HOME:-} && -x "$OPK_TOOLS_ROOT/jdk17/Contents/Home/bin/java" ]]; then
   export JAVA_HOME="$OPK_TOOLS_ROOT/jdk17/Contents/Home"
 fi
+if [[ -z ${JAVA_HOME:-} && -x /usr/libexec/java_home ]]; then
+  DETECTED_JAVA_HOME=$(/usr/libexec/java_home -v 17 2>/dev/null || true)
+  if [[ -n "$DETECTED_JAVA_HOME" && -x "$DETECTED_JAVA_HOME/bin/java" ]]; then
+    export JAVA_HOME="$DETECTED_JAVA_HOME"
+  fi
+fi
 
 if [[ -z ${ANDROID_SDK_ROOT:-} && -z ${ANDROID_HOME:-} && -d "$OPK_TOOLS_ROOT/android-sdk" ]]; then
   export ANDROID_SDK_ROOT="$OPK_TOOLS_ROOT/android-sdk"
   export ANDROID_HOME="$OPK_TOOLS_ROOT/android-sdk"
+elif [[ -z ${ANDROID_SDK_ROOT:-} && -z ${ANDROID_HOME:-} && -d "$HOME/Library/Android/sdk" ]]; then
+  export ANDROID_SDK_ROOT="$HOME/Library/Android/sdk"
+  export ANDROID_HOME="$HOME/Library/Android/sdk"
 elif [[ -z ${ANDROID_SDK_ROOT:-} && -n ${ANDROID_HOME:-} ]]; then
   export ANDROID_SDK_ROOT="$ANDROID_HOME"
 elif [[ -z ${ANDROID_HOME:-} && -n ${ANDROID_SDK_ROOT:-} ]]; then
@@ -32,12 +41,13 @@ fi
 
 export GRADLE_USER_HOME=${OPK_GRADLE_USER_HOME:-${GRADLE_USER_HOME:-"$REPO_ROOT/android/.gradle-user"}}
 
-echo "[2/3] Testing SDK, publishing Maven artifacts, linting and assembling Android app"
+echo "[2/4] Testing SDK and app, publishing Maven artifacts, linting and assembling Android"
 (
   cd "$REPO_ROOT/android"
   ./gradlew --no-daemon \
     :erc681-sdk:test \
     :erc681-sdk:publishAllPublicationsToProjectLocalRepository \
+    :app:testDebugUnitTest \
     :app:lintDebug \
     :app:assembleDebug \
     :app:assembleRelease
@@ -52,10 +62,11 @@ if [[ -z "$OPK_SWIFT_COMMAND" || ! -x "$OPK_SWIFT_COMMAND" ]]; then
   exit 1
 fi
 
-echo "[3/3] Building Swift SDK and running shared conformance checks"
+echo "[3/4] Testing the Swift SDK and running shared conformance checks"
 (
   cd "$REPO_ROOT/ios"
   "$OPK_SWIFT_COMMAND" build
+  "$OPK_SWIFT_COMMAND" test
   "$OPK_SWIFT_COMMAND" run OPKTerminalConformance
 )
 
@@ -71,18 +82,59 @@ if [[ -z "$OPK_XCODEGEN_COMMAND" ]]; then
     fi
   done
 fi
-if [[ -n "$OPK_XCODEGEN_COMMAND" && -x "$OPK_XCODEGEN_COMMAND" ]]; then
-  echo "Regenerating the included Xcode project from project.yml"
-  (
-    cd "$REPO_ROOT/ios"
-    "$OPK_XCODEGEN_COMMAND" generate --spec project.yml
-  )
-elif [[ ! -f "$REPO_ROOT/ios/OPKTerminal.xcodeproj/project.pbxproj" ]]; then
-  echo "Generated Xcode project is missing and XcodeGen was not found." >&2
+if [[ -z "$OPK_XCODEGEN_COMMAND" || ! -x "$OPK_XCODEGEN_COMMAND" ]]; then
+  echo "XcodeGen is required to prove that the included app project matches project.yml." >&2
   echo "Install xcodegen or set OPK_XCODEGEN_BIN." >&2
   exit 1
-else
-  echo "XcodeGen not found; retained the included generated Xcode project."
 fi
+
+OPK_XCODEBUILD_COMMAND=${OPK_XCODEBUILD_BIN:-}
+if [[ -z "$OPK_XCODEBUILD_COMMAND" ]]; then
+  OPK_XCODEBUILD_COMMAND=$(command -v xcodebuild || true)
+fi
+if [[ -z "$OPK_XCODEBUILD_COMMAND" || ! -x "$OPK_XCODEBUILD_COMMAND" ]]; then
+  echo "xcodebuild and a full Xcode installation are required to compile the iOS app." >&2
+  exit 1
+fi
+
+echo "[4/4] Regenerating and compiling the iOS app"
+XCODE_PROJECT="$REPO_ROOT/ios/OPKTerminal.xcodeproj"
+PBXPROJ="$XCODE_PROJECT/project.pbxproj"
+INFO_PLIST="$REPO_ROOT/ios/App/Resources/Info.plist"
+if [[ ! -d "$XCODE_PROJECT" || ! -f "$PBXPROJ" || ! -f "$INFO_PLIST" ]]; then
+  echo "Included Xcode project or Info.plist is missing." >&2
+  exit 1
+fi
+
+hash_generated_project() {
+  (
+    cd "$REPO_ROOT/ios"
+    find OPKTerminal.xcodeproj App/Resources/Info.plist -type f -print |
+      LC_ALL=C sort |
+      while IFS= read -r generated_file; do
+        shasum -a 256 "$generated_file"
+      done |
+      shasum -a 256
+  )
+}
+
+BEFORE_PROJECT_HASH=$(hash_generated_project)
+(
+  cd "$REPO_ROOT/ios"
+  "$OPK_XCODEGEN_COMMAND" generate --spec project.yml
+)
+AFTER_PROJECT_HASH=$(hash_generated_project)
+if [[ "$BEFORE_PROJECT_HASH" != "$AFTER_PROJECT_HASH" ]]; then
+  echo "XcodeGen updated the included project. Review the generated changes, then rerun verification." >&2
+  exit 1
+fi
+
+"$OPK_XCODEBUILD_COMMAND" \
+  -project "$REPO_ROOT/ios/OPKTerminal.xcodeproj" \
+  -scheme OPKTerminalApp \
+  -destination 'generic/platform=iOS Simulator' \
+  -derivedDataPath "$REPO_ROOT/ios/build/verification-derived-data" \
+  CODE_SIGNING_ALLOWED=NO \
+  build
 
 echo "Mobile verification passed."

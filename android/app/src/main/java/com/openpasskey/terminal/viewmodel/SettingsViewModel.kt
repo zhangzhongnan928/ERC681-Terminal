@@ -37,7 +37,7 @@ class SettingsViewModel(private val chainConfig: ChainConfig) : ViewModel() {
         vaultAddress = chainConfig.vaultAddress,
         confirmationBlocks = chainConfig.confirmationBlocks.toString(),
         terminalIdentifier = chainConfig.terminalIdentifier,
-        paymentTokens = chainConfig.paymentTokens
+        paymentTokens = chainConfig.paymentTokens,
     )
 
     private fun mutate(block: (SettingsState) -> SettingsState) {
@@ -63,17 +63,23 @@ class SettingsViewModel(private val chainConfig: ChainConfig) : ViewModel() {
         chainConfig.networkName = current.networkName
         chainConfig.rpcUrl = current.rpcUrl
         chainConfig.chainId = current.chainId.toLong()
-        chainConfig.factoryAddress = EvmAddress.parse(current.factoryAddress).value
-        chainConfig.receiverImplementationAddress =
-            EvmAddress.parse(current.receiverImplementationAddress).value
-        chainConfig.vaultAddress = EvmAddress.parse(current.vaultAddress).value
+        val factoryAddress = EvmAddress.parse(current.factoryAddress).value
+        val receiverImplementationAddress = EvmAddress.parse(current.receiverImplementationAddress).value
+        val vaultAddress = EvmAddress.parse(current.vaultAddress).value
+        chainConfig.factoryAddress = factoryAddress
+        chainConfig.receiverImplementationAddress = receiverImplementationAddress
+        chainConfig.vaultAddress = vaultAddress
         chainConfig.confirmationBlocks = current.confirmationBlocks.toInt()
         _state.value = load().copy(message = "Settings saved. They will be checked on-chain before a QR is shown.")
     }
 
     fun addPaymentToken(address: String, symbol: String, decimals: Int) {
-        val validatedAddress = runCatching { EvmAddress.parse(address).value }.getOrElse {
+        val parsedAddress = runCatching { EvmAddress.parse(address) }.getOrElse {
             _state.value = _state.value.copy(message = "Invalid token address.", isError = true)
+            return
+        }
+        if (parsedAddress.isZero) {
+            _state.value = _state.value.copy(message = "Token address must not be zero.", isError = true)
             return
         }
         if (symbol.isBlank() || decimals !in 0..255) {
@@ -81,7 +87,7 @@ class SettingsViewModel(private val chainConfig: ChainConfig) : ViewModel() {
             return
         }
         chainConfig.addPaymentToken(
-            PaymentToken(validatedAddress, symbol.trim().uppercase(), decimals)
+            PaymentToken(parsedAddress.value, symbol.trim().uppercase(), decimals)
         )
         _state.value = load().copy(message = "Token added. Whitelist status is checked before payment.")
     }
@@ -113,7 +119,9 @@ class SettingsViewModel(private val chainConfig: ChainConfig) : ViewModel() {
             "vault" to state.vaultAddress
         )
         addresses.forEach { (label, value) ->
-            if (runCatching { EvmAddress.parse(value) }.isFailure) return "Invalid $label address."
+            val address = runCatching { EvmAddress.parse(value) }.getOrNull()
+                ?: return "Invalid $label address."
+            if (address.isZero) return "$label address must not be zero."
         }
         return null
     }

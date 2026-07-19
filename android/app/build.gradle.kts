@@ -78,12 +78,18 @@ dependencies {
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
 
-    // QR display only. The terminal never scans payment or configuration QR codes.
+    // QR display plus configuration-only address import. Scanned content never initiates payment.
     implementation(libs.zxing.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.mlkit.barcode.scanning)
 
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)
 
     // Local non-secret settings serialization
     implementation(libs.gson)
+
+    testImplementation(libs.junit)
 }

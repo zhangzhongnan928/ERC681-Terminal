@@ -1,6 +1,7 @@
 # ERC-681 Terminal
 
-QR-only ERC-20 payment terminal apps and reusable SDKs for Android and iOS.
+ERC-20 payment terminal apps and reusable SDKs for Android and iOS. The apps display canonical
+ERC-681 payment QR codes and can scan QR codes to import configuration addresses.
 
 The terminal creates a unique invoice, derives its receiver locally with CREATE2, presents a
 canonical ERC-681 QR code, and observes the receiver's ERC-20 balance through read-only JSON-RPC.
@@ -9,7 +10,10 @@ It does not hold or move funds.
 ## Safety boundary
 
 - ERC-20 `transfer` QR payments only
-- No NFC, contactless-card, camera, or QR-scanning capability
+- No NFC, contactless-card, customer payment-QR import, or camera-triggered payment action
+- Camera scanning is available only beside contract and token fields in Settings. It accepts one
+  non-zero EVM address, including an address-only `ethereum:` QR, and rejects payment URIs and all
+  other payloads without changing the field.
 - No wallet, private key, transaction signing, or write-RPC API
 - No sweep, payout, refund, approval, or deployment controls
 - Settlement handoff is metadata only and belongs to a separate approved operator system
@@ -43,16 +47,16 @@ deployment constants and a matching CREATE2 vector.
 
 ## Verify
 
-Requirements: JDK 17, Android SDK platform 35, and Swift 6. Full iOS app compilation additionally
-requires Xcode and an installed iOS SDK.
+Requirements: JDK 17, Android SDK platform 35, Swift 6, XcodeGen, ripgrep (`rg`), and a full Xcode
+installation with an iOS Simulator SDK.
 
 ```bash
 ./scripts/verify-mobile.sh
 ```
 
-The command runs the QR-only/keyless boundary check, Android SDK tests and Maven publication,
-Android lint plus debug/release-mode assembly, Swift package build, shared conformance checks, and
-optional Xcode project regeneration.
+The command enforces the payment-QR, Settings-only camera, and keyless boundaries; runs Android SDK
+and app tests, Maven publication, lint, and debug/release-mode assembly; runs Swift tests and shared
+conformance checks; proves the generated Xcode project is current; and compiles the iOS app.
 
 See [MOBILE_SDK.md](./MOBILE_SDK.md) for SDK examples, exact configuration, lifecycle details,
 and build outputs.

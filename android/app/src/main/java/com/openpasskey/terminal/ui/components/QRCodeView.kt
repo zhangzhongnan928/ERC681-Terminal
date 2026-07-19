@@ -27,12 +27,14 @@ import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
  *
  * @param data The string to encode in the QR code (e.g., an ERC-681 URI).
  * @param size The display size of the QR code.
+ * @param contentDescription Accessibility description for the rendered QR image.
  * @param modifier Optional Compose modifier.
  */
 @Composable
 fun QRCodeView(
     data: String,
     size: Dp = 280.dp,
+    contentDescription: String = "Payment QR code",
     modifier: Modifier = Modifier
 ) {
     val bitmap = remember(data) {
@@ -49,7 +51,7 @@ fun QRCodeView(
         if (bitmap != null) {
             Image(
                 bitmap = bitmap.asImageBitmap(),
-                contentDescription = "QR Code",
+                contentDescription = contentDescription,
                 modifier = Modifier.size(size)
             )
         } else {

@@ -1,6 +1,6 @@
 # OPK ERC-681 mobile terminal and SDK
 
-This mobile build accepts one payment rail: an ERC-20 `transfer` requested by an ERC-681 QR code. The Android and iOS apps create invoices, render the QR, and observe token balances. They do not hold a wallet or move funds.
+This mobile build accepts one payment rail: an ERC-20 `transfer` requested by an ERC-681 QR code. The Android and iOS apps create invoices, render the payment QR, and observe token balances. Their cameras can import contract and token addresses in Settings; payment QR payloads are rejected and never imported or acted on. The apps do not hold a wallet or move funds.
 
 ## Safety boundary
 
@@ -8,12 +8,23 @@ The app and SDK source is intentionally limited to:
 
 - local invoice-ID and CREATE2 receiver derivation;
 - canonical ERC-681 encoding and strict parsing;
-- QR display;
+- payment QR display;
+- camera scanning that only imports configuration addresses in the native apps;
 - read-only JSON-RPC calls for chain/configuration checks and `balanceOf` observation;
 - local invoice persistence and recovery; and
 - a data-only handoff for a separate merchant/operator settlement system.
 
-There is no NFC, contactless-card path, camera/QR scanning, private-key custody, signing, raw transaction construction, or write-RPC method. The SDK cannot call `sweepSessions`, payout, refund, deploy, approve, or transfer. Do not add a private key to an app configuration or RPC URL.
+There is no NFC, contactless-card path, customer payment-QR import or action, private-key custody, signing, raw transaction construction, or write-RPC method. Camera access belongs only to the native app settings UI and supplies text to the address field whose scan button the user selected; the reusable SDKs remain camera-free. The SDK cannot call `sweepSessions`, payout, refund, deploy, approve, or transfer. Do not add a private key to an app configuration or RPC URL.
+
+Configuration import is deliberately separate from payment parsing. It accepts exactly one
+non-zero 20-byte EVM address, either as raw `0x` hexadecimal or an address-only `ethereum:` URI.
+Chain-qualified, function, query, fragment, WalletConnect, HTTP, JSON, payment, and other payloads
+fail closed without mutating settings. A QR cannot select a different field, supply an amount or
+recipient, navigate to Payment, or invoke RPC. Camera frames are processed on-device and remain
+ephemeral: the app does not log, persist, or transmit frames or rejected payloads. Imported values
+still pass the same local and on-chain validation as manually entered settings before any payment
+QR can be created. Denying camera access, cancelling, or using a camera-less device leaves manual
+entry available.
 
 ## Canonical payment request
 
@@ -38,7 +49,7 @@ The amount in an ERC-681 URI is a wallet suggestion. The observer measures the a
 1. Validate the RPC chain, deployed code, factory/implementation link, vault/factory link, token whitelist, and token decimals.
 2. Generate `invoiceId = keccak256(abi.encode(terminalIdentifier, timestamp, nonce))`.
 3. Derive the receiver locally with the protocol's 88-byte CREATE2 init code. Do not trust an RPC response for this address.
-4. Render `erc681Uri`/`erc681URI` as a display-only QR.
+4. Render `erc681Uri`/`erc681URI` as a customer-facing payment QR. The configuration scanner rejects this payload without importing or acting on it.
 5. Poll the token's `balanceOf(receiver)` at an explicit block.
 6. Persist waiting, partial, confirming, paid, overpaid, and expired state. On foreground/restart, reload open invoices and sample them again.
 7. After a paid or overpaid observation, pass settlement metadata to the merchant's external operator system if one exists.
@@ -73,6 +84,7 @@ cd android
 ./gradlew \
   :erc681-sdk:test \
   :erc681-sdk:publishAllPublicationsToProjectLocalRepository \
+  :app:testDebugUnitTest \
   :app:lintDebug \
   :app:assembleDebug \
   :app:assembleRelease
@@ -137,7 +149,9 @@ if (observation.status == PaymentStatus.PAID) {
 ```
 
 `terminalIdentifier` is a stable, non-secret 20-byte namespace. It is address-shaped but is not a
-wallet account and has no corresponding private key.
+wallet account and has no corresponding private key. The native apps show its full value with copy
+and QR controls for support/identification, but it must never be funded: assets sent to it cannot be
+spent by the terminal.
 
 ## Swift package and iOS app
 
@@ -211,10 +225,13 @@ Build and run the dependency-free conformance executable with the installed Swif
 ```bash
 cd ios
 swift build
+swift test
 swift run OPKTerminalConformance
 ```
 
-The SwiftUI app sources are under `ios/App/`. `ios/OPKTerminal.xcodeproj` is included and was generated from `ios/project.yml` with XcodeGen 2.46.0. Regenerate it after changing the spec, then build with a full Xcode installation:
+The SwiftUI app sources are under `ios/App/`. `ios/OPKTerminal.xcodeproj` is included and generated
+from `ios/project.yml` with XcodeGen. Regenerate it after changing app sources or the spec, then
+build with a full Xcode installation:
 
 ```bash
 cd ios
@@ -226,7 +243,12 @@ xcodebuild \
   build
 ```
 
-A full Xcode installation with an iOS Simulator SDK is required for the sample app build and XCTest run. Select it with `xcode-select` before running `xcodebuild`. Swift package checks only require a compatible Swift toolchain and do not need a signing identity.
+A full Xcode installation with an iOS Simulator SDK is required for the sample app build and XCTest
+run. Select it with `xcode-select` before running `xcodebuild`. Swift package checks only require a
+compatible Swift toolchain and do not need a signing identity. Simulator compilation proves the
+scanner code links; a runtime Simulator pass can exercise the UI and camera-unavailable fallback.
+Camera grant/deny and successful scanning must also be tested on a physical iPhone or iPad before
+release.
 
 ## Settlement handoff
 
@@ -242,13 +264,13 @@ From the repository root:
 ./scripts/verify-mobile.sh
 ```
 
-The script runs the mobile boundary guard, Android SDK tests/Maven publication/app lint, debug
-assembly, and unsigned release-mode assembly, then Swift build and the conformance executable. It
-also regenerates the included Xcode project when `xcodegen` or `OPK_XCODEGEN_BIN` is available. It
-respects `JAVA_HOME`, `ANDROID_HOME`/`ANDROID_SDK_ROOT`, and `GRADLE_USER_HOME`. If they are unset,
+The script runs the mobile boundary guard, Android SDK/app tests, Maven publication, app lint, debug
+assembly, and unsigned release-mode assembly, then Swift build/tests and the conformance executable.
+It requires XcodeGen, proves the included project and Info.plist are current, and compiles the iOS
+app for Simulator. It respects `JAVA_HOME`, `ANDROID_HOME`/`ANDROID_SDK_ROOT`, and `GRADLE_USER_HOME`. If they are unset,
 it checks the repository-local `.tools/jdk17` and `.tools/android-sdk` directories.
-`OPK_LOCAL_TOOLS_ROOT`, `OPK_GRADLE_USER_HOME`, `OPK_SWIFT_BIN`, and `OPK_XCODEGEN_BIN` override
-those local paths without changing system installations.
+`OPK_LOCAL_TOOLS_ROOT`, `OPK_GRADLE_USER_HOME`, `OPK_SWIFT_BIN`, `OPK_XCODEGEN_BIN`, and
+`OPK_XCODEBUILD_BIN` override those local paths without changing system installations.
 
 The shared language-neutral vectors live in `conformance/opk-erc681-v1.json`. Keep Android and
 Swift output pinned to that file when changing invoice derivation, CREATE2, amount conversion, or

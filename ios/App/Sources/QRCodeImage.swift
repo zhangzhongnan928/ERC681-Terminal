@@ -5,6 +5,8 @@ import SwiftUI
 struct QRCodeImage: View {
     let payload: String
     var size: CGFloat = 280
+    var accessibilityLabel = "ERC-681 payment QR code"
+    var failureDescription = "Copy the payment URI instead."
 
     @Environment(\.displayScale) private var displayScale
 
@@ -19,14 +21,14 @@ struct QRCodeImage: View {
                 ContentUnavailableView(
                     "QR unavailable",
                     systemImage: "qrcode",
-                    description: Text("Copy the payment URI instead.")
+                    description: Text(failureDescription)
                 )
             }
         }
         .frame(width: size, height: size)
         .padding(12)
         .background(Color.white, in: RoundedRectangle(cornerRadius: 16))
-        .accessibilityLabel("ERC-681 payment QR code")
+        .accessibilityLabel(accessibilityLabel)
     }
 
     private func render() -> CGImage? {
