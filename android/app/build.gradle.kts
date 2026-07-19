@@ -60,6 +60,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.biometric)
 
     // Compose
     implementation(platform(libs.androidx.compose.bom))
@@ -90,6 +91,9 @@ dependencies {
 
     // Local non-secret settings serialization
     implementation(libs.gson)
+
+    // App-layer operator wallet and settlement transaction signing. The reusable SDK remains read-only.
+    implementation(libs.web3j.core)
 
     testImplementation(libs.junit)
 }

@@ -23,6 +23,7 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         ITSAppUsesNonExemptEncryption: false
         NSCameraUsageDescription: Import contract and token addresses from Settings QR codes. Payment QR payloads are rejected and not imported.
+        NSFaceIDUsageDescription: Authenticate access to the device-local settlement operator key before signing a sweep transaction.
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -39,6 +40,8 @@ targets:
         product: OPKTerminalCore
       - package: OPKTerminalSDK
         product: OPKTerminalRPC
+      - package: OPKTerminalSDK
+        product: OPKTerminalOperator
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.openpasskey.terminal.ios

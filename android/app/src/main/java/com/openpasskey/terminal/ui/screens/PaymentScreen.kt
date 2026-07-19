@@ -144,6 +144,11 @@ private fun StatusCard(invoice: Invoice) {
         InvoiceStatus.CONFIRMING -> "Confirming" to "Amount received; waiting for confirmation blocks"
         InvoiceStatus.PAID -> "Paid" to "Expected amount confirmed"
         InvoiceStatus.OVERPAID -> "Overpaid" to "More than the requested amount was confirmed"
+        InvoiceStatus.PARTIALLY_SETTLED -> "Partially settled" to
+            "A sweep moved less than expected; operator review is required"
+        InvoiceStatus.SETTLED -> "Settled" to "A confirmed receipt proves the funds were swept"
+        InvoiceStatus.SETTLEMENT_REVIEW_REQUIRED -> "Settlement review" to
+            "Receipt evidence is missing or ambiguous; do not assume funds were swept"
         InvoiceStatus.EXPIRED -> "Closed" to "This invoice was closed locally"
     }
     Card(modifier = Modifier.fillMaxWidth()) {

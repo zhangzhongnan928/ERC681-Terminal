@@ -8,7 +8,7 @@ struct OPKTerminalApp: App {
     @StateObject private var model: AppModel
 
     init() {
-        let container = try! ModelContainer(for: StoredInvoice.self)
+        let container = try! ModelContainer(for: StoredInvoice.self, StoredSettlement.self)
         self.container = container
         _model = StateObject(wrappedValue: AppModel(container: container))
     }
@@ -19,7 +19,11 @@ struct OPKTerminalApp: App {
                 .environmentObject(model)
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else { return }
-                    Task { await model.reconcileForegroundInvoices() }
+                    Task {
+                        await model.reconcileForegroundInvoices()
+                        await model.reconcileSettlements()
+                        await model.refreshOperatorStatus()
+                    }
                 }
         }
         .modelContainer(container)

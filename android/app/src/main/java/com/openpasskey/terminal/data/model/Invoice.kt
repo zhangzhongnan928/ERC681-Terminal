@@ -26,8 +26,9 @@ data class Invoice(
     val firstDetectedBlock: Long? = null,
     val lastObservedBlock: Long? = null,
     val confirmedAtBlock: Long? = null,
-    // Kept for the non-destructive v1 -> v2 database migration. QR-only code never writes it.
-    val settledTxHash: String? = null
+    val settledTxHash: String? = null,
+    val settlementId: String? = null,
+    val settledAtBlock: Long? = null
 )
 
 enum class InvoiceStatus {
@@ -36,5 +37,8 @@ enum class InvoiceStatus {
     CONFIRMING,
     PAID,
     OVERPAID,
+    PARTIALLY_SETTLED,
+    SETTLED,
+    SETTLEMENT_REVIEW_REQUIRED,
     EXPIRED
 }

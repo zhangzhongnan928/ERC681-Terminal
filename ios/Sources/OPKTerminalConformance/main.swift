@@ -32,7 +32,8 @@ private func requireThrows(_ message: String, _ operation: () throws -> Void) th
 
 private struct ConformanceFixture: Decodable {
     let schemaVersion: Int
-    let protocolVersion: String
+    let paymentVectorVersion: String
+    let deploymentProtocolVersion: String
     let configuration: Configuration
     let invoiceVector: InvoiceVector
     let receiverVector: ReceiverVector
@@ -204,8 +205,12 @@ private struct OPKTerminalConformanceMain {
     }
 
     private static func coreVectors(_ fixture: ConformanceFixture) throws {
-        try require(fixture.schemaVersion == 1, "fixture schema version")
-        try require(fixture.protocolVersion == "1.5", "fixture protocol version")
+        try require(fixture.schemaVersion == 2, "fixture schema version")
+        try require(fixture.paymentVectorVersion == "1.5", "payment vector version")
+        try require(
+            fixture.deploymentProtocolVersion == "1.4.1",
+            "deployment protocol version"
+        )
         try require(
             Keccak256.hash(Data()).hex ==
                 "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",

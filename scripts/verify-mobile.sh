@@ -5,7 +5,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 OPK_TOOLS_ROOT=${OPK_LOCAL_TOOLS_ROOT:-"$REPO_ROOT/.tools"}
 
-echo "[1/4] Checking payment-QR, configuration-camera, and keyless source boundaries"
+echo "[1/4] Checking payment-QR, configuration-camera, read-only SDK, and constrained-operator boundaries"
 "$SCRIPT_DIR/check-mobile-boundary.sh"
 
 if [[ -z ${JAVA_HOME:-} && -x "$OPK_TOOLS_ROOT/jdk17/Contents/Home/bin/java" ]]; then
@@ -134,6 +134,7 @@ fi
   -scheme OPKTerminalApp \
   -destination 'generic/platform=iOS Simulator' \
   -derivedDataPath "$REPO_ROOT/ios/build/verification-derived-data" \
+  -skipPackagePluginValidation \
   CODE_SIGNING_ALLOWED=NO \
   build
 

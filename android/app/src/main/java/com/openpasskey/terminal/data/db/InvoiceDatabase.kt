@@ -7,10 +7,18 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.openpasskey.terminal.data.model.Invoice
+import com.openpasskey.terminal.data.model.SettlementEvent
+import com.openpasskey.terminal.data.model.SettlementTransaction
 
-@Database(entities = [Invoice::class], version = 2, exportSchema = false)
+@Database(
+    entities = [Invoice::class, SettlementTransaction::class, SettlementEvent::class],
+    version = 3,
+    exportSchema = false
+)
 abstract class InvoiceDatabase : RoomDatabase() {
     abstract fun invoiceDao(): InvoiceDao
+    abstract fun settlementDao(): SettlementDao
+    abstract fun settlementEventDao(): SettlementEventDao
 
     companion object {
         @Volatile private var INSTANCE: InvoiceDatabase? = null
@@ -31,7 +39,93 @@ abstract class InvoiceDatabase : RoomDatabase() {
                 database.execSQL("ALTER TABLE invoices ADD COLUMN lastObservedBlock INTEGER")
                 database.execSQL("ALTER TABLE invoices ADD COLUMN confirmedAtBlock INTEGER")
                 database.execSQL("UPDATE invoices SET status = 'WAITING' WHERE status = 'PRESENTED'")
-                database.execSQL("UPDATE invoices SET status = 'PAID' WHERE status IN ('FUNDED', 'SETTLED')")
+                database.execSQL("UPDATE invoices SET status = 'PAID' WHERE status = 'FUNDED'")
+                // Legacy SETTLED had no canonical receipt/event ledger. Never upgrade it to proof.
+                database.execSQL(
+                    "UPDATE invoices SET status = 'SETTLEMENT_REVIEW_REQUIRED' WHERE status = 'SETTLED'"
+                )
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE invoices ADD COLUMN settlementId TEXT")
+                database.execSQL("ALTER TABLE invoices ADD COLUMN settledAtBlock INTEGER")
+                // v1 used SETTLED without durable receipt evidence. Do not trust the old tx hash.
+                database.execSQL(
+                    "UPDATE invoices SET status = 'SETTLEMENT_REVIEW_REQUIRED' " +
+                        "WHERE settledTxHash IS NOT NULL"
+                )
+                database.execSQL(
+                    """CREATE TABLE IF NOT EXISTS settlement_transactions (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        chainId INTEGER NOT NULL,
+                        networkName TEXT NOT NULL,
+                        rpcUrl TEXT NOT NULL,
+                        vaultAddress TEXT NOT NULL,
+                        tokenAddress TEXT NOT NULL,
+                        tokenSymbol TEXT NOT NULL,
+                        operatorAddress TEXT NOT NULL,
+                        invoiceIdsJson TEXT NOT NULL,
+                        expectedAmountsJson TEXT NOT NULL,
+                        receiverAddressesJson TEXT NOT NULL,
+                        requiredConfirmations INTEGER NOT NULL,
+                        callData TEXT NOT NULL,
+                        nonce TEXT NOT NULL,
+                        gasLimit TEXT NOT NULL,
+                        feeMode TEXT NOT NULL,
+                        gasPrice TEXT,
+                        maxPriorityFeePerGas TEXT,
+                        maxFeePerGas TEXT,
+                        maxGasCostWei TEXT NOT NULL,
+                        feeReserveWei TEXT NOT NULL,
+                        requiredBalanceWei TEXT NOT NULL,
+                        txHash TEXT NOT NULL,
+                        signedRawTransaction TEXT,
+                        status TEXT NOT NULL,
+                        verifiedInvoiceIdsJson TEXT NOT NULL,
+                        verifiedEventsJson TEXT NOT NULL,
+                        receiptBlock INTEGER,
+                        error TEXT,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )""".trimIndent()
+                )
+                database.execSQL(
+                    """CREATE TABLE IF NOT EXISTS settlement_events (
+                        eventId TEXT NOT NULL PRIMARY KEY,
+                        settlementId TEXT NOT NULL,
+                        invoiceId TEXT NOT NULL,
+                        chainId INTEGER NOT NULL,
+                        transactionHash TEXT NOT NULL,
+                        blockHash TEXT NOT NULL,
+                        blockNumber INTEGER NOT NULL,
+                        logIndex INTEGER NOT NULL,
+                        receiverAddress TEXT NOT NULL,
+                        vaultAddress TEXT NOT NULL,
+                        tokenAddress TEXT NOT NULL,
+                        sweptAmount TEXT NOT NULL,
+                        expectedAmount TEXT NOT NULL,
+                        feeAmount TEXT NOT NULL,
+                        recordedAt INTEGER NOT NULL
+                    )""".trimIndent()
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_settlement_events_settlementId " +
+                        "ON settlement_events (settlementId)"
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_settlement_events_invoiceId " +
+                        "ON settlement_events (invoiceId)"
+                )
+                database.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_settlement_events_chainId_transactionHash_logIndex " +
+                        "ON settlement_events (chainId, transactionHash, logIndex)"
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_settlement_events_chainId_vaultAddress_invoiceId_tokenAddress " +
+                        "ON settlement_events (chainId, vaultAddress, invoiceId, tokenAddress)"
+                )
             }
         }
 
@@ -40,7 +134,7 @@ abstract class InvoiceDatabase : RoomDatabase() {
                 context.applicationContext,
                 InvoiceDatabase::class.java,
                 "opk_terminal_invoices.db"
-            ).addMigrations(MIGRATION_1_2).build().also { INSTANCE = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { INSTANCE = it }
         }
     }
 }

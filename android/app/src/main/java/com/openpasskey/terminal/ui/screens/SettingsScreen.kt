@@ -15,6 +15,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.AlertDialog
@@ -44,15 +46,22 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.fragment.app.FragmentActivity
 import com.openpasskey.terminal.ui.components.AddressScannerDialog
+import com.openpasskey.terminal.ui.components.DeviceAuthentication
 import com.openpasskey.terminal.ui.components.QRCodeView
 import com.openpasskey.terminal.viewmodel.SettingsViewModel
+import com.openpasskey.terminal.wallet.OperatorWalletAvailability
+import java.math.BigDecimal
+import java.math.BigInteger
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(viewModel: SettingsViewModel) {
     val state by viewModel.state.collectAsState()
     var showTokenDialog by remember { mutableStateOf(false) }
+    var showWalletCreationDialog by remember { mutableStateOf(false) }
+    val activity = LocalContext.current as? FragmentActivity
 
     if (showTokenDialog) {
         AddTokenDialog(
@@ -64,15 +73,49 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
         )
     }
 
+    if (showWalletCreationDialog) {
+        AlertDialog(
+            onDismissRequest = { showWalletCreationDialog = false },
+            title = { Text("Create settlement operator?") },
+            text = {
+                Text(
+                    "This creates a new secp256k1 wallet protected by Android Keystore and device authentication. " +
+                        "Record and authorize the displayed address on the vault. The old terminal identifier is never used as a key."
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showWalletCreationDialog = false
+                    if (viewModel.prepareWalletCreation()) {
+                        if (activity == null) {
+                            viewModel.authenticationFailed("System authentication is unavailable")
+                        } else {
+                            DeviceAuthentication.authenticate(
+                                activity,
+                                "Create operator wallet",
+                                "Authenticate to protect the new private key",
+                                viewModel::createWalletAuthenticated,
+                                viewModel::authenticationFailed
+                            )
+                        }
+                    }
+                }) { Text("Authenticate & create") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showWalletCreationDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     Scaffold(topBar = { TopAppBar(title = { Text("Terminal Settings") }) }) { padding ->
         LazyColumn(
             modifier = Modifier.padding(padding).padding(horizontal = 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
-                Text("Payment QR display-only terminal", style = MaterialTheme.typography.titleMedium)
+                Text("Payment and settlement terminal", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "This app stores no wallet key and cannot sign, broadcast, sweep, or settle transactions.",
+                    "Payment observation remains read-only. A separate, encrypted operator wallet can sign only reviewed sweepSessions transactions.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -101,6 +144,22 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                     state.confirmationBlocks,
                     viewModel::updateConfirmationBlocks,
                     KeyboardType.Number,
+                )
+            }
+            item {
+                OperatorWalletCard(
+                    availability = state.operatorWalletAvailability,
+                    address = state.operatorWalletAddress,
+                    chainId = state.operatorNetworkChainId.takeIf { it > 0 },
+                    balanceWei = state.operatorBalanceWei,
+                    authorized = state.operatorAuthorized,
+                    activated = state.operatorActivated,
+                    hardwareBacked = state.walletHardwareBacked,
+                    strongBoxBacked = state.walletStrongBoxBacked,
+                    deviceAuthenticationRequired = state.walletDeviceAuthenticationRequired,
+                    refreshing = state.refreshingOperator,
+                    onCreate = { showWalletCreationDialog = true },
+                    onRefresh = viewModel::refreshOperatorStatus
                 )
             }
             item { TerminalIdentifierCard(state.terminalIdentifier) }
@@ -160,6 +219,106 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
         }
     }
 }
+
+@Composable
+private fun OperatorWalletCard(
+    availability: OperatorWalletAvailability,
+    address: String?,
+    chainId: Long?,
+    balanceWei: String?,
+    authorized: Boolean?,
+    activated: Boolean,
+    hardwareBacked: Boolean,
+    strongBoxBacked: Boolean,
+    deviceAuthenticationRequired: Boolean,
+    refreshing: Boolean,
+    onCreate: () -> Unit,
+    onRefresh: () -> Unit
+) {
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Settlement operator wallet", style = MaterialTheme.typography.titleMedium)
+            when (availability) {
+                OperatorWalletAvailability.NOT_CREATED -> {
+                    Text(
+                        "No operator key exists. Create one only when the merchant is ready to fund gas and authorize it on the configured vault."
+                    )
+                    Button(onClick = onCreate, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Default.Security, contentDescription = null)
+                        Text(" Create protected wallet")
+                    }
+                }
+                OperatorWalletAvailability.UNAVAILABLE -> {
+                    Text(
+                        "The stored operator cannot be used safely. Revoke its address on the vault before replacing the app or wallet.",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    address?.let { Text(it, fontFamily = FontFamily.Monospace) }
+                }
+                OperatorWalletAvailability.READY -> {
+                    val walletAddress = requireNotNull(address)
+                    SelectionContainer {
+                        Text(walletAddress, fontFamily = FontFamily.Monospace)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = {
+                            clipboard.setText(AnnotatedString(walletAddress))
+                            Toast.makeText(context, "Operator address copied", Toast.LENGTH_SHORT).show()
+                        }) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = null)
+                            Text(" Copy full address")
+                        }
+                        IconButton(onClick = onRefresh, enabled = !refreshing) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Refresh operator status")
+                        }
+                    }
+                    QRCodeView(
+                        data = chainId?.let { "ethereum:$walletAddress@$it" } ?: walletAddress,
+                        size = 180.dp,
+                        contentDescription = "Chain-qualified settlement operator funding QR code",
+                        modifier = Modifier.align(Alignment.CenterHorizontally)
+                    )
+                    Text(
+                        "The QR is address-only${chainId?.let { " for chain $it" } ?: ""}. Fund this address with native gas only. " +
+                            "ERC-20 payment funds go to one-time invoice receivers.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    val balance = balanceWei?.let(::formatNativeBalance) ?: "Not checked"
+                    Text("Native balance: $balance")
+                    if (balanceWei?.let { BigInteger(it) < MINIMUM_GAS_RESERVE_WEI } == true) {
+                        Text(
+                            "LOW GAS — add native currency before settlement. Exact gas plus safety/L1 reserve is checked again before signing.",
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    Text(
+                        when (authorized) {
+                            true -> "Vault authorization: authorized (owner or operator)"
+                            false -> "Vault authorization: NOT AUTHORIZED"
+                            null -> "Vault authorization: not checked"
+                        },
+                        color = if (authorized == false) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurface
+                    )
+                    Text("Invoice namespace: ${if (activated) "active for this chain/vault" else "legacy identifier until authorization"}")
+                    Text(
+                        "Key protection: ${if (strongBoxBacked) "StrongBox" else if (hardwareBacked) "hardware-backed Keystore" else "Keystore"}; " +
+                            if (deviceAuthenticationRequired) "device authentication required" else "authentication unavailable",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun formatNativeBalance(wei: String): String = runCatching {
+    BigDecimal(wei).movePointLeft(18).stripTrailingZeros().toPlainString() + " native"
+}.getOrDefault("Unknown")
+
+private val MINIMUM_GAS_RESERVE_WEI = BigInteger("100000000000000")
 
 @Composable
 private fun SettingField(

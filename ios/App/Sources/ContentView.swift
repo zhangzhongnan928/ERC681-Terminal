@@ -12,6 +12,8 @@ struct ContentView: View {
                 .tabItem { Label("Sale", systemImage: "qrcode") }
             HistoryView()
                 .tabItem { Label("History", systemImage: "clock.arrow.circlepath") }
+            SettlementView()
+                .tabItem { Label("Settle", systemImage: "arrow.triangle.2.circlepath") }
             SettingsView()
                 .tabItem { Label("Settings", systemImage: "gearshape") }
         }
@@ -70,7 +72,7 @@ private struct NewSaleView: View {
                         Label(model.validationMessage, systemImage: "checkmark.shield")
                             .foregroundStyle(.secondary)
                     } footer: {
-                        Text("The app validates chain contracts before presenting a QR. It never holds a key or submits a transaction.")
+                        Text("Payment QR creation never accesses the settlement key. Sweep transactions are simulated, shown for confirmation, and signed only after explicit device authentication in the Settle tab.")
                     }
                 }
                 .navigationTitle("New Sale")

@@ -5,6 +5,7 @@ import UIKit
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var didCopyIdentifier = false
+    @State private var didCopyOperator = false
 
     var body: some View {
         NavigationStack {
@@ -33,9 +34,9 @@ struct SettingsView: View {
                         .keyboardType(.numberPad)
                 }
 
-                Section("Terminal") {
+                Section("Legacy terminal identifier") {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Identifier")
+                        Text("Legacy identifier")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
@@ -64,13 +65,122 @@ struct SettingsView: View {
                         .frame(maxWidth: .infinity)
 
                         Label {
-                            Text("Identifier only — do not send funds to this address. It is not a wallet, payment receiver, or signing key.")
+                            Text("Identifier only — do not send funds here. It has no private key. Existing invoices keep this namespace; after the operator wallet is activated, new invoices use the operator address without changing historical invoices.")
                         } icon: {
                             Image(systemName: "exclamationmark.triangle.fill")
                         }
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                Section("Settlement operator wallet") {
+                    if let address = model.operatorAddress {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Device EOA")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            Text(address.hex)
+                                .font(.system(.footnote, design: .monospaced))
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            Button {
+                                UIPasteboard.general.string = address.hex
+                                didCopyOperator = true
+                            } label: {
+                                Label(
+                                    didCopyOperator ? "Wallet address copied" : "Copy wallet address",
+                                    systemImage: didCopyOperator ? "checkmark" : "doc.on.doc"
+                                )
+                            }
+                            .buttonStyle(.bordered)
+
+                            QRCodeImage(
+                                payload: UInt64(model.settings.chainID).flatMap { chainID in
+                                    chainID > 0 ? "ethereum:\(address.hex)@\(chainID)" : nil
+                                } ?? address.hex,
+                                size: 210,
+                                accessibilityLabel: "Settlement operator wallet QR code",
+                                failureDescription: "Copy the wallet address instead."
+                            )
+                            .frame(maxWidth: .infinity)
+
+                            if let activation = model.operatorActivation,
+                               activation.address.lowercased() == address.hex.lowercased(),
+                               activation.chainID == UInt64(model.settings.chainID),
+                               activation.vault.lowercased() == model.settings.vault.lowercased() {
+                                Label(
+                                    "Invoice namespace activated for chain \(activation.chainID) and vault \(abbreviatedSettings(activation.vault))",
+                                    systemImage: "link.circle.fill"
+                                )
+                                .font(.footnote)
+                                .foregroundStyle(.green)
+                            } else {
+                                Label(
+                                    "Legacy identifier remains active for new invoices until this wallet is verified as owner/operator for the current chain and vault.",
+                                    systemImage: "link.badge.plus"
+                                )
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            }
+
+                            if let status = model.operatorStatus {
+                                LabeledContent(
+                                    "ETH balance",
+                                    value: "\(TokenAmount(rawValue: status.balance, decimals: 18).displayString()) ETH"
+                                )
+                                Label(
+                                    status.isAuthorizedOperator
+                                        ? (status.isVaultOwner ? "Authorized as vault owner" : "Authorized vault operator")
+                                        : "Not authorized by the configured vault",
+                                    systemImage: status.isAuthorizedOperator
+                                        ? "checkmark.shield.fill"
+                                        : "xmark.shield.fill"
+                                )
+                                .foregroundStyle(status.isAuthorizedOperator ? .green : .red)
+
+                                if status.isLowGas {
+                                    Label(
+                                        "Low gas balance — fund this address with ETH before settling.",
+                                        systemImage: "fuelpump.fill"
+                                    )
+                                    .foregroundStyle(.orange)
+                                }
+                            } else if let message = model.operatorStatusMessage {
+                                Text(message)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Button {
+                                Task { await model.refreshOperatorStatus() }
+                            } label: {
+                                Label("Refresh balance and authorization", systemImage: "arrow.clockwise")
+                            }
+                            .disabled(model.settlementBusy)
+
+                            Text("Send ETH for gas to this operator address, not to the legacy identifier. Its secp256k1 private key is non-syncing Keychain data and every settlement signature requires device authentication.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Create a new, separate secp256k1 wallet for zero-value sweep transactions. The existing random identifier is never interpreted as a key.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+
+                            Button {
+                                Task { await model.createOperatorWallet() }
+                            } label: {
+                                Label("Create operator wallet", systemImage: "key.fill")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.settlementBusy)
+                        }
                     }
                 }
 
@@ -88,6 +198,11 @@ struct SettingsView: View {
             .navigationTitle("Settings")
         }
     }
+}
+
+private func abbreviatedSettings(_ value: String) -> String {
+    guard value.count > 18 else { return value }
+    return "\(value.prefix(10))…\(value.suffix(6))"
 }
 
 private struct AddressField: View {

@@ -15,6 +15,7 @@ import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.data.db.InvoiceDao
 import com.openpasskey.terminal.data.model.Invoice
 import com.openpasskey.terminal.data.model.InvoiceStatus
+import com.openpasskey.terminal.wallet.OperatorWalletStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -29,7 +30,8 @@ import java.math.BigInteger
 /** Application persistence around the SDK's keyless, read-only payment API. */
 class InvoiceRepository(
     private val invoiceDao: InvoiceDao,
-    private val chainConfig: ChainConfig
+    private val chainConfig: ChainConfig,
+    private val operatorWalletStore: OperatorWalletStore
 ) {
     suspend fun createInvoice(displayAmount: String, token: PaymentToken): Invoice =
         withContext(Dispatchers.IO) {
@@ -46,7 +48,14 @@ class InvoiceRepository(
                 network = network,
                 token = tokenAddress,
                 amount = amount,
-                terminalIdentifier = EvmAddress.parse(settings.terminalIdentifier)
+                // Existing invoices retain their CREATE2 snapshot. Only newly created invoices use
+                // the operator address after that exact chain/vault activation has been verified.
+                terminalIdentifier = EvmAddress.parse(
+                    operatorWalletStore.activatedInvoiceIdentifier(
+                        settings.chainId,
+                        settings.vaultAddress
+                    ) ?: settings.terminalIdentifier
+                )
             )
             val receiver = protocolInvoice.request.receiver
             require(rpc.codeAt(receiver).isEmpty()) {
@@ -175,6 +184,9 @@ class InvoiceRepository(
             InvoiceStatus.PARTIAL -> PaymentStatus.PARTIALLY_FUNDED
             InvoiceStatus.CONFIRMING -> PaymentStatus.CONFIRMING
             InvoiceStatus.PAID, InvoiceStatus.OVERPAID -> PaymentStatus.PAID
+            InvoiceStatus.PARTIALLY_SETTLED,
+            InvoiceStatus.SETTLED,
+            InvoiceStatus.SETTLEMENT_REVIEW_REQUIRED,
             InvoiceStatus.EXPIRED -> return null
         }
         return PaymentObservation(

@@ -2,43 +2,83 @@ package com.openpasskey.terminal.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.terminal.chain.ChainConfig
 import com.openpasskey.terminal.chain.PaymentToken
+import com.openpasskey.terminal.settlement.SettlementChainClient
+import com.openpasskey.terminal.settlement.Web3jSettlementChainClient
+import com.openpasskey.terminal.wallet.OperatorWalletAvailability
+import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
+import com.openpasskey.terminal.wallet.OperatorWalletStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.math.BigInteger
 import java.net.URI
 
 data class SettingsState(
     val networkName: String = "",
     val rpcUrl: String = "",
     val chainId: String = "",
+    val operatorNetworkChainId: Long = 0,
     val factoryAddress: String = "",
     val receiverImplementationAddress: String = "",
     val vaultAddress: String = "",
     val confirmationBlocks: String = "",
     val terminalIdentifier: String = "",
     val paymentTokens: List<PaymentToken> = emptyList(),
+    val operatorWalletAvailability: OperatorWalletAvailability = OperatorWalletAvailability.NOT_CREATED,
+    val operatorWalletAddress: String? = null,
+    val operatorBalanceWei: String? = null,
+    val operatorAuthorized: Boolean? = null,
+    val operatorActivated: Boolean = false,
+    val walletHardwareBacked: Boolean = false,
+    val walletStrongBoxBacked: Boolean = false,
+    val walletDeviceAuthenticationRequired: Boolean = false,
+    val refreshingOperator: Boolean = false,
     val message: String? = null,
     val isError: Boolean = false
 )
 
-class SettingsViewModel(private val chainConfig: ChainConfig) : ViewModel() {
+class SettingsViewModel(
+    private val chainConfig: ChainConfig,
+    private val walletStore: OperatorWalletStore,
+    private val clientFactory: (String) -> SettlementChainClient = ::Web3jSettlementChainClient
+) : ViewModel() {
     private val _state = MutableStateFlow(load())
     val state: StateFlow<SettingsState> = _state.asStateFlow()
 
-    private fun load() = SettingsState(
+    init {
+        refreshOperatorStatus()
+    }
+
+    private fun load(message: String? = null, isError: Boolean = false): SettingsState {
+        val wallet = walletStore.snapshot()
+        return SettingsState(
         networkName = chainConfig.networkName,
         rpcUrl = chainConfig.rpcUrl,
         chainId = chainConfig.chainId.toString(),
+        operatorNetworkChainId = chainConfig.chainId,
         factoryAddress = chainConfig.factoryAddress,
         receiverImplementationAddress = chainConfig.receiverImplementationAddress,
         vaultAddress = chainConfig.vaultAddress,
         confirmationBlocks = chainConfig.confirmationBlocks.toString(),
         terminalIdentifier = chainConfig.terminalIdentifier,
         paymentTokens = chainConfig.paymentTokens,
-    )
+        operatorWalletAvailability = wallet.availability,
+        operatorWalletAddress = wallet.address,
+        operatorActivated = wallet.isActivatedFor(chainConfig.chainId, chainConfig.vaultAddress),
+        walletHardwareBacked = wallet.hardwareBacked,
+        walletStrongBoxBacked = wallet.strongBoxBacked,
+        walletDeviceAuthenticationRequired = wallet.deviceAuthenticationRequired,
+        message = message ?: wallet.error,
+        isError = isError || wallet.availability == OperatorWalletAvailability.UNAVAILABLE
+        )
+    }
 
     private fun mutate(block: (SettingsState) -> SettingsState) {
         _state.value = block(_state.value).copy(message = null, isError = false)
@@ -71,6 +111,7 @@ class SettingsViewModel(private val chainConfig: ChainConfig) : ViewModel() {
         chainConfig.vaultAddress = vaultAddress
         chainConfig.confirmationBlocks = current.confirmationBlocks.toInt()
         _state.value = load().copy(message = "Settings saved. They will be checked on-chain before a QR is shown.")
+        refreshOperatorStatus()
     }
 
     fun addPaymentToken(address: String, symbol: String, decimals: Int) {
@@ -96,6 +137,95 @@ class SettingsViewModel(private val chainConfig: ChainConfig) : ViewModel() {
         chainConfig.removePaymentToken(address)
         _state.value = load().copy(message = "Token removed.")
     }
+
+    /** Returns true when the UI should immediately present the OS authentication prompt. */
+    fun prepareWalletCreation(): Boolean = try {
+        walletStore.prepareWalletCreation()
+        _state.value = _state.value.copy(
+            message = "Authenticate to encrypt the new operator key.",
+            isError = false
+        )
+        true
+    } catch (error: Exception) {
+        _state.value = _state.value.copy(message = error.message, isError = true)
+        false
+    }
+
+    /** Called only after a successful biometric/device-credential prompt. */
+    fun createWalletAuthenticated() {
+        viewModelScope.launch {
+            try {
+                val wallet = withContext(Dispatchers.IO) { walletStore.createWallet() }
+                _state.value = load(
+                    "Operator wallet ${wallet.address} created. Fund it with native gas, then authorize it on the vault."
+                )
+                refreshOperatorStatus()
+            } catch (error: Exception) {
+                _state.value = load(error.message ?: "Unable to create operator wallet", isError = true)
+            }
+        }
+    }
+
+    fun authenticationFailed(message: String) {
+        _state.value = _state.value.copy(message = "Authentication failed: $message", isError = true)
+    }
+
+    fun refreshOperatorStatus() {
+        val wallet = walletStore.snapshot()
+        val address = wallet.address
+        if (wallet.availability != OperatorWalletAvailability.READY || address == null) {
+            _state.value = load()
+            return
+        }
+        val snapshot = chainConfig.snapshot()
+        _state.value = _state.value.copy(refreshingOperator = true, message = null, isError = false)
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    clientFactory(snapshot.rpcUrl).use { client ->
+                        require(client.chainId() == snapshot.chainId) { "RPC chain ID mismatch" }
+                        val owner = runCatching { client.owner(snapshot.vaultAddress) }
+                        val listed = runCatching {
+                            client.isOperator(snapshot.vaultAddress, address)
+                        }
+                        val authorized = owner.getOrNull()?.equals(address, true) == true ||
+                            listed.getOrNull() == true
+                        Triple(client.nativeBalance(address), authorized, owner.exceptionOrNull() ?: listed.exceptionOrNull())
+                    }
+                }
+                if (result.second) {
+                    walletStore.activateInvoiceNamespace(snapshot.chainId, snapshot.vaultAddress)
+                }
+                val refreshedWallet = walletStore.snapshot()
+                _state.value = _state.value.copy(
+                    operatorWalletAvailability = refreshedWallet.availability,
+                    operatorWalletAddress = refreshedWallet.address,
+                    operatorActivated = refreshedWallet.isActivatedFor(
+                        snapshot.chainId,
+                        snapshot.vaultAddress
+                    ),
+                    walletHardwareBacked = refreshedWallet.hardwareBacked,
+                    walletStrongBoxBacked = refreshedWallet.strongBoxBacked,
+                    walletDeviceAuthenticationRequired =
+                        refreshedWallet.deviceAuthenticationRequired,
+                    operatorBalanceWei = result.first.toString(),
+                    operatorAuthorized = result.second,
+                    refreshingOperator = false,
+                    message = if (result.second) null else result.third?.message,
+                    isError = false
+                )
+            } catch (error: Exception) {
+                _state.value = _state.value.copy(
+                    refreshingOperator = false,
+                    message = error.message ?: "Unable to inspect operator wallet",
+                    isError = true
+                )
+            }
+        }
+    }
+
+    private fun OperatorWalletSnapshot.isActivatedFor(chainId: Long, vaultAddress: String): Boolean =
+        activatedChainId == chainId && activatedVaultAddress?.equals(vaultAddress, true) == true
 
     private fun validate(state: SettingsState): String? {
         if (state.networkName.isBlank()) return "Network name is required."
@@ -126,9 +256,12 @@ class SettingsViewModel(private val chainConfig: ChainConfig) : ViewModel() {
         return null
     }
 
-    class Factory(private val chainConfig: ChainConfig) : ViewModelProvider.Factory {
+    class Factory(
+        private val chainConfig: ChainConfig,
+        private val walletStore: OperatorWalletStore
+    ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            SettingsViewModel(chainConfig) as T
+            SettingsViewModel(chainConfig, walletStore) as T
     }
 }

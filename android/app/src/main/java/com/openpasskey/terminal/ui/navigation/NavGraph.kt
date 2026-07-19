@@ -5,6 +5,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SyncAlt
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -25,13 +26,16 @@ import com.openpasskey.terminal.ui.screens.HistoryScreen
 import com.openpasskey.terminal.ui.screens.InvoiceScreen
 import com.openpasskey.terminal.ui.screens.PaymentScreen
 import com.openpasskey.terminal.ui.screens.SettingsScreen
+import com.openpasskey.terminal.ui.screens.SettlementScreen
 import com.openpasskey.terminal.viewmodel.InvoiceViewModel
 import com.openpasskey.terminal.viewmodel.SettingsViewModel
+import com.openpasskey.terminal.viewmodel.SettlementViewModel
 
 private object Routes {
     const val INVOICE = "invoice"
     const val HISTORY = "history"
     const val SETTINGS = "settings"
+    const val SETTLEMENT = "settlement"
     const val PAYMENT = "payment/{invoiceId}"
     fun payment(invoiceId: String) = "payment/$invoiceId"
 }
@@ -40,11 +44,16 @@ private data class NavItem(val label: String, val icon: ImageVector, val route: 
 private val navItems = listOf(
     NavItem("New", Icons.Default.Add, Routes.INVOICE),
     NavItem("History", Icons.Default.History, Routes.HISTORY),
+    NavItem("Settle", Icons.Default.SyncAlt, Routes.SETTLEMENT),
     NavItem("Settings", Icons.Default.Settings, Routes.SETTINGS)
 )
 
 @Composable
-fun AppNavigation(invoiceViewModel: InvoiceViewModel, settingsViewModel: SettingsViewModel) {
+fun AppNavigation(
+    invoiceViewModel: InvoiceViewModel,
+    settingsViewModel: SettingsViewModel,
+    settlementViewModel: SettlementViewModel
+) {
     val controller = rememberNavController()
     val current by controller.currentBackStackEntryAsState()
     val currentRoute = current?.destination?.route
@@ -66,6 +75,7 @@ fun AppNavigation(invoiceViewModel: InvoiceViewModel, settingsViewModel: Setting
             composable(Routes.HISTORY) {
                 HistoryScreen(invoiceViewModel) { controller.navigate(Routes.payment(it)) }
             }
+            composable(Routes.SETTLEMENT) { SettlementScreen(settlementViewModel) }
             composable(Routes.SETTINGS) { SettingsScreen(settingsViewModel) }
             composable(
                 route = Routes.PAYMENT,
