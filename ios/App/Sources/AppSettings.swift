@@ -46,24 +46,6 @@ struct AppSettings: Codable, Equatable {
     }
 }
 
-struct OperatorActivation: Codable, Equatable {
-    let address: String
-    let chainID: UInt64
-    let vault: String
-
-    init(address: EthereumAddress, configuration: TerminalConfiguration) {
-        self.address = address.hex
-        chainID = configuration.chainID
-        vault = configuration.deployment.vault.hex
-    }
-
-    func matches(address: EthereumAddress, configuration: TerminalConfiguration) -> Bool {
-        self.address.lowercased() == address.hex.lowercased()
-            && chainID == configuration.chainID
-            && vault.lowercased() == configuration.deployment.vault.hex.lowercased()
-    }
-}
-
 enum AppSettingsError: LocalizedError {
     case invalidValue
     case unsupportedProtocol
@@ -78,8 +60,6 @@ enum AppSettingsError: LocalizedError {
 
 enum AppPreferences {
     private static let settingsKey = "opk.app.settings.v1"
-    private static let terminalKey = "opk.terminal.identifier.v1"
-    private static let operatorActivationKey = "opk.operator.activation.v1"
 
     static func loadSettings() -> AppSettings {
         guard let data = UserDefaults.standard.data(forKey: settingsKey),
@@ -93,32 +73,4 @@ enum AppPreferences {
         UserDefaults.standard.set(data, forKey: settingsKey)
     }
 
-    static func terminalIdentifier() -> TerminalIdentifier {
-        if let stored = UserDefaults.standard.string(forKey: terminalKey),
-           let address = try? EthereumAddress(hex: stored, allowZero: false) {
-            return TerminalIdentifier(address: address)
-        }
-        let identifier = TerminalIdentifier.random()
-        UserDefaults.standard.set(identifier.address.hex, forKey: terminalKey)
-        return identifier
-    }
-
-    static func loadOperatorActivation() -> OperatorActivation? {
-        guard let data = UserDefaults.standard.data(forKey: operatorActivationKey),
-              let value = try? JSONDecoder().decode(OperatorActivation.self, from: data),
-              (try? EthereumAddress(hex: value.address, allowZero: false)) != nil,
-              (try? EthereumAddress(hex: value.vault, allowZero: false)) != nil,
-              value.chainID > 0
-        else { return nil }
-        return value
-    }
-
-    static func saveOperatorActivation(_ activation: OperatorActivation?) {
-        guard let activation else {
-            UserDefaults.standard.removeObject(forKey: operatorActivationKey)
-            return
-        }
-        guard let data = try? JSONEncoder().encode(activation) else { return }
-        UserDefaults.standard.set(data, forKey: operatorActivationKey)
-    }
 }

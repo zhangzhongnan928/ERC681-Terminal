@@ -266,9 +266,9 @@ class SettlementRepository(
                 }
             }
             client.simulate(operator, first.vaultAddress, callData)
-            // This authorization is tied to the immutable chain/vault snapshot. Future invoices
-            // may now use the operator namespace; historical random-identifier invoices remain valid.
-            walletStore.activateInvoiceNamespace(first.chainId, first.vaultAddress)
+            // Cache only the exact chain/vault target proven above. This gates the constrained
+            // signer; invoice identity always comes from the operator's public address.
+            walletStore.recordVerifiedSettlementTarget(first.chainId, first.vaultAddress)
             val nonce = client.pendingNonce(operator)
             val gasLimit = client.estimateGas(operator, first.vaultAddress, callData, nonce)
             val quote = client.feeQuote()

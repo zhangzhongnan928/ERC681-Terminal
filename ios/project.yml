@@ -46,12 +46,26 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.openpasskey.terminal.ios
         PRODUCT_NAME: OPK Terminal
-        MARKETING_VERSION: 0.1.2
-        CURRENT_PROJECT_VERSION: 3
+        MARKETING_VERSION: 0.1.3
+        CURRENT_PROJECT_VERSION: 4
         DEVELOPMENT_TEAM: 3272Q6WG52
         SWIFT_VERSION: 6.0
         SWIFT_STRICT_CONCURRENCY: complete
         TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+  OPKTerminalAppUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    supportedDestinations: [iOS, iPad]
+    sources:
+      - path: AppUITests
+    dependencies:
+      - target: OPKTerminalApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.openpasskey.terminal.ios.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        DEVELOPMENT_TEAM: 3272Q6WG52
         CODE_SIGN_STYLE: Automatic
 schemes:
   OPKTerminalApp:
@@ -60,5 +74,9 @@ schemes:
         OPKTerminalApp: all
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - OPKTerminalAppUITests
     archive:
       config: Release

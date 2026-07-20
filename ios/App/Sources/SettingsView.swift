@@ -2,10 +2,22 @@ import OPKTerminalCore
 import SwiftUI
 import UIKit
 
+private enum SettingsFocusField: Hashable {
+    case rpcURL
+    case chainID
+    case factory
+    case receiverImplementation
+    case vault
+    case tokenAddress
+    case tokenSymbol
+    case tokenDecimals
+    case confirmationBlocks
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
-    @State private var didCopyIdentifier = false
     @State private var didCopyOperator = false
+    @FocusState private var focusedField: SettingsFocusField?
 
     var body: some View {
         NavigationStack {
@@ -14,71 +26,68 @@ struct SettingsView: View {
                     TextField("RPC URL", text: $model.settings.rpcURL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .focused($focusedField, equals: .rpcURL)
+                        .submitLabel(.next)
+                        .onSubmit { focusedField = .chainID }
+                        .accessibilityLabel("RPC URL")
                     TextField("Chain ID", text: $model.settings.chainID)
                         .keyboardType(.numberPad)
+                        .focused($focusedField, equals: .chainID)
+                        .accessibilityLabel("Chain ID")
                     LabeledContent("Protocol", value: "1.4.1 (deployed)")
                 }
 
                 Section("Contracts") {
-                    AddressField("Factory", text: $model.settings.factory)
-                    AddressField("Receiver implementation", text: $model.settings.receiverImplementation)
-                    AddressField("Vault", text: $model.settings.vault)
+                    AddressField(
+                        "Factory",
+                        text: $model.settings.factory,
+                        focus: $focusedField,
+                        field: .factory,
+                        onSubmit: { focusedField = .receiverImplementation }
+                    )
+                    AddressField(
+                        "Receiver implementation",
+                        text: $model.settings.receiverImplementation,
+                        focus: $focusedField,
+                        field: .receiverImplementation,
+                        onSubmit: { focusedField = .vault }
+                    )
+                    AddressField(
+                        "Vault",
+                        text: $model.settings.vault,
+                        focus: $focusedField,
+                        field: .vault,
+                        onSubmit: { focusedField = .tokenAddress }
+                    )
                 }
 
                 Section("Payment token") {
-                    AddressField("Token", text: $model.settings.tokenAddress)
+                    AddressField(
+                        "Token",
+                        text: $model.settings.tokenAddress,
+                        focus: $focusedField,
+                        field: .tokenAddress,
+                        onSubmit: { focusedField = .tokenSymbol }
+                    )
                     TextField("Symbol", text: $model.settings.tokenSymbol)
+                        .focused($focusedField, equals: .tokenSymbol)
+                        .submitLabel(.next)
+                        .onSubmit { focusedField = .tokenDecimals }
+                        .accessibilityLabel("Token symbol")
                     TextField("Decimals", text: $model.settings.tokenDecimals)
                         .keyboardType(.numberPad)
+                        .focused($focusedField, equals: .tokenDecimals)
+                        .accessibilityLabel("Token decimals")
                     TextField("Confirmation blocks", text: $model.settings.confirmationBlocks)
                         .keyboardType(.numberPad)
+                        .focused($focusedField, equals: .confirmationBlocks)
+                        .accessibilityLabel("Confirmation blocks")
                 }
 
-                Section("Legacy terminal identifier") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Legacy identifier")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        Text(model.terminalIdentifier.address.hex)
-                            .font(.system(.footnote, design: .monospaced))
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        Button {
-                            UIPasteboard.general.string = model.terminalIdentifier.address.hex
-                            didCopyIdentifier = true
-                        } label: {
-                            Label(
-                                didCopyIdentifier ? "Identifier copied" : "Copy identifier",
-                                systemImage: didCopyIdentifier ? "checkmark" : "doc.on.doc"
-                            )
-                        }
-                        .buttonStyle(.bordered)
-
-                        QRCodeImage(
-                            payload: model.terminalIdentifier.address.hex,
-                            size: 210,
-                            accessibilityLabel: "Terminal identifier QR code",
-                            failureDescription: "Copy the identifier instead."
-                        )
-                        .frame(maxWidth: .infinity)
-
-                        Label {
-                            Text("Identifier only — do not send funds here. It has no private key. Existing invoices keep this namespace; after the operator wallet is activated, new invoices use the operator address without changing historical invoices.")
-                        } icon: {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                        }
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-
-                Section("Settlement operator wallet") {
+                Section("Terminal operator wallet") {
                     if let address = model.operatorAddress {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Device EOA")
+                            Text("Terminal identity and settlement EOA")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
@@ -108,24 +117,12 @@ struct SettingsView: View {
                             )
                             .frame(maxWidth: .infinity)
 
-                            if let activation = model.operatorActivation,
-                               activation.address.lowercased() == address.hex.lowercased(),
-                               activation.chainID == UInt64(model.settings.chainID),
-                               activation.vault.lowercased() == model.settings.vault.lowercased() {
-                                Label(
-                                    "Invoice namespace activated for chain \(activation.chainID) and vault \(abbreviatedSettings(activation.vault))",
-                                    systemImage: "link.circle.fill"
-                                )
-                                .font(.footnote)
-                                .foregroundStyle(.green)
-                            } else {
-                                Label(
-                                    "Legacy identifier remains active for new invoices until this wallet is verified as owner/operator for the current chain and vault.",
-                                    systemImage: "link.badge.plus"
-                                )
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                            }
+                            Label(
+                                "This public address identifies every new invoice. Vault authorization is checked separately before settlement.",
+                                systemImage: "person.text.rectangle.fill"
+                            )
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
 
                             if let status = model.operatorStatus {
                                 LabeledContent(
@@ -156,24 +153,26 @@ struct SettingsView: View {
                             }
 
                             Button {
+                                focusedField = nil
                                 Task { await model.refreshOperatorStatus() }
                             } label: {
                                 Label("Refresh balance and authorization", systemImage: "arrow.clockwise")
                             }
                             .disabled(model.settlementBusy)
 
-                            Text("Send ETH for gas to this operator address, not to the legacy identifier. Its secp256k1 private key is non-syncing Keychain data and every settlement signature requires device authentication.")
+                            Text("Send ETH for gas to this operator address. Its secp256k1 private key is non-syncing Keychain data and every settlement signature requires device authentication.")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     } else {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Create a new, separate secp256k1 wallet for zero-value sweep transactions. The existing random identifier is never interpreted as a key.")
+                            Text("Create the device-local secp256k1 wallet used as the terminal identity for new invoices and to authorize zero-value sweep transactions. Historical invoices remain available.")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
 
                             Button {
+                                focusedField = nil
                                 Task { await model.createOperatorWallet() }
                             } label: {
                                 Label("Create operator wallet", systemImage: "key.fill")
@@ -186,6 +185,7 @@ struct SettingsView: View {
 
                 Section {
                     Button {
+                        focusedField = nil
                         Task { _ = await model.validateConfiguration() }
                     } label: {
                         Label("Validate configuration", systemImage: "checkmark.shield")
@@ -195,24 +195,40 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Settings")
+            .toolbar {
+                KeyboardDismissToolbar {
+                    focusedField = nil
+                }
+            }
+        }
+        .onDisappear {
+            focusedField = nil
         }
     }
-}
-
-private func abbreviatedSettings(_ value: String) -> String {
-    guard value.count > 18 else { return value }
-    return "\(value.prefix(10))…\(value.suffix(6))"
 }
 
 private struct AddressField: View {
     let label: String
     @Binding var text: String
+    let focus: FocusState<SettingsFocusField?>.Binding
+    let field: SettingsFocusField
+    let onSubmit: () -> Void
     @State private var isPresentingScanner = false
 
-    init(_ label: String, text: Binding<String>) {
+    init(
+        _ label: String,
+        text: Binding<String>,
+        focus: FocusState<SettingsFocusField?>.Binding,
+        field: SettingsFocusField,
+        onSubmit: @escaping () -> Void
+    ) {
         self.label = label
         _text = text
+        self.focus = focus
+        self.field = field
+        self.onSubmit = onSubmit
     }
 
     var body: some View {
@@ -226,9 +242,13 @@ private struct AddressField: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .font(.system(.body, design: .monospaced))
+                    .focused(focus, equals: field)
+                    .submitLabel(.next)
+                    .onSubmit(onSubmit)
                     .accessibilityLabel("\(label) address")
 
                 Button {
+                    focus.wrappedValue = nil
                     isPresentingScanner = true
                 } label: {
                     Label("Scan \(label)", systemImage: "qrcode.viewfinder")

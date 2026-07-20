@@ -16,7 +16,7 @@ The payment SDK source is intentionally limited to:
 
 There is no NFC, contactless-card path, customer payment-QR import or action, unlocked-node signing, arbitrary transaction API, seed import, or private-key export. Camera access belongs only to the native app settings UI and supplies text to the address field whose scan button the user selected; the reusable SDKs remain camera-free. The payment SDKs cannot call `sweepSessions`, payout, refund, deploy, approve, or transfer. Do not add a private key to an app configuration or RPC URL.
 
-The native operator implementation is a separate trust boundary. It generates one secp256k1 key on the device and restricts signing to the configured chain and vault, native value zero, the `sweepSessions(bytes32[],uint256[],address)` selector, a whitelisted token, and locally persisted paid or overpaid invoices. It cannot select a recipient or call payout, refund, rescue, approval, transfer, or deployment methods. The merchant authorizes the public address with `grantOperator` and pre-funds that address with the network's native token for gas.
+The native operator implementation is a separate trust boundary. It generates one secp256k1 key on the device and restricts signing to the configured chain and vault, native value zero, the `sweepSessions(bytes32[],uint256[],address)` selector, a whitelisted token, and locally persisted paid or overpaid invoices. It cannot select a recipient or call payout, refund, rescue, approval, transfer, or deployment methods. The shipped apps require this wallet to exist before creating a payment request and use its public address as the terminal identity for every new invoice. The merchant separately authorizes that address with `grantOperator` and pre-funds it with the network's native token before settlement.
 
 On Android, the secp256k1 scalar is encrypted with an AES-GCM wrapping key held by Android
 Keystore; only the device-bound ciphertext and IV are stored in private app preferences, and all
@@ -59,7 +59,8 @@ The amount in an ERC-681 URI is a wallet suggestion. The observer measures the a
 ## Invoice lifecycle
 
 1. Validate the RPC chain, deployed code, factory/implementation link, vault/factory link, token whitelist, and token decimals.
-2. Generate `invoiceId = keccak256(abi.encode(terminalIdentifier, timestamp, nonce))`.
+2. Require the device operator wallet, use its public address as `terminalIdentifier`, and generate
+   `invoiceId = keccak256(abi.encode(terminalIdentifier, timestamp, nonce))`.
 3. Derive the receiver locally with the protocol's 88-byte CREATE2 init code. Do not trust an RPC response for this address.
 4. Render `erc681Uri`/`erc681URI` as a customer-facing payment QR. The configuration scanner rejects this payload without importing or acting on it.
 5. Poll the token's `balanceOf(receiver)` at an explicit block.
@@ -75,6 +76,13 @@ confirmed swept amounts with the invoice's immutable expected amount. This permi
 complete a partial settlement without counting an RPC replay twice.
 
 The reusable SDKs never sweep the receiver. A native app may pass their data-only handoff into its separate approved operator module. On the shipped legacy 1.4.1 deployment, transaction receipt success alone is not proof of settlement: the app must decode a fully matching confirmed `Swept` event and record the actual amount. A future 1.5 deployment may additionally expose settlement accounting, but the bundled deployment must not assume it.
+
+`terminalIdentifier` remains the protocol and reusable-SDK name for a generic, non-secret 20-byte
+invoice namespace. The reusable SDK does not require that namespace to have a private key. The
+shipped Android and iOS apps apply the stricter application policy described above: they always
+pass the device operator EOA public address for new invoices and fail invoice creation when that
+wallet does not exist. Vault authorization and gas balance do not change invoice derivation; they
+are checked independently when preparing a settlement.
 
 ## Default network
 
@@ -94,12 +102,14 @@ Do not enable mainnet until real deployment constants and a matching CREATE2 vec
 the upgradeable vault implementation is pinned and independently checked, and all constants are
 accepted by the SDK validation path.
 
-## Operator activation and gas funding
+## Operator identity, authorization, and gas funding
 
-Creating the operator wallet does not make it a vault operator. Before settlement, the merchant
-must grant the displayed address with the vault's administrative `grantOperator` flow (the vault
-owner itself is also accepted), then transfer enough native network currency to that address for
-gas. The app shows the entire address, offers Copy, and displays this address-only funding QR:
+Creating the operator wallet establishes the terminal identity used for new invoices; it does not
+make the EOA a vault operator. The app can therefore create payment requests as soon as the wallet
+exists. Before settlement, the merchant must grant the displayed address with the vault's
+administrative `grantOperator` flow (the vault owner itself is also accepted), then transfer enough
+native network currency to that address for gas. The app shows the entire address, offers Copy, and
+displays this address-only funding QR:
 
 ```text
 ethereum:{OPERATOR_ADDRESS}@{CHAIN_ID}
@@ -111,9 +121,10 @@ For example, on Base Sepolia:
 ethereum:0x2222222222222222222222222222222222222222@84532
 ```
 
-The QR intentionally omits `?value=` so the funding wallet chooses the amount. Never fund the
-legacy random terminal identifier. Loss or deletion of the device-local operator key requires the
-merchant to revoke that operator and authorize a newly generated address; the key is not backed up.
+The QR intentionally omits `?value=` so the funding wallet chooses the amount. Loss or deletion of
+the device-local operator key requires the merchant to revoke that operator and authorize a newly
+generated address; the key is not backed up. Historical invoices do not change when the operator
+changes and may be swept by any currently authorized vault owner or operator.
 
 ## Android app and SDK
 
@@ -168,9 +179,10 @@ val token = EvmAddress.parse("0x7ffba642bc902880a737cb1c18a4e9540879e211")
 val rpc = ReadOnlyRpcClient(network)
 val validated = rpc.validate(token, expectedDecimals = 18)
 
-val legacyNamespace = EvmAddress.parse(loadPersistedLegacyTerminalIdentifier())
-val activatedOperatorNamespace = loadActivatedOperatorAddress()?.let(EvmAddress::parse)
-val invoiceNamespace = activatedOperatorNamespace ?: legacyNamespace
+val operatorAddress = requireNotNull(loadDeviceOperatorAddress()) {
+    "Create the device operator wallet before creating a payment request"
+}
+val invoiceNamespace = EvmAddress.parse(operatorAddress)
 
 val invoice = PaymentInvoiceFactory.create(
     network = network,
@@ -194,11 +206,13 @@ if (observation.status == PaymentStatus.PAID) {
 }
 ```
 
-On installations upgraded from the QR-only release, `terminalIdentifier` remains a stable,
-non-secret 20-byte legacy namespace. It is address-shaped but has no corresponding private key and
-must never be funded. Existing invoice IDs and receivers retain that namespace unchanged. After a
-new operator wallet is created, future invoices use the operator EOA as their persisted namespace,
-matching protocol 1.4.1. Never reinterpret, overwrite, or derive a key from the legacy identifier.
+On installations upgraded from the QR-only release, existing invoice records keep their invoice
+ID, configuration snapshot, and derived receiver. iOS also keeps the per-invoice
+`terminalIdentifier`; Android does not need it to monitor or settle a persisted receiver. Do not
+rewrite or reinterpret those immutable records. The application no longer uses the old random
+value as a global fallback: every new invoice requires the operator wallet and supplies that EOA's
+public address as its `terminalIdentifier`, matching protocol 1.4.1. Historical receivers remain
+settleable by any currently authorized vault owner or operator.
 
 ## Swift package and iOS app
 
@@ -240,8 +254,8 @@ let configuration = try TerminalConfiguration(
 let rpc = try JSONRPCEthereumClient(endpoint: endpoint)
 _ = try await ConfigurationValidator(rpc: rpc).validate(configuration)
 
-let legacyNamespace = try loadPersistedLegacyTerminalIdentifier()
-let invoiceNamespace = try loadActivatedOperatorAddress() ?? legacyNamespace
+let operatorAddress = try requireDeviceOperatorAddress()
+let invoiceNamespace = TerminalIdentifier(address: operatorAddress)
 let amount = try TokenAmount(display: "12.34", decimals: token.decimals)
 let request = try InvoiceFactory.create(
     terminalIdentifier: invoiceNamespace,
@@ -315,17 +329,20 @@ Only create or export a handoff after the terminal has a paid/overpaid observati
 
 ### Operator setup and funding
 
-1. Generate the operator wallet once on the device. The private scalar is not exported, backed up,
-   synchronized, placed on the clipboard, or stored in ordinary app preferences.
+1. Generate the operator wallet once on the device before accepting a new payment. Its public
+   address becomes the terminal identity for every new invoice. The private scalar is not exported,
+   backed up, synchronized, placed on the clipboard, or stored in ordinary app preferences.
 2. Copy or scan the displayed public address from the merchant's vault administration flow and call
    `grantOperator(address)`. The app checks `isOperator(address)` before enabling a sweep.
 3. Send the correct network's native token to the operator address for gas only. Do not send
    customer payment tokens to it. The Settings UI displays the exact address, chain, QR, balance,
    authorization state, and a low-balance warning.
 
-Existing random identifiers continue to identify historical invoices and keep their red
-**identifier only — do not fund** warning. Any authorized operator can sweep those historical
-receivers because vault authorization depends on the transaction sender, not the invoice namespace.
+Existing invoice records preserve the invoice ID and receiver derived from their historical
+namespace; iOS also preserves that namespace per invoice. The app does not expose or reuse a global
+legacy identifier for new invoices. Any authorized vault owner or operator can sweep those
+historical receivers because authorization depends on the settlement transaction sender, not the
+invoice namespace.
 
 ### Settlement transaction lifecycle
 

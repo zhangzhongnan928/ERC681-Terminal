@@ -43,9 +43,8 @@ data class OperatorWalletSnapshot(
 )
 
 /**
- * Stores a distinct secp256k1 settlement-operator key. It deliberately uses separate preferences
- * and a separate Keystore alias from the non-secret terminalIdentifier; an existing identifier is
- * never parsed, imported, or reinterpreted as a wallet key.
+ * Stores the secp256k1 terminal identity and settlement-operator key. Existing random identifiers
+ * from older app versions are never parsed, imported, or reinterpreted as wallet keys.
  *
  * Android Keystore protects the AES wrapping key. The Ethereum key is decrypted only for the
  * shortest practical signing window, but Android Keystore cannot itself sign secp256k1.
@@ -112,7 +111,7 @@ class OperatorWalletStore(context: Context) {
     }
 
     @Synchronized
-    fun activateInvoiceNamespace(chainId: Long, vaultAddress: String) {
+    fun recordVerifiedSettlementTarget(chainId: Long, vaultAddress: String) {
         check(snapshot().availability == OperatorWalletAvailability.READY)
         check(chainId > 0)
         val vault = com.openpasskey.erc681.EvmAddress.parse(vaultAddress).value
@@ -120,17 +119,7 @@ class OperatorWalletStore(context: Context) {
             .putLong(KEY_ACTIVATED_CHAIN_ID, chainId)
             .putString(KEY_ACTIVATED_VAULT, vault)
             .commit()
-        ) { "Unable to activate the operator invoice namespace" }
-    }
-
-    @Synchronized
-    fun activatedInvoiceIdentifier(chainId: Long, vaultAddress: String): String? {
-        val stored = snapshot()
-        if (stored.availability != OperatorWalletAvailability.READY) return null
-        return stored.address?.takeIf {
-            stored.activatedChainId == chainId &&
-                stored.activatedVaultAddress?.equals(vaultAddress, ignoreCase = true) == true
-        }
+        ) { "Unable to record the verified settlement target" }
     }
 
     /** Creates the operator wallet once. Rotation is intentionally not an in-app one-tap action. */

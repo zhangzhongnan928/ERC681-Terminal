@@ -29,13 +29,12 @@ data class SettingsState(
     val receiverImplementationAddress: String = "",
     val vaultAddress: String = "",
     val confirmationBlocks: String = "",
-    val terminalIdentifier: String = "",
     val paymentTokens: List<PaymentToken> = emptyList(),
     val operatorWalletAvailability: OperatorWalletAvailability = OperatorWalletAvailability.NOT_CREATED,
     val operatorWalletAddress: String? = null,
     val operatorBalanceWei: String? = null,
     val operatorAuthorized: Boolean? = null,
-    val operatorActivated: Boolean = false,
+    val settlementTargetVerified: Boolean = false,
     val walletHardwareBacked: Boolean = false,
     val walletStrongBoxBacked: Boolean = false,
     val walletDeviceAuthenticationRequired: Boolean = false,
@@ -67,11 +66,10 @@ class SettingsViewModel(
         receiverImplementationAddress = chainConfig.receiverImplementationAddress,
         vaultAddress = chainConfig.vaultAddress,
         confirmationBlocks = chainConfig.confirmationBlocks.toString(),
-        terminalIdentifier = chainConfig.terminalIdentifier,
         paymentTokens = chainConfig.paymentTokens,
         operatorWalletAvailability = wallet.availability,
         operatorWalletAddress = wallet.address,
-        operatorActivated = wallet.isActivatedFor(chainConfig.chainId, chainConfig.vaultAddress),
+        settlementTargetVerified = wallet.isVerifiedFor(chainConfig.chainId, chainConfig.vaultAddress),
         walletHardwareBacked = wallet.hardwareBacked,
         walletStrongBoxBacked = wallet.strongBoxBacked,
         walletDeviceAuthenticationRequired = wallet.deviceAuthenticationRequired,
@@ -194,13 +192,13 @@ class SettingsViewModel(
                     }
                 }
                 if (result.second) {
-                    walletStore.activateInvoiceNamespace(snapshot.chainId, snapshot.vaultAddress)
+                    walletStore.recordVerifiedSettlementTarget(snapshot.chainId, snapshot.vaultAddress)
                 }
                 val refreshedWallet = walletStore.snapshot()
                 _state.value = _state.value.copy(
                     operatorWalletAvailability = refreshedWallet.availability,
                     operatorWalletAddress = refreshedWallet.address,
-                    operatorActivated = refreshedWallet.isActivatedFor(
+                    settlementTargetVerified = refreshedWallet.isVerifiedFor(
                         snapshot.chainId,
                         snapshot.vaultAddress
                     ),
@@ -224,7 +222,7 @@ class SettingsViewModel(
         }
     }
 
-    private fun OperatorWalletSnapshot.isActivatedFor(chainId: Long, vaultAddress: String): Boolean =
+    private fun OperatorWalletSnapshot.isVerifiedFor(chainId: Long, vaultAddress: String): Boolean =
         activatedChainId == chainId && activatedVaultAddress?.equals(vaultAddress, true) == true
 
     private fun validate(state: SettingsState): String? {

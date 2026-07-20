@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
-import java.security.SecureRandom
 
 data class PaymentToken(
     val address: String,
@@ -20,7 +19,6 @@ data class TerminalConfigSnapshot(
     val receiverImplementationAddress: String,
     val vaultAddress: String,
     val confirmationBlocks: Int,
-    val terminalIdentifier: String,
     val paymentTokens: List<PaymentToken>
 )
 
@@ -39,7 +37,6 @@ class ChainConfig(context: Context) {
         private const val KEY_VAULT_ADDRESS = "vault_address"
         private const val KEY_CONFIRMATION_BLOCKS = "confirmation_blocks"
         private const val KEY_PAYMENT_TOKENS = "payment_tokens"
-        private const val KEY_TERMINAL_IDENTIFIER = "terminal_identifier"
 
         const val DEFAULT_NETWORK_NAME = "Base Sepolia"
         const val DEFAULT_RPC_URL = "https://sepolia.base.org"
@@ -88,18 +85,6 @@ class ChainConfig(context: Context) {
         get() = prefs.getInt(KEY_CONFIRMATION_BLOCKS, DEFAULT_CONFIRMATION_BLOCKS)
         set(value) = prefs.edit().putInt(KEY_CONFIRMATION_BLOCKS, value.coerceIn(1, 64)).apply()
 
-    val terminalIdentifier: String
-        @Synchronized
-        get() {
-            prefs.getString(KEY_TERMINAL_IDENTIFIER, null)?.let { return it }
-            val bytes = ByteArray(20).also(SecureRandom()::nextBytes)
-            val generated = "0x" + bytes.joinToString("") { "%02x".format(it) }
-            // apply() updates this process's preference map before returning; synchronization
-            // prevents competing first reads from generating different installation IDs.
-            prefs.edit().putString(KEY_TERMINAL_IDENTIFIER, generated).apply()
-            return generated
-        }
-
     var paymentTokens: List<PaymentToken>
         get() {
             val json = prefs.getString(KEY_PAYMENT_TOKENS, null) ?: return DEFAULT_PAYMENT_TOKENS
@@ -128,7 +113,6 @@ class ChainConfig(context: Context) {
         receiverImplementationAddress = receiverImplementationAddress,
         vaultAddress = vaultAddress,
         confirmationBlocks = confirmationBlocks,
-        terminalIdentifier = terminalIdentifier,
         paymentTokens = paymentTokens
     )
 

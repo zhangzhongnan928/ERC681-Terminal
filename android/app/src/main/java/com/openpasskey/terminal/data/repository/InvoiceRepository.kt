@@ -15,6 +15,8 @@ import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.data.db.InvoiceDao
 import com.openpasskey.terminal.data.model.Invoice
 import com.openpasskey.terminal.data.model.InvoiceStatus
+import com.openpasskey.terminal.wallet.OperatorWalletAvailability
+import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
 import com.openpasskey.terminal.wallet.OperatorWalletStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -40,6 +42,7 @@ class InvoiceRepository(
             val tokenAddress = EvmAddress.parse(token.address)
             val amount = TokenAmount.parse(displayAmount, token.decimals)
             val rpc = ReadOnlyRpcClient(network)
+            val operatorIdentifier = requireOperatorInvoiceIdentifier(operatorWalletStore.snapshot())
 
             val validation = rpc.validate(tokenAddress, token.decimals)
             require(validation.tokenWhitelisted) { "Token is not whitelisted by the configured vault" }
@@ -48,14 +51,10 @@ class InvoiceRepository(
                 network = network,
                 token = tokenAddress,
                 amount = amount,
-                // Existing invoices retain their CREATE2 snapshot. Only newly created invoices use
-                // the operator address after that exact chain/vault activation has been verified.
-                terminalIdentifier = EvmAddress.parse(
-                    operatorWalletStore.activatedInvoiceIdentifier(
-                        settings.chainId,
-                        settings.vaultAddress
-                    ) ?: settings.terminalIdentifier
-                )
+                // The protocol calls this namespace a terminal identifier. For every new invoice,
+                // the app uses the public address of the device's real settlement operator EOA.
+                // Historical invoices retain their already-persisted invoice IDs and receivers.
+                terminalIdentifier = operatorIdentifier
             )
             val receiver = protocolInvoice.request.receiver
             require(rpc.codeAt(receiver).isEmpty()) {
@@ -149,6 +148,9 @@ class InvoiceRepository(
     suspend fun updateStatus(invoiceId: String, status: InvoiceStatus) =
         invoiceDao.updateStatus(invoiceId, status)
 
+    fun hasReadyOperatorWallet(): Boolean =
+        runCatching { requireOperatorInvoiceIdentifier(operatorWalletStore.snapshot()) }.isSuccess
+
     private fun TerminalConfigSnapshot.toNetworkConfig() = NetworkConfig(
         chainId = chainId,
         rpcUrl = rpcUrl,
@@ -220,4 +222,13 @@ class InvoiceRepository(
         private const val POLL_INTERVAL_MILLIS = 2_000L
         private const val RECOVERY_TIMEOUT_MILLIS = 20_000L
     }
+}
+
+internal fun requireOperatorInvoiceIdentifier(snapshot: OperatorWalletSnapshot): EvmAddress {
+    check(snapshot.availability == OperatorWalletAvailability.READY && snapshot.address != null) {
+        snapshot.error
+            ?: "Create the terminal operator wallet in Settings before creating a payment QR. " +
+                "Historical invoices remain available."
+    }
+    return EvmAddress.parse(requireNotNull(snapshot.address))
 }

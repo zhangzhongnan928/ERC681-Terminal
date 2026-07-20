@@ -18,17 +18,21 @@ vault; the terminal never chooses a payout destination.
   non-zero EVM address, including an address-only `ethereum:` QR, and rejects payment URIs and all
   other payloads without changing the field.
 - The reusable Android and Swift payment SDKs remain keyless and read-only.
-- Each native app can generate a separate, device-local secp256k1 settlement-operator wallet.
-  Existing random identifiers are retained only for legacy invoice namespaces and are never
-  reinterpreted as wallet keys.
+- Each native app generates a separate, device-local secp256k1 operator wallet. Its public address
+  is the terminal identity used as the `terminalIdentifier` namespace for every new invoice, so an
+  operator wallet must exist before the app can present a new payment QR.
+- Historical invoice records retain their invoice ID, configuration snapshot, and derived receiver
+  unchanged; iOS also retains the per-invoice namespace used in that derivation. The app does not
+  reuse a legacy random identifier for new invoices or reinterpret one as a wallet key.
 - Signing is restricted to the configured chain and vault, zero native value, whitelisted token,
   confirmed locally persisted invoices, and the `sweepSessions` selector. There is no arbitrary
   transaction, transfer, approval, payout, refund, deployment, private-key export, or seed import.
-- The merchant must grant the displayed operator address on the vault and fund it with a small
-  amount of the chain's native token for gas. Customer ERC-20 payments still go only to one-time
-  receiver addresses.
+- Vault authorization and native-token gas funding are separate settlement-readiness checks. They
+  are not prerequisites for invoice derivation, but both are required before the device operator
+  can submit a sweep. Customer ERC-20 payments still go only to one-time receiver addresses.
 - Settings shows the full operator address with Copy and an address-only, chain-qualified funding
-  QR. The operator is a real EOA; the retained legacy identifier is not and must never be funded.
+  QR. This is the same real EOA whose public address identifies new invoices and whose private key
+  signs constrained settlement transactions.
 - Receipt success is insufficient: the app waits for confirmations and verifies a matching,
   non-zero `Swept` event before recording settlement.
 
@@ -37,7 +41,8 @@ Native-asset `?value=` requests and non-transfer calls fail closed.
 ## Payment flow
 
 1. Validate the configured chain, contracts, vault, token whitelist, and token decimals.
-2. Generate an invoice ID and derive the counterfactual receiver locally.
+2. Require the device operator wallet, use its public address as the invoice's terminal namespace,
+   generate an invoice ID, and derive the counterfactual receiver locally.
 3. Refuse receiver reuse if code or an existing token balance is detected.
 4. Display the canonical ERC-681 ERC-20 transfer QR.
 5. Observe partial payment, confirmations, exact payment, overpayment, or expiry.

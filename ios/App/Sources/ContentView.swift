@@ -35,6 +35,7 @@ struct ContentView: View {
 private struct NewSaleView: View {
     @EnvironmentObject private var model: AppModel
     @State private var amount = ""
+    @FocusState private var isAmountFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -49,23 +50,37 @@ private struct NewSaleView: View {
                 )
             } else {
                 Form {
+                    if model.operatorAddress == nil {
+                        Section {
+                            Label(
+                                "Create the terminal operator wallet in Settings before accepting a payment.",
+                                systemImage: "key.fill"
+                            )
+                            .foregroundStyle(.orange)
+                        } footer: {
+                            Text("The operator public address is the terminal identity for every new invoice. Existing invoices are unchanged.")
+                        }
+                    }
+
                     Section("Amount") {
                         TextField("0.00", text: $amount)
                             .keyboardType(.decimalPad)
                             .font(.system(.title, design: .rounded, weight: .semibold))
+                            .focused($isAmountFocused)
                             .accessibilityLabel("Sale amount")
                         LabeledContent("Token", value: model.settings.tokenSymbol)
                     }
 
                     Section {
                         Button {
+                            isAmountFocused = false
                             Task { await model.createSale(displayAmount: amount) }
                         } label: {
                             Label("Create payment QR", systemImage: "qrcode")
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(amount.isEmpty || model.isBusy)
+                        .disabled(amount.isEmpty || model.isBusy || model.operatorAddress == nil)
                     }
 
                     Section {
@@ -75,8 +90,17 @@ private struct NewSaleView: View {
                         Text("Payment QR creation never accesses the settlement key. Sweep transactions are simulated, shown for confirmation, and signed only after explicit device authentication in the Settle tab.")
                     }
                 }
+                .scrollDismissesKeyboard(.interactively)
                 .navigationTitle("New Sale")
+                .toolbar {
+                    KeyboardDismissToolbar {
+                        isAmountFocused = false
+                    }
+                }
             }
+        }
+        .onDisappear {
+            isAmountFocused = false
         }
     }
 }

@@ -9,8 +9,8 @@ protocol OperatorTransactionSigning: Sendable {
 }
 
 /// A device-local secp256k1 EOA. The private scalar is stored only in a non-synchronizing
-/// Keychain item protected by device-owner presence. This wallet never reads or reuses the
-/// legacy random terminal identifier.
+/// Keychain item protected by device-owner presence. The app uses this EOA's public address as
+/// the terminal identity for every new invoice; the private key remains settlement-only.
 public actor KeychainOperatorWallet: OperatorTransactionSigning {
     private nonisolated let storage: OperatorKeychainStorage
 

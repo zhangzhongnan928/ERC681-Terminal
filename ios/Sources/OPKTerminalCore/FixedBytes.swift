@@ -85,6 +85,8 @@ public struct Bytes32: Hashable, Sendable, Codable, CustomStringConvertible {
     }
 }
 
+/// A generic, non-secret 20-byte invoice namespace defined by the protocol. Applications may
+/// impose a stricter identity policy; the shipped terminal app always wraps its operator EOA.
 public struct TerminalIdentifier: Hashable, Sendable, Codable, CustomStringConvertible {
     public let address: EthereumAddress
 

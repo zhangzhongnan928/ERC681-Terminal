@@ -1,11 +1,12 @@
 # OPK ERC-681 Terminal for iOS
 
-This directory contains a keyless, read-only Swift SDK and a SwiftUI terminal app source for
-ERC-20 payments presented as canonical ERC-681 QR codes. It deliberately contains no private-key
-handling, transaction signing, transaction submission, settlement controls, customer payment-QR
-importing, NFC, or CoreNFC capability. Camera access is limited to importing contract and token
-addresses in the Settings UI; payment/function URIs and other non-address payloads fail closed.
-The Swift package libraries remain camera-free.
+This directory contains a keyless, read-only Swift payment SDK and a SwiftUI terminal app for
+ERC-20 payments presented as canonical ERC-681 QR codes. The app's separately isolated operator
+module manages one device-local settlement key and can sign only constrained `sweepSessions`
+transactions; the payment Core and RPC products do not handle keys or submit transactions. There
+is no customer payment-QR importing, NFC, or CoreNFC capability. Camera access is limited to
+importing contract and token addresses in the Settings UI; payment/function URIs and other
+non-address payloads fail closed. The Swift package libraries remain camera-free.
 
 ## Components
 
@@ -14,6 +15,8 @@ The Swift package libraries remain camera-free.
   metadata-only settlement handoff.
 - `OPKTerminalRPC`: read-only JSON-RPC methods, chain/contract/token configuration validation, and
   block-confirmed balance observation.
+- `OPKTerminalOperator`: device-local secp256k1 key storage, constrained settlement transaction
+  construction and submission, and confirmed `Swept`-event verification.
 - `OPKTerminalConformance`: dependency-free executable checks for the shared Android/iOS golden
   vectors and mocked read-only JSON-RPC behavior.
 - `App`: iOS/iPadOS 17 SwiftUI source using SwiftData, Core Image QR rendering with a four-module
@@ -79,6 +82,13 @@ The app refuses a newly derived receiver if it already has code or a token balan
 block. Paid, overpaid, expired, and locally closed invoices never render a payable QR, including in
 History. Expiry closes zero-balance and partially funded requests alike.
 
-The terminal identifier saved in `UserDefaults` is public, random uniqueness material for invoice
-IDs. Settings shows its full value with copy and QR controls, but it is not an Ethereum account,
-wallet, payment receiver, or signing key and must never be funded.
+The operator wallet must exist before the app can present a new payment QR. Its public EOA address
+is the terminal identity supplied as `terminalIdentifier` for every new invoice. Vault
+authorization and native-token gas funding are checked separately before settlement; they are not
+inputs to invoice or receiver derivation. The full operator address remains available in Settings
+with copy and address-only QR controls.
+
+Upgraded installations preserve each existing invoice's original terminal identifier, invoice ID,
+configuration snapshot, and derived receiver. Those historical records are not rewritten, and any
+currently authorized vault owner or operator can still sweep their receivers. The app does not use
+or display a global legacy random identifier when creating new invoices.

@@ -6,7 +6,8 @@ import java.security.SecureRandom
 object InvoiceIdGenerator {
     /**
      * Generates an invoice ID using a persistent, non-secret 20-byte terminal namespace.
-     * The namespace is address-shaped but does not represent a wallet or private key.
+     * The protocol treats this as a generic address-shaped value; an integrating app may apply a
+     * stricter policy, such as always supplying its device operator EOA public address.
      */
     @JvmStatic
     @JvmOverloads
@@ -36,7 +37,10 @@ object InvoiceIdGenerator {
         return InvoiceId.fromBytes(Keccak256.digest(abiEncoded))
     }
 
-    /** Convenience generation when no persisted namespace is available. */
+    /**
+     * Low-level SDK convenience when no namespace is supplied. Production terminal apps should
+     * persist and explicitly pass the namespace required by their identity policy.
+     */
     @JvmStatic
     @JvmOverloads
     fun generate(random: SecureRandom = SecureRandom()): InvoiceId {

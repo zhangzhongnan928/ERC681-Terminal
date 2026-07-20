@@ -20,13 +20,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var isBusy = false
     @Published private(set) var settlementBusy = false
     @Published private(set) var operatorAddress: EthereumAddress?
-    @Published private(set) var operatorActivation: OperatorActivation?
     @Published private(set) var operatorStatus: OperatorChainStatus?
     @Published private(set) var operatorStatusMessage: String?
     @Published private(set) var preparedSettlement: PreparedSettlement?
     @Published var errorMessage: String?
 
-    let terminalIdentifier: TerminalIdentifier
     private let container: ModelContainer
     private let operatorWallet: KeychainOperatorWallet
     private var monitoringTask: Task<Void, Never>?
@@ -38,16 +36,7 @@ final class AppModel: ObservableObject {
         self.container = container
         operatorWallet = KeychainOperatorWallet()
         settings = AppPreferences.loadSettings()
-        terminalIdentifier = AppPreferences.terminalIdentifier()
         operatorAddress = try? operatorWallet.existingAddress()
-        let savedActivation = AppPreferences.loadOperatorActivation()
-        if let operatorAddress,
-           savedActivation?.address.lowercased() == operatorAddress.hex.lowercased() {
-            operatorActivation = savedActivation
-        } else {
-            operatorActivation = nil
-            AppPreferences.saveOperatorActivation(nil)
-        }
     }
 
     func validateConfiguration() async -> Bool {
@@ -71,24 +60,14 @@ final class AppModel: ObservableObject {
         do {
             // Capture once so the exact configuration used for derivation is the one validated.
             let configuration = try settings.configuration()
+            guard let operatorAddress else {
+                throw AppSafetyError.operatorWalletRequired
+            }
             try await validate(configuration)
             let token = configuration.tokens[0]
             let amount = try TokenAmount(display: displayAmount, decimals: token.decimals).rawValue
-            let activeOperatorAddress: EthereumAddress?
-            if let operatorAddress,
-               operatorActivation?.matches(
-                   address: operatorAddress,
-                   configuration: configuration
-               ) == true {
-                activeOperatorAddress = operatorAddress
-            } else {
-                activeOperatorAddress = nil
-            }
-            let invoiceIdentifier = TerminalIdentifier(
-                address: activeOperatorAddress ?? terminalIdentifier.address
-            )
             let request = try InvoiceFactory.create(
-                terminalIdentifier: invoiceIdentifier,
+                terminalIdentifier: TerminalIdentifier(address: operatorAddress),
                 amount: amount,
                 token: token,
                 configuration: configuration,
@@ -215,20 +194,6 @@ final class AppModel: ObservableObject {
                 vault: configuration.deployment.vault
             )
             operatorStatus = status
-            if status.isAuthorizedOperator {
-                let activation = OperatorActivation(
-                    address: operatorAddress,
-                    configuration: configuration
-                )
-                operatorActivation = activation
-                AppPreferences.saveOperatorActivation(activation)
-            } else if operatorActivation?.matches(
-                address: operatorAddress,
-                configuration: configuration
-            ) == true {
-                operatorActivation = nil
-                AppPreferences.saveOperatorActivation(nil)
-            }
             operatorStatusMessage = nil
         } catch {
             operatorStatus = nil
@@ -570,6 +535,7 @@ final class AppModel: ObservableObject {
 }
 
 private enum AppSafetyError: LocalizedError {
+    case operatorWalletRequired
     case receiverAlreadyDeployed
     case receiverAlreadyFunded
     case corruptInvoiceSnapshot
@@ -577,6 +543,8 @@ private enum AppSafetyError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .operatorWalletRequired:
+            "Create the terminal operator wallet in Settings before creating a payment QR. Historical invoices remain available."
         case .receiverAlreadyDeployed:
             "The newly derived receiver already has contract code. No QR was created."
         case .receiverAlreadyFunded:

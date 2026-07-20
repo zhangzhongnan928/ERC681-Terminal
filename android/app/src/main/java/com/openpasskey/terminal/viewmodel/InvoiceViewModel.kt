@@ -19,6 +19,7 @@ data class CreateInvoiceState(
     val amount: String = "",
     val tokens: List<PaymentToken> = emptyList(),
     val selectedToken: PaymentToken? = null,
+    val operatorWalletReady: Boolean = false,
     val isCreating: Boolean = false,
     val createdInvoice: Invoice? = null,
     val error: String? = null
@@ -57,6 +58,7 @@ class InvoiceViewModel(
         _createState.value = _createState.value.copy(
             tokens = tokens,
             selectedToken = selected ?: tokens.firstOrNull(),
+            operatorWalletReady = repository.hasReadyOperatorWallet(),
             error = null
         )
     }
@@ -79,6 +81,13 @@ class InvoiceViewModel(
         }
         if (!chainConfig.isConfigured()) {
             _createState.value = state.copy(error = "Complete Settings before creating a payment.")
+            return
+        }
+        if (!repository.hasReadyOperatorWallet()) {
+            _createState.value = state.copy(
+                operatorWalletReady = false,
+                error = "Create the terminal operator wallet in Settings before creating a payment QR."
+            )
             return
         }
         _createState.value = state.copy(isCreating = true, error = null)

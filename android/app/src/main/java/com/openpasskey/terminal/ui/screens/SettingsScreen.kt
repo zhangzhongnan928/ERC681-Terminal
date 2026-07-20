@@ -76,11 +76,11 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
     if (showWalletCreationDialog) {
         AlertDialog(
             onDismissRequest = { showWalletCreationDialog = false },
-            title = { Text("Create settlement operator?") },
+            title = { Text("Create terminal operator?") },
             text = {
                 Text(
                     "This creates a new secp256k1 wallet protected by Android Keystore and device authentication. " +
-                        "Record and authorize the displayed address on the vault. The old terminal identifier is never used as a key."
+                        "Its public address identifies new invoices. Fund it with native gas and authorize it on the vault before settlement."
                 )
             },
             confirmButton = {
@@ -153,7 +153,7 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                     chainId = state.operatorNetworkChainId.takeIf { it > 0 },
                     balanceWei = state.operatorBalanceWei,
                     authorized = state.operatorAuthorized,
-                    activated = state.operatorActivated,
+                    settlementTargetVerified = state.settlementTargetVerified,
                     hardwareBacked = state.walletHardwareBacked,
                     strongBoxBacked = state.walletStrongBoxBacked,
                     deviceAuthenticationRequired = state.walletDeviceAuthenticationRequired,
@@ -162,7 +162,6 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                     onRefresh = viewModel::refreshOperatorStatus
                 )
             }
-            item { TerminalIdentifierCard(state.terminalIdentifier) }
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -227,7 +226,7 @@ private fun OperatorWalletCard(
     chainId: Long?,
     balanceWei: String?,
     authorized: Boolean?,
-    activated: Boolean,
+    settlementTargetVerified: Boolean,
     hardwareBacked: Boolean,
     strongBoxBacked: Boolean,
     deviceAuthenticationRequired: Boolean,
@@ -239,11 +238,11 @@ private fun OperatorWalletCard(
     val context = LocalContext.current
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Settlement operator wallet", style = MaterialTheme.typography.titleMedium)
+            Text("Terminal operator wallet", style = MaterialTheme.typography.titleMedium)
             when (availability) {
                 OperatorWalletAvailability.NOT_CREATED -> {
                     Text(
-                        "No operator key exists. Create one only when the merchant is ready to fund gas and authorize it on the configured vault."
+                        "Create the device-local wallet used as the terminal identity for new payment QRs and to sign reviewed settlement transactions."
                     )
                     Button(onClick = onCreate, modifier = Modifier.fillMaxWidth()) {
                         Icon(Icons.Default.Security, contentDescription = null)
@@ -285,6 +284,10 @@ private fun OperatorWalletCard(
                             "ERC-20 payment funds go to one-time invoice receivers.",
                         style = MaterialTheme.typography.bodySmall
                     )
+                    Text(
+                        "This public address identifies every new invoice. Vault authorization is checked separately before settlement.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                     val balance = balanceWei?.let(::formatNativeBalance) ?: "Not checked"
                     Text("Native balance: $balance")
                     if (balanceWei?.let { BigInteger(it) < MINIMUM_GAS_RESERVE_WEI } == true) {
@@ -302,7 +305,9 @@ private fun OperatorWalletCard(
                         color = if (authorized == false) MaterialTheme.colorScheme.error
                         else MaterialTheme.colorScheme.onSurface
                     )
-                    Text("Invoice namespace: ${if (activated) "active for this chain/vault" else "legacy identifier until authorization"}")
+                    Text(
+                        "Settlement target: ${if (settlementTargetVerified) "verified for this chain/vault" else "verified again before signing"}"
+                    )
                     Text(
                         "Key protection: ${if (strongBoxBacked) "StrongBox" else if (hardwareBacked) "hardware-backed Keystore" else "Keystore"}; " +
                             if (deviceAuthenticationRequired) "device authentication required" else "authentication unavailable",
@@ -369,54 +374,6 @@ private fun ScannableAddressField(
             supportingText = { Text("Scan a non-zero address-only QR or enter 0x plus 40 hex digits.") },
             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         )
-    }
-}
-
-@Composable
-private fun TerminalIdentifierCard(identifier: String) {
-    val clipboard = LocalClipboardManager.current
-    val context = LocalContext.current
-
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Text("Terminal identifier", style = MaterialTheme.typography.titleMedium)
-            SelectionContainer {
-                Text(
-                    identifier,
-                    style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-                )
-            }
-            Text(
-                "IDENTIFIER ONLY — DO NOT FUND. This is not a wallet or receiving address. " +
-                    "Sending assets to it may permanently lose funds.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-            )
-            OutlinedButton(
-                onClick = {
-                    clipboard.setText(AnnotatedString(identifier))
-                    Toast.makeText(context, "Terminal identifier copied", Toast.LENGTH_SHORT).show()
-                },
-            ) {
-                Icon(Icons.Default.ContentCopy, contentDescription = null)
-                Text(" Copy")
-            }
-            QRCodeView(
-                data = identifier,
-                size = 156.dp,
-                contentDescription = "Terminal identifier QR code",
-                modifier = Modifier.align(Alignment.CenterHorizontally),
-            )
-            Text(
-                "This QR contains the identifier only. It is not a payment request.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.align(Alignment.CenterHorizontally),
-            )
-        }
     }
 }
 

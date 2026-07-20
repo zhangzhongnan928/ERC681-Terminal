@@ -77,6 +77,14 @@ fun InvoiceScreen(viewModel: InvoiceViewModel, onInvoiceCreated: (String) -> Uni
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (!state.operatorWalletReady) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Create the terminal operator wallet in Settings first. Its public address " +
+                        "identifies every new invoice; existing invoices are unchanged.",
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
             state.error?.let {
                 Spacer(Modifier.height(12.dp))
                 Text(it, color = MaterialTheme.colorScheme.error)
@@ -84,7 +92,8 @@ fun InvoiceScreen(viewModel: InvoiceViewModel, onInvoiceCreated: (String) -> Uni
             Spacer(Modifier.height(20.dp))
             Button(
                 onClick = viewModel::createInvoice,
-                enabled = !state.isCreating && state.selectedToken != null && state.amount.isNotBlank(),
+                enabled = !state.isCreating && state.operatorWalletReady &&
+                    state.selectedToken != null && state.amount.isNotBlank(),
                 modifier = Modifier.fillMaxWidth().height(56.dp)
             ) {
                 if (state.isCreating) {
