@@ -16,9 +16,15 @@ interface ReadOnlyChainClient {
 
     fun tokenDecimals(token: EvmAddress): Int
 
+    /** Strictly decoded ERC-20 display symbol. Implementations must fail closed on unsafe text. */
+    fun tokenSymbol(token: EvmAddress): String
+
     fun tokenBalance(token: EvmAddress, holder: EvmAddress, blockNumber: Long? = null): BigInteger
 
     fun blockNumber(): Long
+
+    /** Canonical hash for an exact block height, or null when that height is unavailable. */
+    fun blockHash(blockNumber: Long): String?
 }
 
 data class NetworkValidation(
@@ -29,6 +35,7 @@ data class NetworkValidation(
     val token: EvmAddress,
     val tokenWhitelisted: Boolean,
     val tokenDecimals: Int,
+    val tokenSymbol: String,
 )
 
 open class RpcException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)

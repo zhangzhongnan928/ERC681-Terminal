@@ -10,6 +10,7 @@ import com.openpasskey.terminal.data.model.InvoiceStatus
 import com.openpasskey.terminal.data.repository.InvoiceRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -47,7 +48,31 @@ class InvoiceViewModel(
         viewModelScope.launch {
             repository.observeRecent(100).collect { _recentInvoices.value = it }
         }
-        viewModelScope.launch { repository.recoverOpenInvoices() }
+        viewModelScope.launch {
+            while (true) {
+                try {
+                    repository.reconcileLateInvoices()
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    // The next bounded pass retries unreachable RPCs and rotates independently
+                    // from recovery of open invoices.
+                }
+                delay(RECOVERY_INTERVAL_MILLIS)
+            }
+        }
+        viewModelScope.launch {
+            while (true) {
+                try {
+                    repository.recoverOpenInvoices()
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    // Open-invoice recovery is best-effort and cannot delay the late-payment loop.
+                }
+                delay(RECOVERY_INTERVAL_MILLIS)
+            }
+        }
     }
 
     fun refreshConfiguration() {
@@ -151,5 +176,9 @@ class InvoiceViewModel(
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
             InvoiceViewModel(repository, chainConfig) as T
+    }
+
+    private companion object {
+        const val RECOVERY_INTERVAL_MILLIS = 30_000L
     }
 }

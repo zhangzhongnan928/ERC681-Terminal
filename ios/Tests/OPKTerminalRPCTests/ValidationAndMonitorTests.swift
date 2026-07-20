@@ -11,8 +11,10 @@ private actor FixtureRPC: EthereumReadRPC {
     let vault: EthereumAddress
     let token: EthereumAddress
     let tokenDecimals: UInt8
+    let tokenSymbol: String
     var currentBlock: UInt64
     var receiverBalance: UInt256
+    var canonicalHashes: [UInt64: Bytes32]
     private(set) var lastCallBlock: RPCBlockTag?
 
     init(
@@ -22,6 +24,7 @@ private actor FixtureRPC: EthereumReadRPC {
         vault: EthereumAddress,
         token: EthereumAddress,
         tokenDecimals: UInt8 = 18,
+        tokenSymbol: String = "AUD",
         block: UInt64 = 100,
         balance: UInt256 = .zero
     ) {
@@ -31,12 +34,17 @@ private actor FixtureRPC: EthereumReadRPC {
         self.vault = vault
         self.token = token
         self.tokenDecimals = tokenDecimals
+        self.tokenSymbol = tokenSymbol
         currentBlock = block
         receiverBalance = balance
+        canonicalHashes = [block: fixtureBlockHash(block)]
     }
 
     func chainID() async throws -> UInt64 { reportedChainID }
     func blockNumber() async throws -> UInt64 { currentBlock }
+    func canonicalBlockHash(at blockNumber: UInt64) async throws -> Bytes32 {
+        canonicalHashes[blockNumber] ?? fixtureBlockHash(blockNumber)
+    }
 
     func code(at address: EthereumAddress, block: RPCBlockTag) async throws -> Data {
         [factory, implementation, vault, token].contains(address) ? Data([0x60, 0x01]) : Data()
@@ -57,6 +65,9 @@ private actor FixtureRPC: EthereumReadRPC {
         if address == token && selector == ABI.decimalsSelector {
             return ABI.word(UInt64(tokenDecimals))
         }
+        if address == token && selector == ABI.symbolSelector {
+            return abiDynamicString(tokenSymbol)
+        }
         if address == token && selector == ABI.balanceOfSelector {
             return ABI.word(receiverBalance)
         }
@@ -66,7 +77,30 @@ private actor FixtureRPC: EthereumReadRPC {
     func set(block: UInt64, balance: UInt256) {
         currentBlock = block
         receiverBalance = balance
+        if canonicalHashes[block] == nil {
+            canonicalHashes[block] = fixtureBlockHash(block)
+        }
     }
+
+    func replaceCanonicalHash(at block: UInt64, fork: UInt64) {
+        canonicalHashes[block] = fixtureBlockHash(block, fork: fork)
+    }
+}
+
+private func fixtureBlockHash(_ block: UInt64, fork: UInt64 = 0) -> Bytes32 {
+    let prefix = String(repeating: "0", count: 32)
+    let forkHex = String(format: "%016llx", fork)
+    let blockHex = String(format: "%016llx", block)
+    return try! Bytes32(hex: "0x\(prefix)\(forkHex)\(blockHex)")
+}
+
+private func abiDynamicString(_ value: String) -> Data {
+    let bytes = Data(value.utf8)
+    let paddedCount = ((bytes.count + 31) / 32) * 32
+    return ABI.word(UInt64(32))
+        + ABI.word(UInt64(bytes.count))
+        + bytes
+        + Data(repeating: 0, count: paddedCount - bytes.count)
 }
 
 final class ValidationAndMonitorTests: XCTestCase {
@@ -143,17 +177,72 @@ final class ValidationAndMonitorTests: XCTestCase {
             .confirming(received: UInt256(1_000), confirmations: 1, required: 2)
         )
         XCTAssertEqual(observation.thresholdBlock, 101)
+        XCTAssertEqual(observation.thresholdBlockHash, fixtureBlockHash(101))
+        let thresholdCursor = try XCTUnwrap(observation.thresholdCursor)
 
         await rpc.set(block: 102, balance: UInt256(1_000))
-        observation = try await monitor.sample(request, previousThresholdBlock: 101)
+        observation = try await monitor.sample(
+            request,
+            previousThresholdCursor: thresholdCursor
+        )
         XCTAssertEqual(observation.status, .paid(received: UInt256(1_000)))
 
         await rpc.set(block: 103, balance: UInt256(1_250))
-        observation = try await monitor.sample(request, previousThresholdBlock: 101)
+        observation = try await monitor.sample(
+            request,
+            previousThresholdCursor: thresholdCursor
+        )
         XCTAssertEqual(
             observation.status,
             .overpaid(received: UInt256(1_250), excess: UInt256(250))
         )
+    }
+
+    func testReplacementForkCannotInheritPaymentConfirmationsAtSameBalance() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 2)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+        let rpc = FixtureRPC(
+            chainID: 84_532,
+            factory: factory,
+            implementation: implementation,
+            vault: vault,
+            token: tokenAddress,
+            block: 101,
+            balance: UInt256(1_000)
+        )
+        let monitor = PaymentMonitor(
+            rpc: rpc,
+            confirmationPolicy: .init(requiredBlocks: 2)
+        )
+
+        let original = try await monitor.sample(request)
+        let displacedCursor = try XCTUnwrap(original.thresholdCursor)
+        XCTAssertEqual(
+            original.status,
+            .confirming(received: UInt256(1_000), confirmations: 1, required: 2)
+        )
+
+        await rpc.replaceCanonicalHash(at: 101, fork: 1)
+        await rpc.set(block: 102, balance: UInt256(1_000))
+        let replacement = try await monitor.sample(
+            request,
+            previousThresholdCursor: displacedCursor
+        )
+
+        XCTAssertEqual(replacement.thresholdBlock, 102)
+        XCTAssertEqual(replacement.thresholdBlockHash, fixtureBlockHash(102))
+        XCTAssertEqual(
+            replacement.status,
+            .confirming(received: UInt256(1_000), confirmations: 1, required: 2)
+        )
+        XCTAssertFalse(replacement.validated(displacedCursor))
     }
 
     func testExpiredInvoiceClosesWithZeroOrPartialFunds() throws {
@@ -180,6 +269,7 @@ final class ValidationAndMonitorTests: XCTestCase {
                 request,
                 balance: .zero,
                 block: 10,
+                blockHash: fixtureBlockHash(10),
                 now: Date(timeIntervalSince1970: 3_000)
             ).status,
             .expired(lastObserved: .zero)
@@ -189,6 +279,7 @@ final class ValidationAndMonitorTests: XCTestCase {
                 request,
                 balance: UInt256(10),
                 block: 11,
+                blockHash: fixtureBlockHash(11),
                 now: Date(timeIntervalSince1970: 3_000)
             ).status,
             .expired(lastObserved: UInt256(10))

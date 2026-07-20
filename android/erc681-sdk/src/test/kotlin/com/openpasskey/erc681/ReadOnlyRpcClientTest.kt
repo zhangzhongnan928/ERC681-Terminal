@@ -23,7 +23,13 @@ class ReadOnlyRpcClientTest {
         val client = ReadOnlyRpcClient.forTest(config) { body ->
             val request = JsonParser.parseString(body).asJsonObject.also(seen::add)
             val method = request.get("method").asString
-            val result = when (method) {
+            if (method == "eth_getBlockByNumber") {
+                val params = request.getAsJsonArray("params")
+                assertEquals("0x64", params[0].asString)
+                assertEquals(false, params[1].asBoolean)
+                success(request, blockResult(100, BLOCK_HASH))
+            } else {
+                val result = when (method) {
                 "eth_chainId" -> "0x14a34"
                 "eth_blockNumber" -> "0x64"
                 "eth_getCode" -> "0x60016000"
@@ -32,21 +38,25 @@ class ReadOnlyRpcClientTest {
                     "0xc45a0155" -> abiAddress(factory)
                     "0x930eaddc" -> abiUint(BigInteger.ONE)
                     "0x313ce567" -> abiUint(BigInteger.valueOf(18))
+                    "0x95d89b41" -> abiString("AUD")
                     "0x70a08231" -> abiUint(BigInteger("12340000"))
                     else -> error("Unexpected eth_call selector")
                 }
-                else -> error("Unexpected method $method")
+                    else -> error("Unexpected method $method")
+                }
+                success(request, result)
             }
-            success(request, result)
         }
 
         assertEquals(84532, client.chainId())
         assertEquals(100, client.blockNumber())
+        assertEquals(BLOCK_HASH, client.blockHash(100))
         assertContentEquals(Hex.decode("0x60016000"), client.codeAt(factory))
         assertEquals(implementation, client.factoryImplementation())
         assertEquals(factory, client.vaultFactory())
         assertTrue(client.isPaymentToken(token))
         assertEquals(18, client.tokenDecimals(token))
+        assertEquals("AUD", client.tokenSymbol(token))
         assertEquals(BigInteger("12340000"), client.tokenBalance(token, holder, 100))
         val balanceRequest = seen.last().getAsJsonArray("params")
         assertEquals("0x64", balanceRequest[1].asString)
@@ -79,6 +89,27 @@ class ReadOnlyRpcClientTest {
     }
 
     @Test
+    fun `canonical block hash lookup rejects wrong or malformed block identity`() {
+        fun client(result: JsonObject) = ReadOnlyRpcClient.forTest(config) { body ->
+            success(JsonParser.parseString(body).asJsonObject, result)
+        }
+
+        assertFailsWith<RpcException> { client(blockResult(99, BLOCK_HASH)).blockHash(100) }
+        assertFailsWith<RpcException> {
+            client(blockResult(100, "0x1234")).blockHash(100)
+        }
+        val unavailable = ReadOnlyRpcClient.forTest(config) { body ->
+            val request = JsonParser.parseString(body).asJsonObject
+            JsonObject().apply {
+                addProperty("jsonrpc", "2.0")
+                add("id", request.get("id"))
+                add("result", com.google.gson.JsonNull.INSTANCE)
+            }.toString()
+        }
+        assertEquals(null, unavailable.blockHash(100))
+    }
+
+    @Test
     fun `token decimals uses strict uint8 ABI decoding`() {
         val tooLarge = ReadOnlyRpcClient.forTest(config) { body ->
             success(JsonParser.parseString(body).asJsonObject, abiUint(BigInteger.valueOf(256)))
@@ -91,15 +122,75 @@ class ReadOnlyRpcClientTest {
         assertFailsWith<RpcException> { shortWord.tokenDecimals(token) }
     }
 
+    @Test
+    fun `token symbol uses strict canonical dynamic string decoding`() {
+        listOf("AUD", "OPK2", "₿").forEach { expected ->
+            val client = ReadOnlyRpcClient.forTest(config) { body ->
+                success(JsonParser.parseString(body).asJsonObject, abiString(expected))
+            }
+            assertEquals(expected, client.tokenSymbol(token))
+        }
+
+        val rejected = listOf(
+            "0x" + "00".repeat(96),
+            abiString(""),
+            abiString(" "),
+            abiString(" AUD"),
+            abiString("\u00a0AUD"),
+            abiString("AUD\u00a0"),
+            abiString("A\nD"),
+            abiString("A\u202eD"),
+            abiString("A\u200bD"),
+            abiString("A\u2028D"),
+            abiString("A\u2029D"),
+            abiString("A".repeat(33)),
+            abiString("AUD").replaceRange(2, 66, "00".repeat(31) + "40"),
+            abiString("AUD") + "00".repeat(32),
+            abiString("AUD").dropLast(2) + "01",
+            "0x" + abiUint(BigInteger.valueOf(32)).substring(2) +
+                abiUint(BigInteger.ONE).substring(2) + "ff" + "00".repeat(31),
+        )
+        rejected.forEach { result ->
+            val client = ReadOnlyRpcClient.forTest(config) { body ->
+                success(JsonParser.parseString(body).asJsonObject, result)
+            }
+            assertFailsWith<RpcException>(result.take(24)) { client.tokenSymbol(token) }
+        }
+    }
+
     private fun success(request: JsonObject, result: String): String = JsonObject().apply {
         addProperty("jsonrpc", "2.0")
         add("id", request.get("id"))
         addProperty("result", result)
     }.toString()
 
+    private fun success(request: JsonObject, result: JsonObject): String = JsonObject().apply {
+        addProperty("jsonrpc", "2.0")
+        add("id", request.get("id"))
+        add("result", result)
+    }.toString()
+
+    private fun blockResult(number: Long, hash: String): JsonObject = JsonObject().apply {
+        addProperty("number", "0x" + number.toString(16))
+        addProperty("hash", hash)
+    }
+
     private fun abiAddress(address: EvmAddress): String =
         "0x" + "00".repeat(12) + address.value.substring(2)
 
     private fun abiUint(value: BigInteger): String =
         "0x" + value.toString(16).padStart(64, '0')
+
+    private fun abiString(value: String): String {
+        val bytes = value.toByteArray(Charsets.UTF_8)
+        val padding = (32 - bytes.size % 32) % 32
+        return abiUint(BigInteger.valueOf(32)) +
+            abiUint(BigInteger.valueOf(bytes.size.toLong())).substring(2) +
+            Hex.encode(bytes).substring(2) + "00".repeat(padding)
+    }
+
+    private companion object {
+        const val BLOCK_HASH =
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
 }

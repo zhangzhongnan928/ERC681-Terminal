@@ -3,208 +3,389 @@ import SwiftUI
 import UIKit
 
 private enum SettingsFocusField: Hashable {
-    case rpcURL
-    case chainID
-    case factory
-    case receiverImplementation
+    case createPIN
+    case confirmPIN
+    case unlockPIN
     case vault
-    case tokenAddress
-    case tokenSymbol
-    case tokenDecimals
-    case confirmationBlocks
+    case token
 }
 
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var didCopyOperator = false
+    @State private var createPIN = ""
+    @State private var confirmPIN = ""
+    @State private var unlockPIN = ""
+    @State private var manualVault = ""
+    @State private var manualToken = ""
+    @State private var isPresentingProvisioningScanner = false
+    @State private var isConfirmingWalletReset = false
     @FocusState private var focusedField: SettingsFocusField?
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Network") {
-                    TextField("RPC URL", text: $model.settings.rpcURL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .focused($focusedField, equals: .rpcURL)
-                        .submitLabel(.next)
-                        .onSubmit { focusedField = .chainID }
-                        .accessibilityLabel("RPC URL")
-                    TextField("Chain ID", text: $model.settings.chainID)
-                        .keyboardType(.numberPad)
-                        .focused($focusedField, equals: .chainID)
-                        .accessibilityLabel("Chain ID")
-                    LabeledContent("Protocol", value: "1.4.1 (deployed)")
-                }
-
-                Section("Contracts") {
-                    AddressField(
-                        "Factory",
-                        text: $model.settings.factory,
-                        focus: $focusedField,
-                        field: .factory,
-                        onSubmit: { focusedField = .receiverImplementation }
-                    )
-                    AddressField(
-                        "Receiver implementation",
-                        text: $model.settings.receiverImplementation,
-                        focus: $focusedField,
-                        field: .receiverImplementation,
-                        onSubmit: { focusedField = .vault }
-                    )
-                    AddressField(
-                        "Vault",
-                        text: $model.settings.vault,
-                        focus: $focusedField,
-                        field: .vault,
-                        onSubmit: { focusedField = .tokenAddress }
-                    )
-                }
-
-                Section("Payment token") {
-                    AddressField(
-                        "Token",
-                        text: $model.settings.tokenAddress,
-                        focus: $focusedField,
-                        field: .tokenAddress,
-                        onSubmit: { focusedField = .tokenSymbol }
-                    )
-                    TextField("Symbol", text: $model.settings.tokenSymbol)
-                        .focused($focusedField, equals: .tokenSymbol)
-                        .submitLabel(.next)
-                        .onSubmit { focusedField = .tokenDecimals }
-                        .accessibilityLabel("Token symbol")
-                    TextField("Decimals", text: $model.settings.tokenDecimals)
-                        .keyboardType(.numberPad)
-                        .focused($focusedField, equals: .tokenDecimals)
-                        .accessibilityLabel("Token decimals")
-                    TextField("Confirmation blocks", text: $model.settings.confirmationBlocks)
-                        .keyboardType(.numberPad)
-                        .focused($focusedField, equals: .confirmationBlocks)
-                        .accessibilityLabel("Confirmation blocks")
-                }
-
-                Section("Terminal operator wallet") {
-                    if let address = model.operatorAddress {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Terminal identity and settlement EOA")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-
-                            Text(address.hex)
-                                .font(.system(.footnote, design: .monospaced))
-                                .textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            Button {
-                                UIPasteboard.general.string = address.hex
-                                didCopyOperator = true
-                            } label: {
-                                Label(
-                                    didCopyOperator ? "Wallet address copied" : "Copy wallet address",
-                                    systemImage: didCopyOperator ? "checkmark" : "doc.on.doc"
-                                )
-                            }
-                            .buttonStyle(.bordered)
-
-                            QRCodeImage(
-                                payload: UInt64(model.settings.chainID).flatMap { chainID in
-                                    chainID > 0 ? "ethereum:\(address.hex)@\(chainID)" : nil
-                                } ?? address.hex,
-                                size: 210,
-                                accessibilityLabel: "Settlement operator wallet QR code",
-                                failureDescription: "Copy the wallet address instead."
-                            )
-                            .frame(maxWidth: .infinity)
-
-                            Label(
-                                "This public address identifies every new invoice. Vault authorization is checked separately before settlement.",
-                                systemImage: "person.text.rectangle.fill"
-                            )
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-
-                            if let status = model.operatorStatus {
-                                LabeledContent(
-                                    "ETH balance",
-                                    value: "\(TokenAmount(rawValue: status.balance, decimals: 18).displayString()) ETH"
-                                )
-                                Label(
-                                    status.isAuthorizedOperator
-                                        ? (status.isVaultOwner ? "Authorized as vault owner" : "Authorized vault operator")
-                                        : "Not authorized by the configured vault",
-                                    systemImage: status.isAuthorizedOperator
-                                        ? "checkmark.shield.fill"
-                                        : "xmark.shield.fill"
-                                )
-                                .foregroundStyle(status.isAuthorizedOperator ? .green : .red)
-
-                                if status.isLowGas {
-                                    Label(
-                                        "Low gas balance — fund this address with ETH before settling.",
-                                        systemImage: "fuelpump.fill"
-                                    )
-                                    .foregroundStyle(.orange)
-                                }
-                            } else if let message = model.operatorStatusMessage {
-                                Text(message)
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            Button {
-                                focusedField = nil
-                                Task { await model.refreshOperatorStatus() }
-                            } label: {
-                                Label("Refresh balance and authorization", systemImage: "arrow.clockwise")
-                            }
-                            .disabled(model.settlementBusy)
-
-                            Text("Send ETH for gas to this operator address. Its secp256k1 private key is non-syncing Keychain data and every settlement signature requires device authentication.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    } else {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Create the device-local secp256k1 wallet used as the terminal identity for new invoices and to authorize zero-value sweep transactions. Historical invoices remain available.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-
-                            Button {
-                                focusedField = nil
-                                Task { await model.createOperatorWallet() }
-                            } label: {
-                                Label("Create operator wallet", systemImage: "key.fill")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(model.settlementBusy)
-                        }
-                    }
-                }
-
-                Section {
-                    Button {
-                        focusedField = nil
-                        Task { _ = await model.validateConfiguration() }
-                    } label: {
-                        Label("Validate configuration", systemImage: "checkmark.shield")
-                    }
-                    .disabled(model.isBusy)
-                    Text(model.validationMessage)
-                        .foregroundStyle(.secondary)
+                if model.canAccessAdmin {
+                    adminContent
+                } else {
+                    lockedContent
                 }
             }
             .scrollDismissesKeyboard(.interactively)
-            .navigationTitle("Settings")
+            .navigationTitle(model.canAccessAdmin ? "Terminal Setup" : "Terminal Status")
             .toolbar {
-                KeyboardDismissToolbar {
-                    focusedField = nil
-                }
+                KeyboardDismissToolbar { focusedField = nil }
             }
         }
-        .onDisappear {
-            focusedField = nil
+        .sheet(isPresented: $isPresentingProvisioningScanner) {
+            ProvisioningScannerSheet { payload in
+                Task { await model.provision(payload) }
+            }
+        }
+        .confirmationDialog(
+            "Permanently reset operator wallet?",
+            isPresented: $isConfirmingWalletReset,
+            titleVisibility: .visible
+        ) {
+            Button("Reset operator wallet", role: .destructive) {
+                Task { await model.resetOperatorWallet() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Reset permanently deletes this device key and is available only before the terminal has issued its first payment QR. Withdraw all gas first: both latest and pending ETH balances must be exactly zero, and a later deposit to the published address would be unrecoverable. Once any payment QR is published, revoke or reprovision without deleting this key.")
+        }
+        .onAppear {
+            if manualVault.isEmpty { manualVault = model.settings.vault }
+            if manualToken.isEmpty { manualToken = model.settings.tokenAddress }
+        }
+        .onDisappear { focusedField = nil }
+    }
+
+    @ViewBuilder
+    private var adminContent: some View {
+        operatorSetupSection
+
+        if !model.adminPINConfigured {
+            Section("2. Protect Admin") {
+                Text("After creating the operator, set a six-digit local PIN before importing or changing portal configuration. Only a salted verifier is stored in this device's Keychain.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                SecureField("Six-digit admin PIN", text: digitsBinding($createPIN))
+                    .keyboardType(.numberPad)
+                    .focused($focusedField, equals: .createPIN)
+                    .accessibilityIdentifier("createAdminPIN")
+                SecureField("Confirm PIN", text: digitsBinding($confirmPIN))
+                    .keyboardType(.numberPad)
+                    .focused($focusedField, equals: .confirmPIN)
+                    .accessibilityIdentifier("confirmAdminPIN")
+                Button("Create local admin PIN") {
+                    focusedField = nil
+                    model.configureAdminPIN(createPIN, confirmation: confirmPIN)
+                    if model.adminPINConfigured {
+                        createPIN = ""
+                        confirmPIN = ""
+                    }
+                }
+                .disabled(createPIN.count != 6 || confirmPIN.count != 6)
+                .accessibilityIdentifier("createAdminPINButton")
+            }
+        } else {
+            Section("2. Admin session") {
+                Label("Admin unlocked on this device", systemImage: "lock.open.fill")
+                    .foregroundStyle(.orange)
+                Button("Lock Admin now") { model.lockAdmin() }
+            }
+        }
+
+        Section("3. Import portal setup") {
+            Text("The QR contains only the known chain, vault, token, and this terminal's public operator. RPC and deployment trust anchors never come from the QR.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Button {
+                focusedField = nil
+                isPresentingProvisioningScanner = true
+            } label: {
+                Label(
+                    model.settings.isProvisioned ? "Scan replacement provisioning QR" : "Scan provisioning QR",
+                    systemImage: "qrcode.viewfinder"
+                )
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(
+                model.operatorAddress == nil
+                    || !model.adminPINConfigured
+                    || model.isProvisioning
+            )
+            .accessibilityIdentifier("scanProvisioningButton")
+
+            if model.isProvisioning {
+                HStack {
+                    ProgressView()
+                    Text("Validating on chain…")
+                }
+            }
+            if let message = model.provisioningMessage {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if model.settings.isProvisioned {
+            Section("Derived configuration") {
+                LabeledContent("Chain", value: model.settings.chainID)
+                LabeledContent("Vault", value: abbreviatedSetup(model.settings.vault))
+                LabeledContent("Factory", value: abbreviatedSetup(model.settings.factory))
+                LabeledContent(
+                    "Receiver implementation",
+                    value: abbreviatedSetup(model.settings.receiverImplementation)
+                )
+                LabeledContent("Token", value: abbreviatedSetup(model.settings.tokenAddress))
+                LabeledContent("Symbol", value: model.settings.tokenSymbol)
+                LabeledContent("Decimals", value: model.settings.tokenDecimals)
+                LabeledContent("RPC", value: model.settings.rpcURL)
+            }
+        }
+
+        Section("4. Readiness") {
+            ReadinessLabel(readiness: model.terminalReadiness)
+            if let status = model.operatorStatus {
+                LabeledContent(
+                    "Operator balance",
+                    value: "\(TokenAmount(rawValue: status.balance, decimals: 18).displayString()) ETH"
+                )
+                LabeledContent(
+                    "Vault access",
+                    value: status.isAuthorizedOperator ? "Authorized" : "Awaiting authorization"
+                )
+            }
+            Button {
+                Task { await model.refreshReadiness() }
+            } label: {
+                Label("Refresh on-chain readiness", systemImage: "arrow.clockwise")
+            }
+            .disabled(model.isBusy || model.isProvisioning || model.operationBusy)
+        }
+
+        if let operatorAddress = model.operatorAddress, model.adminPINConfigured {
+            Section {
+                DisclosureGroup("Advanced manual setup") {
+                    Text("Enter or scan only the vault and token. Factory, implementation, decimals, and symbol are still derived and pinned on chain.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    AddressField(
+                        "Vault",
+                        text: $manualVault,
+                        focus: $focusedField,
+                        field: .vault,
+                        onSubmit: { focusedField = .token }
+                    )
+                    AddressField(
+                        "Token",
+                        text: $manualToken,
+                        focus: $focusedField,
+                        field: .token,
+                        onSubmit: { focusedField = nil }
+                    )
+                    Button("Derive and validate manual addresses") {
+                        focusedField = nil
+                        do {
+                            let payload = try TerminalProvisioningPayload(
+                                chainID: TerminalKnownChainProfile.baseSepolia.chainID,
+                                vault: EthereumAddress(hex: manualVault, allowZero: false),
+                                token: EthereumAddress(hex: manualToken, allowZero: false),
+                                operatorAddress: operatorAddress
+                            )
+                            Task { await model.provision(payload) }
+                        } catch {
+                            model.errorMessage = error.localizedDescription
+                        }
+                    }
+                    .disabled(model.isProvisioning)
+                }
+            }
+
+            Section("Operator reset") {
+                Text("Destructive key reset is allowed only before the first payment QR is issued and only while both latest and pending operator ETH balances are zero. Withdraw gas first. Anyone can still send to the old public address later, and those late funds would be unrecoverable after deletion. After the first payment QR, retain this key and use merchant-portal revocation or terminal reprovisioning.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button("Reset operator wallet…", role: .destructive) {
+                    isConfirmingWalletReset = true
+                }
+                .disabled(model.operationBusy)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var operatorSetupSection: some View {
+        Section("1. Terminal operator") {
+            if let address = model.operatorAddress,
+               let pairingPayload = model.operatorPairingPayload {
+                Text(address.hex)
+                    .font(.system(.footnote, design: .monospaced))
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("operatorAddress")
+
+                Button {
+                    UIPasteboard.general.string = address.hex
+                    didCopyOperator = true
+                } label: {
+                    Label(
+                        didCopyOperator ? "Operator copied" : "Copy operator address",
+                        systemImage: didCopyOperator ? "checkmark" : "doc.on.doc"
+                    )
+                }
+                .buttonStyle(.bordered)
+
+                VStack(spacing: 10) {
+                    Text("Scan this pairing QR in the merchant portal")
+                        .font(.headline)
+                    QRCodeImage(
+                        payload: pairingPayload,
+                        size: 210,
+                        accessibilityLabel: "Terminal operator pairing QR code",
+                        failureDescription: "Copy the operator address instead."
+                    )
+                    Text(pairingPayload)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("operatorPairingPayload")
+                }
+                .frame(maxWidth: .infinity)
+
+                if let fundingPayload = model.operatorFundingPayload {
+                    DisclosureGroup("Gas funding QR") {
+                        VStack(spacing: 10) {
+                            QRCodeImage(
+                                payload: fundingPayload,
+                                size: 180,
+                                accessibilityLabel: "Operator gas funding QR code",
+                                failureDescription: "Copy the operator address instead."
+                            )
+                            Text("Send Base Sepolia ETH for settlement gas only.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                } else {
+                    Text("The gas funding QR appears after a portal setup is saved for this operator and chain.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Create the device-local secp256k1 EOA first. It becomes this terminal's public identity and constrained settlement signer; no admin PIN is required for this one-time creation step.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button {
+                    Task { await model.createOperatorWallet() }
+                } label: {
+                    Label("Create protected operator wallet", systemImage: "key.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.operationBusy)
+                .accessibilityIdentifier("createOperatorWalletButton")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var lockedContent: some View {
+        if let address = model.operatorAddress {
+            Section("Terminal operator") {
+                Text(address.hex)
+                    .font(.system(.footnote, design: .monospaced))
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("lockedOperatorAddress")
+                Button {
+                    UIPasteboard.general.string = address.hex
+                    didCopyOperator = true
+                } label: {
+                    Label(
+                        didCopyOperator ? "Operator copied" : "Copy operator address",
+                        systemImage: didCopyOperator ? "checkmark" : "doc.on.doc"
+                    )
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("lockedCopyOperatorAddress")
+                Text("This public EOA receives only settlement gas. Setup controls and its private signing key remain protected.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        Section("Terminal readiness") {
+            ReadinessLabel(readiness: model.terminalReadiness)
+            if let status = model.operatorStatus {
+                LabeledContent(
+                    "ETH balance",
+                    value: TokenAmount(rawValue: status.balance, decimals: 18).displayString()
+                )
+                LabeledContent(
+                    "Vault authorization",
+                    value: status.isAuthorizedOperator ? "Authorized" : "Awaiting"
+                )
+            }
+            Button("Refresh status") {
+                Task { await model.refreshReadiness() }
+            }
+            .disabled(model.isBusy || model.isProvisioning || model.operationBusy)
+        }
+
+        if let fundingPayload = model.operatorFundingPayload {
+            Section("Fund settlement gas") {
+                QRCodeImage(
+                    payload: fundingPayload,
+                    size: 180,
+                    accessibilityLabel: "Operator gas funding QR code",
+                    failureDescription: "Copy the operator address above instead."
+                )
+                .frame(maxWidth: .infinity)
+                Text("Send Base Sepolia ETH for settlement gas only. This QR is shown only for the operator and chain bound by saved provisioning.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        Section("Admin locked") {
+            Text("Setup, reprovisioning, network/vault changes, and wallet reset are hidden until the local admin PIN is verified.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            SecureField("Six-digit admin PIN", text: digitsBinding($unlockPIN))
+                .keyboardType(.numberPad)
+                .focused($focusedField, equals: .unlockPIN)
+                .accessibilityIdentifier("unlockAdminPIN")
+            Button("Unlock Admin") {
+                focusedField = nil
+                model.unlockAdmin(with: unlockPIN)
+                if model.adminUnlocked { unlockPIN = "" }
+            }
+            .disabled(unlockPIN.count != 6)
+            .accessibilityIdentifier("unlockAdminButton")
+        }
+    }
+
+    private func digitsBinding(_ source: Binding<String>) -> Binding<String> {
+        Binding(
+            get: { source.wrappedValue },
+            set: { source.wrappedValue = String($0.filter(\.isNumber).prefix(6)) }
+        )
+    }
+}
+
+private struct ReadinessLabel: View {
+    let readiness: TerminalReadiness
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(readiness.title, systemImage: readiness.systemImage)
+                .font(.headline)
+                .foregroundStyle(readiness.isReady ? .green : .orange)
+            Text(readiness.detail)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
     }
 }
@@ -268,6 +449,7 @@ private struct AddressField: View {
     }
 }
 
+/// Existing address-only scanner behavior remains deliberately separate from provisioning.
 private struct AddressScannerSheet: View {
     let fieldLabel: String
     let onAddress: (EthereumAddress) -> Void
@@ -281,40 +463,12 @@ private struct AddressScannerSheet: View {
                 ConfigurationAddressScanner(onPayload: handlePayload)
                     .ignoresSafeArea(edges: .bottom)
 
-                VStack(spacing: 20) {
-                    Text("Scan a raw 0x address or an address-only ethereum:0x… or ethereum://0x… QR code. Payment URIs are rejected.")
-                        .font(.footnote)
-                        .multilineTextAlignment(.center)
-                        .padding(12)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-
-                    Spacer()
-
-                    RoundedRectangle(cornerRadius: 20)
-                        .stroke(Color.white, style: StrokeStyle(lineWidth: 3, dash: [12, 8]))
-                        .frame(width: 250, height: 250)
-                        .shadow(color: .black.opacity(0.6), radius: 4)
-                        .accessibilityHidden(true)
-
-                    Spacer()
-
-                    if let scanError {
-                        Label(scanError, systemImage: "exclamationmark.triangle.fill")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .multilineTextAlignment(.center)
-                            .padding(12)
-                            .background(Color.red.opacity(0.9), in: RoundedRectangle(cornerRadius: 12))
-                    }
-                }
-                .padding()
+                scannerOverlay(
+                    instructions: "Scan a raw 0x address or an address-only ethereum:0x… or ethereum://0x… QR code. Payment URIs are rejected.",
+                    scanError: scanError
+                )
             }
             .background(Color.black)
-            .onChange(of: scanError) { _, message in
-                if let message {
-                    UIAccessibility.post(notification: .announcement, argument: message)
-                }
-            }
             .navigationTitle("Scan \(fieldLabel)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -336,4 +490,84 @@ private struct AddressScannerSheet: View {
             return false
         }
     }
+}
+
+private struct ProvisioningScannerSheet: View {
+    let onPayload: (TerminalProvisioningPayload) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var scanError: String?
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                ConfigurationAddressScanner(onPayload: handlePayload)
+                    .ignoresSafeArea(edges: .bottom)
+
+                scannerOverlay(
+                    instructions: "Scan the exact OPK terminal provisioning QR shown by the merchant portal. Payment and address-only QRs are rejected.",
+                    scanError: scanError
+                )
+            }
+            .background(Color.black)
+            .navigationTitle("Provision terminal")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func handlePayload(_ rawPayload: String) -> Bool {
+        do {
+            let payload = try TerminalProvisioningPayload.parse(rawPayload)
+            onPayload(payload)
+            dismiss()
+            return true
+        } catch {
+            scanError = error.localizedDescription
+            return false
+        }
+    }
+}
+
+@MainActor
+private func scannerOverlay(instructions: String, scanError: String?) -> some View {
+    VStack(spacing: 20) {
+        Text(instructions)
+            .font(.footnote)
+            .multilineTextAlignment(.center)
+            .padding(12)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+
+        Spacer()
+
+        RoundedRectangle(cornerRadius: 20)
+            .stroke(Color.white, style: StrokeStyle(lineWidth: 3, dash: [12, 8]))
+            .frame(width: 250, height: 250)
+            .shadow(color: .black.opacity(0.6), radius: 4)
+            .accessibilityHidden(true)
+
+        Spacer()
+
+        if let scanError {
+            Label(scanError, systemImage: "exclamationmark.triangle.fill")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+                .padding(12)
+                .background(Color.red.opacity(0.9), in: RoundedRectangle(cornerRadius: 12))
+                .onAppear {
+                    UIAccessibility.post(notification: .announcement, argument: scanError)
+                }
+        }
+    }
+    .padding()
+}
+
+private func abbreviatedSetup(_ value: String) -> String {
+    guard value.count > 18 else { return value }
+    return "\(value.prefix(10))…\(value.suffix(6))"
 }

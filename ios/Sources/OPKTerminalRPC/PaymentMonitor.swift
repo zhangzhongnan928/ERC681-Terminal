@@ -1,6 +1,19 @@
 import Foundation
 import OPKTerminalCore
 
+public enum PaymentMonitorError: Error, Equatable, Sendable {
+    case canonicalBlockChanged(blockNumber: UInt64)
+}
+
+extension PaymentMonitorError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case let .canonicalBlockChanged(blockNumber):
+            "Canonical block \(blockNumber) changed while sampling payment state. Retry the observation."
+        }
+    }
+}
+
 public struct PaymentMonitor: Sendable {
     private let rpc: any EthereumReadRPC
     public let confirmationPolicy: ConfirmationPolicy
@@ -18,10 +31,12 @@ public struct PaymentMonitor: Sendable {
 
     public func sample(
         _ request: PaymentRequest,
-        previousThresholdBlock: UInt64? = nil,
+        previousThresholdCursor: PaymentConfirmationCursor? = nil,
+        additionalCursors: [PaymentConfirmationCursor] = [],
         now: Date = Date()
     ) async throws -> PaymentObservation {
         let block = try await rpc.blockNumber()
+        let initialBlockHash = try await rpc.canonicalBlockHash(at: block)
         let balanceData = try await rpc.call(
             to: request.token.address,
             data: ABI.encodeCall(
@@ -31,11 +46,34 @@ public struct PaymentMonitor: Sendable {
             block: .number(block)
         )
         let balance = try ABI.decodeUInt256(balanceData)
+        let sampledBlockHash = try await rpc.canonicalBlockHash(at: block)
+        guard sampledBlockHash == initialBlockHash else {
+            throw PaymentMonitorError.canonicalBlockChanged(blockNumber: block)
+        }
+
+        let cursors = [previousThresholdCursor].compactMap { $0 } + additionalCursors
+        var validatedCursors = [PaymentConfirmationCursor]()
+        var seenCursors = Set<PaymentConfirmationCursor>()
+        for cursor in cursors where seenCursors.insert(cursor).inserted {
+            guard cursor.blockNumber <= block else { continue }
+            let canonicalHash = cursor.blockNumber == block
+                ? sampledBlockHash
+                : try await rpc.canonicalBlockHash(at: cursor.blockNumber)
+            if canonicalHash == cursor.blockHash {
+                validatedCursors.append(cursor)
+            }
+        }
+        let finalBlockHash = try await rpc.canonicalBlockHash(at: block)
+        guard finalBlockHash == sampledBlockHash else {
+            throw PaymentMonitorError.canonicalBlockChanged(blockNumber: block)
+        }
         return classify(
             request,
             balance: balance,
             block: block,
-            previousThresholdBlock: previousThresholdBlock,
+            blockHash: finalBlockHash,
+            previousThresholdCursor: previousThresholdCursor,
+            validatedCursors: validatedCursors,
             now: now
         )
     }
@@ -44,7 +82,9 @@ public struct PaymentMonitor: Sendable {
         _ request: PaymentRequest,
         balance: UInt256,
         block: UInt64,
-        previousThresholdBlock: UInt64? = nil,
+        blockHash: Bytes32,
+        previousThresholdCursor: PaymentConfirmationCursor? = nil,
+        validatedCursors: [PaymentConfirmationCursor] = [],
         now: Date = Date()
     ) -> PaymentObservation {
         let expected = request.expectedAmount
@@ -60,19 +100,27 @@ public struct PaymentMonitor: Sendable {
             return PaymentObservation(
                 invoiceID: request.invoiceID,
                 blockNumber: block,
+                blockHash: blockHash,
                 balance: balance,
                 status: status,
-                thresholdBlock: nil
+                thresholdBlock: nil,
+                thresholdBlockHash: nil,
+                validatedPreviousCursors: validatedCursors
             )
         }
 
-        let threshold: UInt64
-        if let previousThresholdBlock, previousThresholdBlock <= block {
-            threshold = previousThresholdBlock
+        let thresholdCursor: PaymentConfirmationCursor
+        if let previousThresholdCursor,
+           previousThresholdCursor.blockNumber <= block,
+           validatedCursors.contains(previousThresholdCursor) {
+            thresholdCursor = previousThresholdCursor
         } else {
-            threshold = block
+            thresholdCursor = PaymentConfirmationCursor(
+                blockNumber: block,
+                blockHash: blockHash
+            )
         }
-        let confirmations = block - threshold + 1
+        let confirmations = block - thresholdCursor.blockNumber + 1
         let status: PaymentStatus
         if confirmations < confirmationPolicy.requiredBlocks {
             status = .confirming(
@@ -89,27 +137,30 @@ public struct PaymentMonitor: Sendable {
         return PaymentObservation(
             invoiceID: request.invoiceID,
             blockNumber: block,
+            blockHash: blockHash,
             balance: balance,
             status: status,
-            thresholdBlock: threshold
+            thresholdBlock: thresholdCursor.blockNumber,
+            thresholdBlockHash: thresholdCursor.blockHash,
+            validatedPreviousCursors: validatedCursors
         )
     }
 
     public func observations(
         for request: PaymentRequest,
-        startingThresholdBlock: UInt64? = nil
+        startingThresholdCursor: PaymentConfirmationCursor? = nil
     ) -> AsyncThrowingStream<PaymentObservation, Error> {
         let monitor = self
         return AsyncThrowingStream { continuation in
             let task = Task {
-                var threshold = startingThresholdBlock
+                var thresholdCursor = startingThresholdCursor
                 do {
                     while !Task.isCancelled {
                         let observation = try await monitor.sample(
                             request,
-                            previousThresholdBlock: threshold
+                            previousThresholdCursor: thresholdCursor
                         )
-                        threshold = observation.thresholdBlock
+                        thresholdCursor = observation.thresholdCursor
                         continuation.yield(observation)
                         switch observation.status {
                         case .paid, .overpaid, .expired:

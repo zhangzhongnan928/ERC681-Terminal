@@ -50,15 +50,22 @@ private struct NewSaleView: View {
                 )
             } else {
                 Form {
-                    if model.operatorAddress == nil {
-                        Section {
-                            Label(
-                                "Create the terminal operator wallet in Settings before accepting a payment.",
-                                systemImage: "key.fill"
-                            )
-                            .foregroundStyle(.orange)
-                        } footer: {
-                            Text("The operator public address is the terminal identity for every new invoice. Existing invoices are unchanged.")
+                    Section("Terminal readiness") {
+                        Label(
+                            model.terminalReadiness.title,
+                            systemImage: model.terminalReadiness.systemImage
+                        )
+                        .foregroundStyle(model.terminalReadiness.isReady ? .green : .orange)
+                        Text(model.terminalReadiness.detail)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        if model.settings.isProvisioned {
+                            Button {
+                                Task { await model.refreshReadiness() }
+                            } label: {
+                                Label("Refresh readiness", systemImage: "arrow.clockwise")
+                            }
+                            .disabled(model.isBusy || model.isProvisioning || model.operationBusy)
                         }
                     }
 
@@ -80,7 +87,13 @@ private struct NewSaleView: View {
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(amount.isEmpty || model.isBusy || model.operatorAddress == nil)
+                        .disabled(
+                            amount.isEmpty
+                                || model.isBusy
+                                || model.isProvisioning
+                                || model.operationBusy
+                                || !model.terminalReadiness.isReady
+                        )
                     }
 
                     Section {

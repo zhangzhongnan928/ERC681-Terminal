@@ -1,6 +1,7 @@
 package com.openpasskey.erc681
 
 import com.google.gson.JsonArray
+import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import java.io.ByteArrayOutputStream
@@ -8,6 +9,7 @@ import java.io.InputStream
 import java.math.BigInteger
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicLong
 
@@ -37,6 +39,36 @@ class ReadOnlyRpcClient private constructor(
 
     override fun blockNumber(): Long = rpcQuantity("eth_blockNumber").toSupportedLong("Block number")
 
+    override fun blockHash(blockNumber: Long): String? {
+        require(blockNumber >= 0) { "Block number must not be negative" }
+        val params = JsonArray().apply {
+            add(quantityHex(blockNumber))
+            add(false)
+        }
+        val result = rpcResult("eth_getBlockByNumber", params)
+        if (result.isJsonNull) return null
+        if (!result.isJsonObject) throw RpcException("eth_getBlockByNumber result must be an object or null")
+        val block = result.asJsonObject
+        val returnedNumber = block.get("number")?.takeIf {
+            it.isJsonPrimitive && it.asJsonPrimitive.isString
+        }?.asString ?: throw RpcException("eth_getBlockByNumber result has no block number")
+        val decodedNumber = try {
+            parseQuantity(returnedNumber, "Block number").toSupportedLong("Block number")
+        } catch (error: IllegalArgumentException) {
+            throw RpcException("eth_getBlockByNumber returned a malformed block number", error)
+        }
+        if (decodedNumber != blockNumber) {
+            throw RpcException("eth_getBlockByNumber returned block $decodedNumber for requested block $blockNumber")
+        }
+        val hash = block.get("hash")?.takeIf {
+            it.isJsonPrimitive && it.asJsonPrimitive.isString
+        }?.asString ?: throw RpcException("eth_getBlockByNumber result has no block hash")
+        if (!BLOCK_HASH_PATTERN.matches(hash)) {
+            throw RpcException("eth_getBlockByNumber returned a malformed block hash")
+        }
+        return hash.lowercase()
+    }
+
     override fun codeAt(address: EvmAddress): ByteArray {
         val params = JsonArray().apply {
             add(address.value)
@@ -45,15 +77,30 @@ class ReadOnlyRpcClient private constructor(
         return decodeData(rpcString("eth_getCode", params), "eth_getCode result")
     }
 
-    override fun factoryImplementation(): EvmAddress =
-        decodeAddress(ethCall(config.factory, abiFunction("implementation()")), "factory implementation")
+    override fun factoryImplementation(): EvmAddress = factoryImplementation(config.factory)
 
-    override fun vaultFactory(): EvmAddress =
-        decodeAddress(ethCall(config.vault, abiFunction("factory()")), "vault factory")
+    /** Fixed-selector bootstrap read for a policy-pinned factory. */
+    fun factoryImplementation(factory: EvmAddress): EvmAddress {
+        require(!factory.isZero) { "Factory address must not be zero" }
+        return decodeAddress(ethCall(factory, abiFunction("implementation()")), "factory implementation")
+    }
 
-    override fun isPaymentToken(token: EvmAddress): Boolean {
+    override fun vaultFactory(): EvmAddress = vaultFactory(config.vault)
+
+    /** Fixed-selector bootstrap read for the vault supplied by a provisioning payload. */
+    fun vaultFactory(vault: EvmAddress): EvmAddress {
+        require(!vault.isZero) { "Vault address must not be zero" }
+        return decodeAddress(ethCall(vault, abiFunction("factory()")), "vault factory")
+    }
+
+    override fun isPaymentToken(token: EvmAddress): Boolean = isPaymentToken(config.vault, token)
+
+    /** Fixed-selector bootstrap read scoped to a supplied vault and token. */
+    fun isPaymentToken(vault: EvmAddress, token: EvmAddress): Boolean {
+        require(!vault.isZero) { "Vault address must not be zero" }
+        require(!token.isZero) { "Token address must not be zero" }
         val result = decodeWord(
-            ethCall(config.vault, abiFunction("isPaymentToken(address)", token)),
+            ethCall(vault, abiFunction("isPaymentToken(address)", token)),
             "isPaymentToken result",
         )
         return when (BigInteger(1, result)) {
@@ -72,6 +119,11 @@ class ReadOnlyRpcClient private constructor(
         return value.toInt()
     }
 
+    override fun tokenSymbol(token: EvmAddress): String {
+        require(!token.isZero) { "Token address must not be zero" }
+        return decodeTokenSymbol(ethCall(token, abiFunction("symbol()")))
+    }
+
     override fun tokenBalance(token: EvmAddress, holder: EvmAddress, blockNumber: Long?): BigInteger {
         require(blockNumber == null || blockNumber >= 0) { "Block number must not be negative" }
         val result = ethCall(
@@ -84,7 +136,11 @@ class ReadOnlyRpcClient private constructor(
 
     /** Fails closed if the configured chain, contracts, factory links, or token whitelist differ. */
     @JvmOverloads
-    fun validate(token: EvmAddress, expectedDecimals: Int? = null): NetworkValidation {
+    fun validate(
+        token: EvmAddress,
+        expectedDecimals: Int? = null,
+        expectedSymbol: String? = null,
+    ): NetworkValidation {
         require(!token.isZero) { "Token address must not be zero" }
         require(expectedDecimals == null || expectedDecimals in 0..255) {
             "Expected token decimals must be between 0 and 255"
@@ -122,6 +178,12 @@ class ReadOnlyRpcClient private constructor(
                 "Token decimals $actualDecimals do not match configured decimals $expectedDecimals",
             )
         }
+        val actualSymbol = tokenSymbol(token)
+        if (expectedSymbol != null && actualSymbol != expectedSymbol) {
+            throw NetworkConfigurationException(
+                "Token symbol $actualSymbol does not match configured symbol $expectedSymbol",
+            )
+        }
 
         return NetworkValidation(
             chainId = remoteChainId,
@@ -131,6 +193,7 @@ class ReadOnlyRpcClient private constructor(
             token = token,
             tokenWhitelisted = true,
             tokenDecimals = actualDecimals,
+            tokenSymbol = actualSymbol,
         )
     }
 
@@ -155,6 +218,14 @@ class ReadOnlyRpcClient private constructor(
     private fun rpcQuantity(method: String): BigInteger = parseQuantity(rpcString(method, JsonArray()), method)
 
     private fun rpcString(method: String, params: JsonArray): String {
+        val result = rpcResult(method, params)
+        if (!result.isJsonPrimitive || !result.asJsonPrimitive.isString) {
+            throw RpcException("JSON-RPC result must be a string")
+        }
+        return result.asString
+    }
+
+    private fun rpcResult(method: String, params: JsonArray): JsonElement {
         val id = requestIds.incrementAndGet()
         val request = JsonObject().apply {
             addProperty("jsonrpc", "2.0")
@@ -190,10 +261,7 @@ class ReadOnlyRpcClient private constructor(
         }
         val result = response.get("result")
             ?: throw RpcException("JSON-RPC response is missing result")
-        if (!result.isJsonPrimitive || !result.asJsonPrimitive.isString) {
-            throw RpcException("JSON-RPC result must be a string")
-        }
-        return result.asString
+        return result
     }
 
     private fun abiFunction(signature: String, address: EvmAddress? = null): String {
@@ -258,7 +326,67 @@ class ReadOnlyRpcClient private constructor(
             return EvmAddress.fromBytes(word.copyOfRange(12, 32))
         }
 
+        private fun decodeTokenSymbol(value: String): String {
+            val bytes = decodeData(value, "symbol result")
+            if (bytes.size < 96 || bytes.size % 32 != 0) {
+                throw RpcException("symbol result is not canonical dynamic-string ABI data")
+            }
+            val offset = BigInteger(1, bytes.copyOfRange(0, 32))
+            if (offset != BigInteger.valueOf(32)) {
+                throw RpcException("symbol result has a non-canonical ABI offset")
+            }
+            val lengthValue = BigInteger(1, bytes.copyOfRange(32, 64))
+            if (lengthValue.signum() <= 0 || lengthValue > BigInteger.valueOf(MAX_SYMBOL_UTF8_BYTES.toLong())) {
+                throw RpcException("symbol must contain 1 to $MAX_SYMBOL_UTF8_BYTES UTF-8 bytes")
+            }
+            val length = lengthValue.toInt()
+            val paddedLength = ((length + 31) / 32) * 32
+            if (bytes.size != 64 + paddedLength) {
+                throw RpcException("symbol result has a non-canonical ABI length")
+            }
+            if (bytes.copyOfRange(64 + length, bytes.size).any { it != 0.toByte() }) {
+                throw RpcException("symbol result has non-zero ABI padding")
+            }
+            val symbol = try {
+                StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(java.nio.ByteBuffer.wrap(bytes, 64, length))
+                    .toString()
+            } catch (error: Exception) {
+                throw RpcException("symbol is not strict UTF-8", error)
+            }
+            val codePoints = symbol.codePoints().toArray()
+            val isDisplayWhitespace: (Int) -> Boolean = { codePoint ->
+                Character.isWhitespace(codePoint) || Character.isSpaceChar(codePoint)
+            }
+            if (
+                codePoints.all(isDisplayWhitespace) ||
+                isDisplayWhitespace(codePoints.first()) ||
+                isDisplayWhitespace(codePoints.last())
+            ) {
+                throw RpcException("symbol must not be blank or have surrounding whitespace")
+            }
+            val unsafe = symbol.codePoints().anyMatch { codePoint ->
+                Character.getType(codePoint) in UNSAFE_UNICODE_CATEGORIES
+            }
+            if (unsafe) {
+                throw RpcException(
+                    "symbol contains a Unicode control, format, line-separator, or paragraph-separator character",
+                )
+            }
+            return symbol
+        }
+
         private val QUANTITY_PATTERN = Regex("^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$")
+        private val BLOCK_HASH_PATTERN = Regex("^0x[0-9a-fA-F]{64}$")
+        private const val MAX_SYMBOL_UTF8_BYTES = 32
+        private val UNSAFE_UNICODE_CATEGORIES = setOf(
+            Character.CONTROL.toInt(),
+            Character.FORMAT.toInt(),
+            Character.LINE_SEPARATOR.toInt(),
+            Character.PARAGRAPH_SEPARATOR.toInt(),
+        )
     }
 }
 

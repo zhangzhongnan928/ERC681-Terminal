@@ -33,6 +33,15 @@ interface SettlementDao {
         statuses: List<SettlementTransactionStatus>
     ): List<SettlementTransaction>
 
+    @Query(
+        "SELECT COUNT(*) FROM settlement_transactions WHERE operatorAddress = :operatorAddress COLLATE NOCASE " +
+            "AND status IN (:statuses)"
+    )
+    suspend fun countForOperatorWithStatuses(
+        operatorAddress: String,
+        statuses: List<SettlementTransactionStatus>,
+    ): Int
+
     @Update
     suspend fun update(transaction: SettlementTransaction)
 

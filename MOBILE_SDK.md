@@ -1,6 +1,6 @@
 # OPK ERC-681 mobile terminal and SDK
 
-This mobile build accepts one payment rail: an ERC-20 `transfer` requested by an ERC-681 QR code. The Android and iOS apps create invoices, render the payment QR, and observe token balances. Their cameras can import contract and token addresses in Settings; payment QR payloads are rejected and never imported or acted on. The reusable payment SDKs remain keyless and read-only. Each native app also has an isolated, device-local operator module that can submit only a constrained `ClearingVault.sweepSessions` transaction after payment confirmation.
+This mobile build accepts one payment rail: an ERC-20 `transfer` requested by an ERC-681 QR code. The Android and iOS apps create invoices, render the payment QR, and observe token balances. Their cameras can import individual contract and token addresses in Settings or scan the separate strict `opk-terminal:provision` setup payload; payment QR payloads are rejected and never imported or acted on. The reusable payment SDKs remain keyless and read-only. Each native app also has an isolated, device-local operator module that can submit only a constrained `ClearingVault.sweepSessions` transaction after payment confirmation.
 
 ## Safety boundary
 
@@ -9,14 +9,14 @@ The payment SDK source is intentionally limited to:
 - local invoice-ID and CREATE2 receiver derivation;
 - canonical ERC-681 encoding and strict parsing;
 - payment QR display;
-- camera scanning that only imports configuration addresses in the native apps;
+- Settings-only camera scanning for strict address fields and the separate provisioning payload;
 - read-only JSON-RPC calls for chain/configuration checks and `balanceOf` observation;
 - local invoice persistence and recovery; and
 - a data-only handoff that a native app may pass into its isolated operator module.
 
-There is no NFC, contactless-card path, customer payment-QR import or action, unlocked-node signing, arbitrary transaction API, seed import, or private-key export. Camera access belongs only to the native app settings UI and supplies text to the address field whose scan button the user selected; the reusable SDKs remain camera-free. The payment SDKs cannot call `sweepSessions`, payout, refund, deploy, approve, or transfer. Do not add a private key to an app configuration or RPC URL.
+There is no NFC, contactless-card path, customer payment-QR import or action, unlocked-node signing, arbitrary transaction API, seed import, or private-key export. Camera access belongs only to the native app Settings UI. Address scan buttons fill only their selected address field, while the separate setup button accepts only the exact provisioning grammar; the reusable SDKs remain camera-free. The payment SDKs cannot call `sweepSessions`, payout, refund, deploy, approve, or transfer. Do not add a private key to an app configuration or RPC URL.
 
-The native operator implementation is a separate trust boundary. It generates one secp256k1 key on the device and restricts signing to the configured chain and vault, native value zero, the `sweepSessions(bytes32[],uint256[],address)` selector, a whitelisted token, and locally persisted paid or overpaid invoices. It cannot select a recipient or call payout, refund, rescue, approval, transfer, or deployment methods. The shipped apps require this wallet to exist before creating a payment request and use its public address as the terminal identity for every new invoice. The merchant separately authorizes that address with `grantOperator` and pre-funds it with the network's native token before settlement.
+The native operator implementation is a separate trust boundary. It generates one secp256k1 key on the device and restricts signing to the configured chain and vault, native value zero, the `sweepSessions(bytes32[],uint256[],address)` selector, a whitelisted token, and locally persisted paid or overpaid invoices or confirmed late value at a previously swept receiver. It cannot select a recipient or call payout, refund, rescue, approval, transfer, or deployment methods. The shipped apps require this wallet to exist before creating a payment request and use its public address as the terminal identity for every new invoice. The merchant separately authorizes that address with `grantOperator`, provisions the terminal, and pre-funds it with the network's native token before the terminal accepts a new invoice; the same checks run again before settlement.
 
 On Android, the secp256k1 scalar is encrypted with an AES-GCM wrapping key held by Android
 Keystore; only the device-bound ciphertext and IV are stored in private app preferences, and all
@@ -28,7 +28,7 @@ stored as a non-synchronizing `WhenUnlockedThisDeviceOnly` Keychain item protect
 presence; every signature requires device-owner authentication. Neither platform exposes seed
 import, key export, or a general-purpose signing interface to app UI.
 
-Configuration import is deliberately separate from payment parsing. It accepts exactly one
+Address-only configuration import is deliberately separate from payment parsing. It accepts exactly one
 non-zero 20-byte EVM address, either as raw `0x` hexadecimal or an address-only `ethereum:` URI.
 Chain-qualified, function, query, fragment, WalletConnect, HTTP, JSON, payment, and other payloads
 fail closed without mutating settings. A QR cannot select a different field, supply an amount or
@@ -36,7 +36,11 @@ recipient, navigate to Payment, or invoke RPC. Camera frames are processed on-de
 ephemeral: the app does not log, persist, or transmit frames or rejected payloads. Imported values
 still pass the same local and on-chain validation as manually entered settings before any payment
 QR can be created. Denying camera access, cancelling, or using a camera-less device leaves manual
-entry available.
+entry available. The additive setup scanner has a different exact grammar and derives factory,
+receiver implementation, token decimals, and token symbol from read-only chain calls. It accepts
+only immutable, app-pinned deployment profiles and atomically persists the complete configuration
+after every pin, CREATE2, whitelist, metadata, and existing full-validation check succeeds. See
+[PROVISIONING.md](./PROVISIONING.md) for the pairing payloads and recovery model.
 
 ## Canonical payment request
 
@@ -58,31 +62,35 @@ The amount in an ERC-681 URI is a wallet suggestion. The observer measures the a
 
 ## Invoice lifecycle
 
-1. Validate the RPC chain, deployed code, factory/implementation link, vault/factory link, token whitelist, and token decimals.
-2. Require the device operator wallet, use its public address as `terminalIdentifier`, and generate
+1. Require the device operator wallet and freshly validate the RPC chain, deployed code,
+   factory/implementation link, vault/factory link, token whitelist and metadata, vault
+   owner/operator authorization, and the minimum native gas reserve.
+2. Use the operator public address as `terminalIdentifier`, and generate
    `invoiceId = keccak256(abi.encode(terminalIdentifier, timestamp, nonce))`.
 3. Derive the receiver locally with the protocol's 88-byte CREATE2 init code. Do not trust an RPC response for this address.
 4. Render `erc681Uri`/`erc681URI` as a customer-facing payment QR. The configuration scanner rejects this payload without importing or acting on it.
 5. Poll the token's `balanceOf(receiver)` at an explicit block.
-6. Persist waiting, partial, confirming, paid, overpaid, and expired state. On foreground/restart, reload open invoices and sample them again.
-7. After a paid or overpaid observation, place the invoice in the native settlement queue without destroying the confirmed payment evidence.
-8. Verify the operator address, vault authorization, chain, gas balance, invoice snapshots, receiver balances, simulation, and gas estimate before asking the user to approve signing.
+6. Persist waiting, partial, confirming, paid, overpaid, and expired state, including both the first-detected block number and its canonical block hash. A missing or non-canonical saved hash resets confirmation depth from a fresh canonical observation. While the app is active, recover only a small least-recently-attempted batch of open invoices and likewise reconcile a small durable batch of closed, partially settled, settled, and ambiguous-review receivers. Attempt timestamps are stored before RPC work so restart or cancellation cannot repeatedly starve the tail.
+7. After a paid or overpaid observation, place the invoice in the native settlement queue without destroying the confirmed payment evidence. Track newly observed post-sweep value separately, wait for confirmations, and then permit another idempotent sweep of that receiver.
+8. Verify the operator address, vault authorization, chain, gas balance, invoice snapshots, receiver balances, confirmation-cursor block hashes, simulation, and gas estimate before asking the user to approve signing. Revalidate each cursor and live balance again immediately before signing.
 9. Persist the signed raw transaction and locally computed hash before broadcast, then reconcile ambiguous responses or app restarts without allocating another nonce.
-10. Wait for the configured confirmations and accept settlement only from a canonical matching `Swept` event. A successful receipt with a missing, malformed, duplicate, zero, or mismatched event is not settlement; an amount below the expected amount is recorded as partial and requires review or a later sweep.
+10. Wait for the configured confirmations, require the receipt block hash to equal the canonical block hash at that height, re-read the final head before accepting the required depth, and accept settlement only from a matching `Swept` event. A successful receipt with a missing, malformed, duplicate, zero, orphaned, or mismatched event is not settlement. Ambiguous rows remain under review after missing, zero, or partial new proof; only cumulative canonical proof covering the original expected amount clears ambiguity.
 
 Settlement evidence is cumulative per `(chain, vault, invoiceId, token)`. Store each canonical log
 once by `(transactionHash, logIndex)`, reject removed or conflicting logs, and compare the sum of
 confirmed swept amounts with the invoice's immutable expected amount. This permits a later sweep to
-complete a partial settlement without counting an RPC replay twice.
+complete a partial settlement without counting an RPC replay twice. Once cumulative proof already
+covers the original invoice, a repeat settlement still requires a new positive canonical event;
+historical proof must never turn a zero repeat event into proof of newly observed value.
 
 The reusable SDKs never sweep the receiver. A native app may pass their data-only handoff into its separate approved operator module. On the shipped legacy 1.4.1 deployment, transaction receipt success alone is not proof of settlement: the app must decode a fully matching confirmed `Swept` event and record the actual amount. A future 1.5 deployment may additionally expose settlement accounting, but the bundled deployment must not assume it.
 
 `terminalIdentifier` remains the protocol and reusable-SDK name for a generic, non-secret 20-byte
 invoice namespace. The reusable SDK does not require that namespace to have a private key. The
 shipped Android and iOS apps apply the stricter application policy described above: they always
-pass the device operator EOA public address for new invoices and fail invoice creation when that
-wallet does not exist. Vault authorization and gas balance do not change invoice derivation; they
-are checked independently when preparing a settlement.
+pass the device operator EOA public address for new invoices and fail invoice creation unless that
+wallet exists, is authorized by the configured vault, and has at least `100000000000000` wei of
+native gas balance. These checks run again when preparing a settlement.
 
 ## Default network
 
@@ -105,11 +113,11 @@ accepted by the SDK validation path.
 ## Operator identity, authorization, and gas funding
 
 Creating the operator wallet establishes the terminal identity used for new invoices; it does not
-make the EOA a vault operator. The app can therefore create payment requests as soon as the wallet
-exists. Before settlement, the merchant must grant the displayed address with the vault's
-administrative `grantOperator` flow (the vault owner itself is also accepted), then transfer enough
-native network currency to that address for gas. The app shows the entire address, offers Copy, and
-displays this address-only funding QR:
+make the EOA a vault operator. The merchant must grant the displayed address with the vault's
+administrative `grantOperator` flow (the vault owner itself is also accepted), scan the portal's
+operator-bound provisioning QR, then transfer at least `0.0001 ETH` of native network currency to
+that address for gas. Until all checks pass, the app does not create a new invoice or customer QR.
+The app shows the entire address, offers Copy, and displays this address-only funding QR:
 
 ```text
 ethereum:{OPERATOR_ADDRESS}@{CHAIN_ID}
@@ -124,7 +132,13 @@ ethereum:0x2222222222222222222222222222222222222222@84532
 The QR intentionally omits `?value=` so the funding wallet chooses the amount. Loss or deletion of
 the device-local operator key requires the merchant to revoke that operator and authorize a newly
 generated address; the key is not backed up. Historical invoices do not change when the operator
-changes and may be swept by any currently authorized vault owner or operator.
+changes and may be swept by any currently authorized vault owner or operator. Because every
+published receiver remains payable forever, the apps allow destructive local key reset only before
+the first payment QR is issued. An allowed reset queries the immutable shipped RPC endpoint twice
+and requires both latest and pending native balances to be exactly zero before deletion. Withdraw
+all gas first; a later deposit to the previously shared retired address can still be lost. After a
+QR is issued, retain the key and use portal authorization or terminal reprovisioning; a replacement
+operator must be authorized on each historical vault before it can recover later payments.
 
 ## Android app and SDK
 
@@ -332,11 +346,13 @@ Only create or export a handoff after the terminal has a paid/overpaid observati
 1. Generate the operator wallet once on the device before accepting a new payment. Its public
    address becomes the terminal identity for every new invoice. The private scalar is not exported,
    backed up, synchronized, placed on the clipboard, or stored in ordinary app preferences.
-2. Copy or scan the displayed public address from the merchant's vault administration flow and call
-   `grantOperator(address)`. The app checks `isOperator(address)` before enabling a sweep.
-3. Send the correct network's native token to the operator address for gas only. Do not send
-   customer payment tokens to it. The Settings UI displays the exact address, chain, QR, balance,
-   authorization state, and a low-balance warning.
+2. Scan the terminal's operator-pairing QR in the merchant portal, confirm
+   `grantOperator(address)`, then scan the portal's operator-bound provisioning QR back on the
+   terminal. The terminal derives and validates every deployment and token field before saving.
+3. Send at least `0.0001 ETH` of the correct network's native token to the operator address for gas
+   only. Do not send customer payment tokens to it. The Settings UI displays the exact address,
+   chain, funding QR, balance, authorization state, and readiness result. Authorization and the
+   minimum balance are required before each new invoice and checked again before a sweep.
 
 Existing invoice records preserve the invoice ID and receiver derived from their historical
 namespace; iOS also preserves that namespace per invoice. The app does not expose or reuse a global
@@ -346,18 +362,25 @@ invoice namespace.
 
 ### Settlement transaction lifecycle
 
-- Group only paid or overpaid invoices with the same chain, vault, and token; batches are capped.
+- Group only paid or overpaid invoices, or previously swept invoices with separately confirmed
+  positive late value, with the same chain, vault, and token; batches are capped.
 - Encode `sweepSessions(bytes32[],uint256[],address)` locally using each invoice's original expected
   raw amount. Reject empty, duplicate, mixed, zero, or corrupted inputs.
 - Check the configured chain, contract links, token whitelist, operator authorization, confirmed
   receiver balances, simulation, gas estimate, current pending nonce, and conservative maximum fee.
+- Before sweeping an invoice from an earlier provisioning, re-derive its receiver and re-prove its
+  network label, known-chain factory/implementation pins, vault runtime/factory link, token
+  whitelist, and token metadata through the immutable shipped RPC. Separately chain-check the
+  stored operational RPC, recheck current EOA authorization/exact balances/simulation immediately
+  before signing, then atomically activate that historical chain/vault target for the constrained signer.
 - Persist the exact signed raw transaction, hash, nonce, fees, calldata, and invoice set before
   calling `eth_sendRawTransaction`. Retry an ambiguous broadcast only with the same bytes and hash.
 - Keep payment state separate from settlement state. A sweep reducing the receiver's current
   balance must not erase the terminal's confirmed payment observation.
-- After receipt confirmation, match `Swept` evidence by emitting vault, indexed receiver and vault,
-  invoice ID, token, submitted expected amount, and non-zero swept amount. Zero stays ready; a
-  positive amount below expected is partial/needs review; an amount at least expected is settled.
+- After receipt confirmation and canonical block-hash verification, match `Swept` evidence by
+  emitting vault, indexed receiver and vault, invoice ID, token, submitted expected amount, and
+  swept amount. Zero never proves newly swept value. Ambiguous recovery stays under review after
+  zero, missing, or partial proof; cumulative canonical proof at least expected is settled.
 - Key loss or rotation never creates a replacement silently. Grant and fund a candidate, reconcile
   pending transactions, revoke the old operator, and only then retire its local key.
 

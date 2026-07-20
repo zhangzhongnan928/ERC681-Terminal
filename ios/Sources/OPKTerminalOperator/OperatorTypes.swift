@@ -46,6 +46,7 @@ public enum SettlementOperatorError: Error, Equatable, Sendable {
     case insufficientGasBalance(required: UInt256, available: UInt256)
     case receiverHasNoSweepableBalance(Bytes32)
     case receiverBalanceBelowRequired(invoiceID: Bytes32, required: UInt256, available: UInt256)
+    case receiverBalanceChanged(invoiceID: Bytes32, confirmed: UInt256, current: UInt256)
     case alreadyFullySettled(Bytes32)
     case arithmeticOverflow
     case malformedRPCResponse
@@ -82,6 +83,8 @@ extension SettlementOperatorError: LocalizedError {
             "Invoice \(invoiceID.hex) has no live token balance to sweep."
         case let .receiverBalanceBelowRequired(invoiceID, required, available):
             "Invoice \(invoiceID.hex) needs a live balance of at least \(required.decimalString) token units before signing, but has \(available.decimalString)."
+        case let .receiverBalanceChanged(invoiceID, confirmed, current):
+            "Invoice \(invoiceID.hex) changed from confirmed balance \(confirmed.decimalString) to \(current.decimalString). Refresh and wait for the current amount to confirm before signing."
         case let .alreadyFullySettled(invoiceID):
             "Invoice \(invoiceID.hex) is already fully settled by confirmed sweep evidence."
         case .arithmeticOverflow:
@@ -143,9 +146,9 @@ public struct SettlementIntent: Hashable, Sendable, Codable {
         guard sessions.count <= 20 else { throw SettlementOperatorError.batchTooLarge(maximum: 20) }
         var seen = Set<Bytes32>()
         for session in sessions {
-            guard !session.expectedAmount.isZero,
-                  session.priorConfirmedSweptAmount < session.expectedAmount
-            else { throw SettlementOperatorError.alreadyFullySettled(session.invoiceID) }
+            guard !session.expectedAmount.isZero else {
+                throw SettlementOperatorError.alreadyFullySettled(session.invoiceID)
+            }
             guard seen.insert(session.invoiceID).inserted else {
                 throw SettlementOperatorError.duplicateInvoiceID(session.invoiceID)
             }
@@ -211,6 +214,21 @@ public struct OperatorChainStatus: Hashable, Sendable {
         self.isVaultOwner = isVaultOwner
         self.isLowGas = isLowGas
     }
+}
+
+/// Both views of an operator EOA's native balance used before destructive key deletion.
+/// `latest` prevents an unconfirmed withdrawal from making only the pending balance appear empty;
+/// `pending` also catches an inbound transfer already visible in the node's pending state.
+public struct OperatorNativeBalanceSnapshot: Hashable, Sendable {
+    public let latest: UInt256
+    public let pending: UInt256
+
+    public init(latest: UInt256, pending: UInt256) {
+        self.latest = latest
+        self.pending = pending
+    }
+
+    public var isExactlyZero: Bool { latest.isZero && pending.isZero }
 }
 
 public struct VaultAuthorization: Hashable, Sendable {

@@ -43,6 +43,7 @@
     "factory()": "0xc45a0155",
     "isPaymentToken(address)": "0x930eaddc",
     "decimals()": "0x313ce567",
+    "symbol()": "0x95d89b41",
     "balanceOf(address)": "0x70a08231",
     "computeReceiver(address,bytes32)": "0xd113e84b",
     "Swept(address,address,bytes32,address,uint256,uint256,uint256)": "0xa2d31e9e91eac53d457463f137aa8971cf0e8a7a8f508d61528501b26b80ddce"

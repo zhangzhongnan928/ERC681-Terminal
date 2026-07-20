@@ -14,9 +14,10 @@ vault; the terminal never chooses a payout destination.
 
 - ERC-20 `transfer` QR payments only
 - No NFC, contactless-card, customer payment-QR import, or camera-triggered payment action
-- Camera scanning is available only beside contract and token fields in Settings. It accepts one
-  non-zero EVM address, including an address-only `ethereum:` QR, and rejects payment URIs and all
-  other payloads without changing the field.
+- Camera scanning remains available beside contract and token fields in Settings. Those scanners
+  accept only one non-zero EVM address, including an address-only `ethereum:` QR, and reject payment
+  URIs and all other payloads without changing the field. A separate setup scanner accepts only the
+  strict `opk-terminal:provision` payload documented in [PROVISIONING.md](./PROVISIONING.md).
 - The reusable Android and Swift payment SDKs remain keyless and read-only.
 - Each native app generates a separate, device-local secp256k1 operator wallet. Its public address
   is the terminal identity used as the `terminalIdentifier` namespace for every new invoice, so an
@@ -27,32 +28,52 @@ vault; the terminal never chooses a payout destination.
 - Signing is restricted to the configured chain and vault, zero native value, whitelisted token,
   confirmed locally persisted invoices, and the `sweepSessions` selector. There is no arbitrary
   transaction, transfer, approval, payout, refund, deployment, private-key export, or seed import.
-- Vault authorization and native-token gas funding are separate settlement-readiness checks. They
-  are not prerequisites for invoice derivation, but both are required before the device operator
-  can submit a sweep. Customer ERC-20 payments still go only to one-time receiver addresses.
+- Vault authorization and native-token gas funding are also new-invoice readiness checks. The apps
+  freshly validate configuration, owner/operator authorization, and a `0.0001 ETH` native balance
+  before creating each customer invoice. Failure blocks only new invoice/QR creation; history,
+  existing payment monitoring, settlement recovery, and setup remain available. Customer ERC-20
+  payments still go only to one-time receiver addresses.
 - Settings shows the full operator address with Copy and an address-only, chain-qualified funding
   QR. This is the same real EOA whose public address identifies new invoices and whose private key
   signs constrained settlement transactions.
 - Receipt success is insufficient: the app waits for confirmations and verifies a matching,
-  non-zero `Swept` event before recording settlement.
+  non-zero `Swept` event before recording settlement. Published closed and previously swept
+  receivers, including ambiguous receipt-review rows, are revisited in small durable
+  least-recently-attempted passes; confirmed positive value can be swept again. Ambiguity clears
+  only when cumulative canonical proof covers the original expected amount.
+- Destructive operator-key reset is allowed only before the first payment QR is issued. A published
+  receiver remains payable forever, so later administration uses reprovisioning/authorization
+  changes without deleting the key. Before an allowed reset, the shipped trusted RPC must report
+  both latest and pending native balances as exactly zero twice; late deposits to the retired,
+  previously shared address are still possible and unrecoverable.
 
 Native-asset `?value=` requests and non-transfer calls fail closed.
 
 ## Payment flow
 
-1. Validate the configured chain, contracts, vault, token whitelist, and token decimals.
-2. Require the device operator wallet, use its public address as the invoice's terminal namespace,
+1. Require the device operator wallet and freshly validate the configured chain, contracts, vault,
+   token whitelist, token metadata, operator authorization, and native gas reserve.
+2. Use the operator public address as the invoice's terminal namespace,
    generate an invoice ID, and derive the counterfactual receiver locally.
 3. Refuse receiver reuse if code or an existing token balance is detected.
 4. Display the canonical ERC-681 ERC-20 transfer QR.
-5. Observe partial payment, confirmations, exact payment, overpayment, or expiry.
+5. Observe partial payment, confirmations, exact payment, overpayment, or expiry. Persist the
+   first-detected block hash with its height and restart confirmation depth when that saved cursor
+   is missing or no longer canonical. Continue bounded reconciliation of closed and swept QR
+   receivers because a published address cannot be revoked.
 6. Persist the paid or overpaid invoice without replacing the confirmed payment observation.
-7. Verify operator authorization and native gas balance, then simulate and estimate a constrained
-   `sweepSessions` transaction.
+7. Re-prove even historical invoice snapshots against the shipped chain pins and trusted RPC,
+   verify current operator authorization and exact balances through the operational RPC, then
+   simulate and estimate a constrained `sweepSessions` transaction. Repeat provenance,
+   confirmation-cursor, authorization, exact-balance, and simulation checks immediately before
+   activating that historical chain/vault target and signing.
 8. Persist the signed transaction before broadcast and reconcile it after restart or an ambiguous
    RPC response.
-9. Decode confirmed `Swept` events per invoice; zero, partial, malformed, duplicate, or mismatched
-   evidence never becomes a successful full settlement.
+9. Decode confirmed `Swept` events per invoice only after the receipt block hash matches the
+   canonical block at that height and the final head still provides the required depth; zero,
+   partial, malformed, duplicate, orphaned, or mismatched
+   evidence never becomes a successful full settlement. A positive repeat event can settle newly
+   observed late value after prior cumulative proof already covered the original invoice.
 
 ## Repository layout
 
@@ -86,8 +107,9 @@ boundaries; runs Android SDK and app tests, Maven publication, lint, and debug/r
 assembly; runs Swift tests and shared conformance checks; proves the generated Xcode project is
 current; and compiles the iOS app.
 
-See [MOBILE_SDK.md](./MOBILE_SDK.md) for SDK examples, exact configuration, lifecycle details,
-and build outputs.
+See [PROVISIONING.md](./PROVISIONING.md) for the portal pairing and chain-derived setup protocol,
+and [MOBILE_SDK.md](./MOBILE_SDK.md) for SDK examples, exact configuration, lifecycle details, and
+build outputs.
 
 ## License
 

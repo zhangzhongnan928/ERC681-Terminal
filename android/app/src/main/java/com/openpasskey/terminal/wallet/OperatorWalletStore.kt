@@ -37,6 +37,7 @@ data class OperatorWalletSnapshot(
     val error: String? = null,
     val activatedChainId: Long? = null,
     val activatedVaultAddress: String? = null,
+    val activatedOperatorAddress: String? = null,
     val hardwareBacked: Boolean = false,
     val strongBoxBacked: Boolean = false,
     val deviceAuthenticationRequired: Boolean = false
@@ -95,6 +96,7 @@ class OperatorWalletStore(context: Context) {
             address,
             activatedChainId = preferences.getLong(KEY_ACTIVATED_CHAIN_ID, 0).takeIf { it > 0 },
             activatedVaultAddress = preferences.getString(KEY_ACTIVATED_VAULT, null),
+            activatedOperatorAddress = preferences.getString(KEY_ACTIVATED_OPERATOR, null),
             hardwareBacked = protection.hardwareBacked,
             strongBoxBacked = protection.strongBoxBacked,
             deviceAuthenticationRequired = protection.deviceAuthenticationRequired
@@ -111,13 +113,23 @@ class OperatorWalletStore(context: Context) {
     }
 
     @Synchronized
-    fun recordVerifiedSettlementTarget(chainId: Long, vaultAddress: String) {
-        check(snapshot().availability == OperatorWalletAvailability.READY)
+    fun recordVerifiedSettlementTarget(
+        chainId: Long,
+        vaultAddress: String,
+        provisionedOperatorAddress: String,
+    ) {
+        val wallet = snapshot()
+        check(wallet.availability == OperatorWalletAvailability.READY && wallet.address != null)
         check(chainId > 0)
         val vault = com.openpasskey.erc681.EvmAddress.parse(vaultAddress).value
+        val operator = EvmAddress.parse(provisionedOperatorAddress).value
+        check(wallet.address.equals(operator, true)) {
+            "Provisioned operator does not match the local settlement wallet"
+        }
         check(preferences.edit()
             .putLong(KEY_ACTIVATED_CHAIN_ID, chainId)
             .putString(KEY_ACTIVATED_VAULT, vault)
+            .putString(KEY_ACTIVATED_OPERATOR, operator)
             .commit()
         ) { "Unable to record the verified settlement target" }
     }
@@ -128,7 +140,7 @@ class OperatorWalletStore(context: Context) {
         check(snapshot().availability == OperatorWalletAvailability.NOT_CREATED) {
             "An operator wallet record already exists. Revoke it on the vault before any replacement."
         }
-        val keyPair = Keys.createEcKeyPair()
+        val keyPair = OperatorKeyGenerator.create()
         val privateKeyBytes = Numeric.toBytesPadded(keyPair.privateKey, PRIVATE_KEY_BYTES)
         return try {
             val address = Keys.toChecksumAddress("0x${Keys.getAddress(keyPair)}")
@@ -150,13 +162,40 @@ class OperatorWalletStore(context: Context) {
     }
 
     /**
+     * Destructive admin-only operation. Callers must show the operator address and warn that it
+     * must first be revoked and emptied; this store deliberately cannot perform those chain acts.
+     */
+    @Synchronized
+    fun resetWalletAfterExplicitConfirmation() {
+        check(snapshot().availability != OperatorWalletAvailability.NOT_CREATED) {
+            "No operator wallet exists"
+        }
+        if (keyStore().containsAlias(KEYSTORE_ALIAS)) keyStore().deleteEntry(KEYSTORE_ALIAS)
+        check(preferences.edit().clear().commit()) { "Unable to clear the operator wallet record" }
+    }
+
+    /**
      * The only signing capability exported by the wallet store. It refuses native transfers,
      * contract creation, calls outside the verified active chain/vault, and every method except the
      * typed sweepSessions selector. Credentials never leave this class, so UI and ViewModels cannot
      * turn the terminal into a general-purpose signer.
      */
     @Synchronized
-    internal fun signSettlementTransaction(
+    internal fun activateAndSignSettlementTransaction(
+        transaction: RawTransaction,
+        chainId: Long,
+        vaultAddress: String,
+        operatorAddress: String,
+        eip1559: Boolean,
+    ): ByteArray {
+        // Hold the wallet monitor across activation and signing so a concurrent readiness refresh
+        // cannot replace a revalidated historical target between these two operations.
+        recordVerifiedSettlementTarget(chainId, vaultAddress, operatorAddress)
+        return signSettlementTransaction(transaction, chainId, eip1559)
+    }
+
+    @Synchronized
+    private fun signSettlementTransaction(
         transaction: RawTransaction,
         chainId: Long,
         eip1559: Boolean
@@ -165,15 +204,7 @@ class OperatorWalletStore(context: Context) {
         val target = EvmAddress.parse(transaction.to)
         require(!target.isZero) { "Settlement must target a non-zero vault" }
         val wallet = snapshot()
-        check(wallet.availability == OperatorWalletAvailability.READY) {
-            wallet.error ?: "Create an operator wallet first"
-        }
-        require(wallet.activatedChainId == chainId) {
-            "Settlement chain is not the operator wallet's verified active chain"
-        }
-        require(wallet.activatedVaultAddress?.equals(target.value, ignoreCase = true) == true) {
-            "Settlement target is not the operator wallet's verified active vault"
-        }
+        requireVerifiedSettlementActivation(wallet, chainId, target)
         require(transaction.value == BigInteger.ZERO) { "Settlement cannot transfer native value" }
         require(transaction.data.lowercase().startsWith(SWEEP_SESSIONS_SELECTOR)) {
             "Operator key only signs sweepSessions calls"
@@ -303,6 +334,7 @@ class OperatorWalletStore(context: Context) {
         private const val KEY_IV = "encryption_iv"
         private const val KEY_ACTIVATED_CHAIN_ID = "activated_chain_id"
         private const val KEY_ACTIVATED_VAULT = "activated_vault"
+        private const val KEY_ACTIVATED_OPERATOR = "activated_operator"
         private const val KEY_STRONGBOX_REQUEST_SUCCEEDED = "strongbox_request_succeeded"
         private const val KEYSTORE_ALIAS = "opk_operator_wallet_wrapping_key_v1"
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
@@ -313,5 +345,24 @@ class OperatorWalletStore(context: Context) {
         private const val AUTH_WINDOW_SECONDS = 30
         private const val SWEEP_SESSIONS_SELECTOR = "0x682b11b5"
         private val AAD = "OPK_OPERATOR_WALLET_V1".toByteArray(Charsets.UTF_8)
+    }
+}
+
+internal fun requireVerifiedSettlementActivation(
+    wallet: OperatorWalletSnapshot,
+    chainId: Long,
+    target: EvmAddress,
+) {
+    check(wallet.availability == OperatorWalletAvailability.READY && wallet.address != null) {
+        wallet.error ?: "Create an operator wallet first"
+    }
+    require(wallet.activatedChainId == chainId) {
+        "Settlement chain is not the operator wallet's verified active chain"
+    }
+    require(wallet.activatedVaultAddress?.equals(target.value, ignoreCase = true) == true) {
+        "Settlement target is not the operator wallet's verified active vault"
+    }
+    require(wallet.activatedOperatorAddress?.equals(wallet.address, ignoreCase = true) == true) {
+        "Settlement activation is not bound to this operator wallet"
     }
 }

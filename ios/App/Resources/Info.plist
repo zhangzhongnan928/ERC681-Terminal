@@ -21,7 +21,7 @@
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSCameraUsageDescription</key>
-	<string>Import contract and token addresses from Settings QR codes. Payment QR payloads are rejected and not imported.</string>
+	<string>Scan terminal provisioning and configuration-address QR codes. Payment QR payloads are rejected and not imported.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Authenticate access to the device-local settlement operator key before signing a sweep transaction.</string>
 	<key>UILaunchScreen</key>

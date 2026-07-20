@@ -31,6 +31,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import com.openpasskey.terminal.data.model.Invoice
+import com.openpasskey.terminal.data.model.InvoiceStatus
 import com.openpasskey.terminal.data.model.SettlementTransaction
 import com.openpasskey.terminal.data.repository.PreparedSettlement
 import com.openpasskey.terminal.settlement.SettlementAbi
@@ -89,12 +90,19 @@ fun SettlementScreen(viewModel: SettlementViewModel) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                OutlinedButton(
+                    onClick = viewModel::refreshPending,
+                    enabled = !state.preparing && !state.submitting,
+                ) {
+                    androidx.compose.material3.Icon(Icons.Default.Refresh, contentDescription = null)
+                    Text(" Refresh settlement status")
+                }
             }
             if (groups.isEmpty()) {
                 item {
                     Card(Modifier.fillMaxWidth()) {
                         Text(
-                            "No confirmed invoices are ready. A proven partial invoice becomes retryable only when its receiver has a new positive balance; ambiguous proof stays in History for review.",
+                            "No confirmed receiver balance is ready. Closed, swept, and ambiguous-review QR receivers are reconciled in bounded passes; confirmed value becomes sweepable again.",
                             Modifier.padding(16.dp)
                         )
                     }
@@ -162,8 +170,15 @@ private fun SettlementGroupCard(
                 ) {
                     Column(Modifier.weight(1f)) {
                         Text(formatRaw(invoice.expectedAmount, invoice.tokenDecimals) + " " + invoice.tokenSymbol)
-                        if (invoice.status.name == "PARTIALLY_SETTLED") {
-                            Text("Partial retry · original expected amount", color = MaterialTheme.colorScheme.error)
+                        if (invoice.status == InvoiceStatus.LATE_PAYMENT_READY) {
+                            Text(
+                                if (invoice.settlementAmbiguous) {
+                                    "Ambiguous settlement recovery · full canonical proof required"
+                                } else {
+                                    "Confirmed late payment · repeat sweep"
+                                },
+                                color = MaterialTheme.colorScheme.error,
+                            )
                         }
                         Text(compact(invoice.invoiceId), style = MaterialTheme.typography.bodySmall)
                     }

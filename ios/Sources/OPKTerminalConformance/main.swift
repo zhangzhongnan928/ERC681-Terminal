@@ -85,6 +85,7 @@ private actor FixtureTransport: RPCTransport {
     let vault: EthereumAddress
     let token: EthereumAddress
     let tokenDecimals: UInt8
+    let tokenSymbol: String
     let balance: UInt256
 
     init(
@@ -94,6 +95,7 @@ private actor FixtureTransport: RPCTransport {
         vault: EthereumAddress,
         token: EthereumAddress,
         tokenDecimals: UInt8,
+        tokenSymbol: String,
         balance: UInt256
     ) {
         self.chainID = chainID
@@ -102,6 +104,7 @@ private actor FixtureTransport: RPCTransport {
         self.vault = vault
         self.token = token
         self.tokenDecimals = tokenDecimals
+        self.tokenSymbol = tokenSymbol
         self.balance = balance
     }
 
@@ -112,12 +115,16 @@ private actor FixtureTransport: RPCTransport {
               let method = object["method"] as? String
         else { throw ConformanceFailure.failed("malformed JSON-RPC request") }
 
-        let result: String
+        let result: Any
         switch method {
         case "eth_chainId":
             result = "0x" + String(chainID, radix: 16)
         case "eth_blockNumber":
             result = "0x64"
+        case "eth_getBlockByNumber":
+            result = [
+                "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ]
         case "eth_getCode":
             result = "0x6001"
         case "eth_call":
@@ -137,6 +144,15 @@ private actor FixtureTransport: RPCTransport {
                 result = ABI.word(UInt64(1)).hexString
             } else if to == token && selector == ABI.decimalsSelector {
                 result = ABI.word(UInt64(tokenDecimals)).hexString
+            } else if to == token && selector == ABI.symbolSelector {
+                let bytes = Data(tokenSymbol.utf8)
+                let paddedLength = ((bytes.count + 31) / 32) * 32
+                result = (
+                    ABI.word(UInt64(32))
+                        + ABI.word(UInt64(bytes.count))
+                        + bytes
+                        + Data(repeating: 0, count: paddedLength - bytes.count)
+                ).hexString
             } else if to == token && selector == ABI.balanceOfSelector {
                 result = ABI.word(balance).hexString
             } else {
@@ -222,6 +238,7 @@ private struct OPKTerminalConformanceMain {
             ("factory()", ABI.factorySelector),
             ("isPaymentToken(address)", ABI.isPaymentTokenSelector),
             ("decimals()", ABI.decimalsSelector),
+            ("symbol()", ABI.symbolSelector),
             ("balanceOf(address)", ABI.balanceOfSelector),
             ("computeReceiver(address,bytes32)", ABI.computeReceiverSelector),
         ]
@@ -334,6 +351,7 @@ private struct OPKTerminalConformanceMain {
             vault: vault,
             token: tokenAddress,
             tokenDecimals: configurationVector.token.decimals,
+            tokenSymbol: configurationVector.token.symbol,
             balance: amount
         )
         let client = try JSONRPCEthereumClient(
@@ -385,6 +403,9 @@ private struct OPKTerminalConformanceMain {
             request,
             balance: partial,
             block: 101,
+            blockHash: try Bytes32(
+                hex: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
             now: Date(timeIntervalSince1970: TimeInterval(fixture.invoiceVector.timestampSeconds + 61))
         )
         try require(
@@ -399,6 +420,7 @@ private struct OPKTerminalConformanceMain {
             vault: vault,
             token: tokenAddress,
             tokenDecimals: configurationVector.token.decimals,
+            tokenSymbol: configurationVector.token.symbol,
             balance: partial
         )
         let expiredClient = try JSONRPCEthereumClient(

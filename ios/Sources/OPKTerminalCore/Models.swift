@@ -128,25 +128,61 @@ public enum PaymentStatus: Hashable, Sendable, Codable {
     case expired(lastObserved: UInt256)
 }
 
+/// A confirmation cursor is valid only while the saved block number still resolves to the same
+/// canonical block hash. Persisting the number alone would allow a replacement fork to inherit
+/// confirmations earned by the displaced block.
+public struct PaymentConfirmationCursor: Hashable, Sendable, Codable {
+    public let blockNumber: UInt64
+    public let blockHash: Bytes32
+
+    public init(blockNumber: UInt64, blockHash: Bytes32) {
+        self.blockNumber = blockNumber
+        self.blockHash = blockHash
+    }
+}
+
 public struct PaymentObservation: Hashable, Sendable, Codable {
     public let invoiceID: Bytes32
     public let blockNumber: UInt64
+    public let blockHash: Bytes32
     public let balance: UInt256
     public let status: PaymentStatus
     public let thresholdBlock: UInt64?
+    public let thresholdBlockHash: Bytes32?
+    /// Saved cursors that the RPC sampler re-read and matched against the canonical chain during
+    /// this observation. App-specific confirmation windows may only be preserved from this set.
+    public let validatedPreviousCursors: [PaymentConfirmationCursor]
 
     public init(
         invoiceID: Bytes32,
         blockNumber: UInt64,
+        blockHash: Bytes32,
         balance: UInt256,
         status: PaymentStatus,
-        thresholdBlock: UInt64?
+        thresholdBlock: UInt64?,
+        thresholdBlockHash: Bytes32?,
+        validatedPreviousCursors: [PaymentConfirmationCursor] = []
     ) {
         self.invoiceID = invoiceID
         self.blockNumber = blockNumber
+        self.blockHash = blockHash
         self.balance = balance
         self.status = status
         self.thresholdBlock = thresholdBlock
+        self.thresholdBlockHash = thresholdBlockHash
+        self.validatedPreviousCursors = validatedPreviousCursors
+    }
+
+    public var thresholdCursor: PaymentConfirmationCursor? {
+        guard let thresholdBlock, let thresholdBlockHash else { return nil }
+        return PaymentConfirmationCursor(
+            blockNumber: thresholdBlock,
+            blockHash: thresholdBlockHash
+        )
+    }
+
+    public func validated(_ cursor: PaymentConfirmationCursor) -> Bool {
+        validatedPreviousCursors.contains(cursor)
     }
 }
 

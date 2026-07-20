@@ -10,10 +10,16 @@
 		05DAC3E3819FD8D3AED82CC8 /* OPKTerminalRPC in Frameworks */ = {isa = PBXBuildFile; productRef = 2BF56EF401912BF58C4AA87D /* OPKTerminalRPC */; };
 		107353DCB6A3E4028A50B95B /* SettlementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADC1BA20DF852782F0A85D8E /* SettlementView.swift */; };
 		18294CDA1F24EC91C766555B /* KeyboardDismissToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12F51EF9245CE3080AD46C1C /* KeyboardDismissToolbar.swift */; };
+		2436BEC402F17C6C3F93D22E /* ProvisioningAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78F1B7CE154D7DEE04117BA2 /* ProvisioningAppTests.swift */; };
 		243B86D5F9F16944DB0F35F6 /* StoredSettlement.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4989A551BB01926EC91CF2B /* StoredSettlement.swift */; };
+		24A3B3857C566A3E872078E1 /* AdminPINStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23CECB404EFECABF9287D18E /* AdminPINStore.swift */; };
 		2F13DF7FB8F29D5F70B6668F /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F336BEA05ED67165F7EEB27E /* AppModel.swift */; };
 		37BD6907BFAFECED9C45DCA1 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E2580CFEBF610B95FE105C6 /* AppSettings.swift */; };
+		498C710650A0729BCAA01E63 /* OPKTerminalOperator in Frameworks */ = {isa = PBXBuildFile; productRef = 90808346033FEC346AAA9AAD /* OPKTerminalOperator */; };
+		55524B8FD1BC7FF27AA2FFC5 /* OperatorResetSafety.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0426521B7E20B2920D3725 /* OperatorResetSafety.swift */; };
 		5671522D1F9D79A90AD94C12 /* KeyboardDismissalUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D5746A9CDFDA4B8F510F419 /* KeyboardDismissalUITests.swift */; };
+		59923466552070005599E7E4 /* TerminalReadiness.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD186F6FBA69C3785543AEE5 /* TerminalReadiness.swift */; };
+		628341D2CFDF455D614FA84E /* OPKTerminalCore in Frameworks */ = {isa = PBXBuildFile; productRef = 7AF6210BF2588C4F6C012D4C /* OPKTerminalCore */; };
 		67D4566FFD8A1CE1298199F6 /* OPKTerminalCore in Frameworks */ = {isa = PBXBuildFile; productRef = FA75F3B1C18EDE2317F306B5 /* OPKTerminalCore */; };
 		AEFF5C1D371AFEC63EF71D07 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = AD692CE282BE1225E849A3B5 /* PrivacyInfo.xcprivacy */; };
 		B0190206586F87221C7EA5F6 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 756E5FDEC605676AF960EE9B /* SettingsView.swift */; };
@@ -27,6 +33,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		60134365678F43096DC843DD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 4150EA981F4E70969C53DF2C /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F4BFD273662849820C685188;
+			remoteInfo = OPKTerminalApp;
+		};
 		E2657296D4FE3D2F0565A409 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 4150EA981F4E70969C53DF2C /* Project object */;
@@ -40,20 +53,25 @@
 		0E574FC69C0BC37CED06C39F /* OPKTerminalApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = OPKTerminalApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		12F51EF9245CE3080AD46C1C /* KeyboardDismissToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardDismissToolbar.swift; sourceTree = "<group>"; };
 		1E2580CFEBF610B95FE105C6 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
+		23CECB404EFECABF9287D18E /* AdminPINStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminPINStore.swift; sourceTree = "<group>"; };
 		2607214834EEA1EE5160723F /* OPKTerminalAppUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = OPKTerminalAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		454F035A1B4282472EBE46B5 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		5D5746A9CDFDA4B8F510F419 /* KeyboardDismissalUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardDismissalUITests.swift; sourceTree = "<group>"; };
 		6205D28D194FF1F1ABFEE432 /* QRCodeImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeImage.swift; sourceTree = "<group>"; };
+		668F190B8477B82612A8E736 /* OPKTerminalAppTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = OPKTerminalAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		756E5FDEC605676AF960EE9B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		78F1B7CE154D7DEE04117BA2 /* ProvisioningAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProvisioningAppTests.swift; sourceTree = "<group>"; };
 		A4989A551BB01926EC91CF2B /* StoredSettlement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoredSettlement.swift; sourceTree = "<group>"; };
 		AA8D918A4F1E641C77252BF8 /* OPKTerminalApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OPKTerminalApp.swift; sourceTree = "<group>"; };
 		AD692CE282BE1225E849A3B5 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		ADC1BA20DF852782F0A85D8E /* SettlementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettlementView.swift; sourceTree = "<group>"; };
 		BFBB39B22012F5CB338817C2 /* ConfigurationAddressScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationAddressScanner.swift; sourceTree = "<group>"; };
 		C793156B47CF83EA94F702DC /* StoredInvoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoredInvoice.swift; sourceTree = "<group>"; };
+		CA0426521B7E20B2920D3725 /* OperatorResetSafety.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorResetSafety.swift; sourceTree = "<group>"; };
 		CEB6EA3CDCC2868247582FAC /* ios */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ios; path = .; sourceTree = SOURCE_ROOT; };
 		E635A3DB06657654B0D55367 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F336BEA05ED67165F7EEB27E /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		FD186F6FBA69C3785543AEE5 /* TerminalReadiness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalReadiness.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -64,6 +82,15 @@
 				67D4566FFD8A1CE1298199F6 /* OPKTerminalCore in Frameworks */,
 				05DAC3E3819FD8D3AED82CC8 /* OPKTerminalRPC in Frameworks */,
 				FAF3036E94175E3DBD309AB3 /* OPKTerminalOperator in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		318205C9DAE492812B7365BC /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				628341D2CFDF455D614FA84E /* OPKTerminalCore in Frameworks */,
+				498C710650A0729BCAA01E63 /* OPKTerminalOperator in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -99,6 +126,7 @@
 			isa = PBXGroup;
 			children = (
 				0E574FC69C0BC37CED06C39F /* OPKTerminalApp.app */,
+				668F190B8477B82612A8E736 /* OPKTerminalAppTests.xctest */,
 				2607214834EEA1EE5160723F /* OPKTerminalAppUITests.xctest */,
 			);
 			name = Products;
@@ -107,25 +135,37 @@
 		ADE3C8A32D60D37A70F4A34A /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				23CECB404EFECABF9287D18E /* AdminPINStore.swift */,
 				F336BEA05ED67165F7EEB27E /* AppModel.swift */,
 				1E2580CFEBF610B95FE105C6 /* AppSettings.swift */,
 				BFBB39B22012F5CB338817C2 /* ConfigurationAddressScanner.swift */,
 				454F035A1B4282472EBE46B5 /* ContentView.swift */,
 				12F51EF9245CE3080AD46C1C /* KeyboardDismissToolbar.swift */,
+				CA0426521B7E20B2920D3725 /* OperatorResetSafety.swift */,
 				AA8D918A4F1E641C77252BF8 /* OPKTerminalApp.swift */,
 				6205D28D194FF1F1ABFEE432 /* QRCodeImage.swift */,
 				756E5FDEC605676AF960EE9B /* SettingsView.swift */,
 				ADC1BA20DF852782F0A85D8E /* SettlementView.swift */,
 				C793156B47CF83EA94F702DC /* StoredInvoice.swift */,
 				A4989A551BB01926EC91CF2B /* StoredSettlement.swift */,
+				FD186F6FBA69C3785543AEE5 /* TerminalReadiness.swift */,
 			);
 			path = Sources;
+			sourceTree = "<group>";
+		};
+		BEA022A80827A0530F16FC25 /* AppTests */ = {
+			isa = PBXGroup;
+			children = (
+				78F1B7CE154D7DEE04117BA2 /* ProvisioningAppTests.swift */,
+			);
+			path = AppTests;
 			sourceTree = "<group>";
 		};
 		C6A65DFA614F04C09DB686F9 = {
 			isa = PBXGroup;
 			children = (
 				52A85BAF47912A497CD40199 /* App */,
+				BEA022A80827A0530F16FC25 /* AppTests */,
 				69BD88ECD56BA5DDF9A59E00 /* AppUITests */,
 				72E854257B611644D0610C24 /* Packages */,
 				8703E5FB5C72EB56D36993A5 /* Products */,
@@ -144,6 +184,27 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		132BBF504E0786330423FDD6 /* OPKTerminalAppTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9A494CF93D863B22836C6EF6 /* Build configuration list for PBXNativeTarget "OPKTerminalAppTests" */;
+			buildPhases = (
+				12D6462DC2155D1494A025F2 /* Sources */,
+				318205C9DAE492812B7365BC /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C176271119A99C20C4D9BB7D /* PBXTargetDependency */,
+			);
+			name = OPKTerminalAppTests;
+			packageProductDependencies = (
+				7AF6210BF2588C4F6C012D4C /* OPKTerminalCore */,
+				90808346033FEC346AAA9AAD /* OPKTerminalOperator */,
+			);
+			productName = OPKTerminalAppTests;
+			productReference = 668F190B8477B82612A8E736 /* OPKTerminalAppTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		CAD15416F078AE8FA6FC8994 /* OPKTerminalAppUITests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 6387FF0D5B7FB26E4B1FADF4 /* Build configuration list for PBXNativeTarget "OPKTerminalAppUITests" */;
@@ -193,6 +254,10 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
+					132BBF504E0786330423FDD6 = {
+						DevelopmentTeam = 3272Q6WG52;
+						ProvisioningStyle = Automatic;
+					};
 					CAD15416F078AE8FA6FC8994 = {
 						DevelopmentTeam = 3272Q6WG52;
 						ProvisioningStyle = Automatic;
@@ -222,6 +287,7 @@
 			projectRoot = "";
 			targets = (
 				F4BFD273662849820C685188 /* OPKTerminalApp */,
+				132BBF504E0786330423FDD6 /* OPKTerminalAppTests */,
 				CAD15416F078AE8FA6FC8994 /* OPKTerminalAppUITests */,
 			);
 		};
@@ -244,17 +310,28 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				24A3B3857C566A3E872078E1 /* AdminPINStore.swift in Sources */,
 				2F13DF7FB8F29D5F70B6668F /* AppModel.swift in Sources */,
 				37BD6907BFAFECED9C45DCA1 /* AppSettings.swift in Sources */,
 				F71F83A66D812664E182B08E /* ConfigurationAddressScanner.swift in Sources */,
 				E10950392415D8088C0E0617 /* ContentView.swift in Sources */,
 				18294CDA1F24EC91C766555B /* KeyboardDismissToolbar.swift in Sources */,
 				E9FEADCFEDC07B1690B88069 /* OPKTerminalApp.swift in Sources */,
+				55524B8FD1BC7FF27AA2FFC5 /* OperatorResetSafety.swift in Sources */,
 				D956810EF9C3953161BF677F /* QRCodeImage.swift in Sources */,
 				B0190206586F87221C7EA5F6 /* SettingsView.swift in Sources */,
 				107353DCB6A3E4028A50B95B /* SettlementView.swift in Sources */,
 				CE107B3D5F39B62D29C5AFAF /* StoredInvoice.swift in Sources */,
 				243B86D5F9F16944DB0F35F6 /* StoredSettlement.swift in Sources */,
+				59923466552070005599E7E4 /* TerminalReadiness.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		12D6462DC2155D1494A025F2 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2436BEC402F17C6C3F93D22E /* ProvisioningAppTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -273,6 +350,11 @@
 			isa = PBXTargetDependency;
 			target = F4BFD273662849820C685188 /* OPKTerminalApp */;
 			targetProxy = E2657296D4FE3D2F0565A409 /* PBXContainerItemProxy */;
+		};
+		C176271119A99C20C4D9BB7D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F4BFD273662849820C685188 /* OPKTerminalApp */;
+			targetProxy = 60134365678F43096DC843DD /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -338,6 +420,7 @@
 				);
 				MARKETING_VERSION = 0.1.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openpasskey.terminal.ios;
+				PRODUCT_MODULE_NAME = OPKTerminalApp;
 				PRODUCT_NAME = "OPK Terminal";
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -347,6 +430,52 @@
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A1ADC15BED415489AFF5F3B4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 3272Q6WG52;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.openpasskey.terminal.ios.tests;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/OPK Terminal.app/OPK Terminal";
+			};
+			name = Release;
+		};
+		ABA8498F1DF488359D5691C0 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 3272Q6WG52;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.openpasskey.terminal.ios.tests;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/OPK Terminal.app/OPK Terminal";
 			};
 			name = Debug;
 		};
@@ -484,6 +613,7 @@
 				);
 				MARKETING_VERSION = 0.1.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openpasskey.terminal.ios;
+				PRODUCT_MODULE_NAME = OPKTerminalApp;
 				PRODUCT_NAME = "OPK Terminal";
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -517,6 +647,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
+		9A494CF93D863B22836C6EF6 /* Build configuration list for PBXNativeTarget "OPKTerminalAppTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				ABA8498F1DF488359D5691C0 /* Debug */,
+				A1ADC15BED415489AFF5F3B4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		C5C287ACC568CE0B21475EE3 /* Build configuration list for PBXProject "OPKTerminal" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -539,6 +678,14 @@
 		2BF56EF401912BF58C4AA87D /* OPKTerminalRPC */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = OPKTerminalRPC;
+		};
+		7AF6210BF2588C4F6C012D4C /* OPKTerminalCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OPKTerminalCore;
+		};
+		90808346033FEC346AAA9AAD /* OPKTerminalOperator */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OPKTerminalOperator;
 		};
 		AFD32C7E83DA8AC8ADB7EB8E /* OPKTerminalOperator */ = {
 			isa = XCSwiftPackageProductDependency;

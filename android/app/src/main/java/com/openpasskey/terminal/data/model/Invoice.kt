@@ -24,11 +24,23 @@ data class Invoice(
     @ColumnInfo(defaultValue = "2") val confirmationBlocks: Int = 2,
     @ColumnInfo(defaultValue = "''") val erc681Uri: String = "",
     val firstDetectedBlock: Long? = null,
+    val firstDetectedBlockHash: String? = null,
     val lastObservedBlock: Long? = null,
     val confirmedAtBlock: Long? = null,
     val settledTxHash: String? = null,
     val settlementId: String? = null,
-    val settledAtBlock: Long? = null
+    val settledAtBlock: Long? = null,
+    @ColumnInfo(defaultValue = "'0'") val pendingLateAmount: String = "0",
+    val lateFirstDetectedBlock: Long? = null,
+    val lateFirstDetectedBlockHash: String? = null,
+    val lateLastObservedBlock: Long? = null,
+    val lateConfirmedAtBlock: Long? = null,
+    /** True until canonical receipt evidence conclusively accounts for the expected amount. */
+    @ColumnInfo(defaultValue = "0") val settlementAmbiguous: Boolean = false,
+    /** Durable fairness cursor for bounded recovery of still-open published receivers. */
+    val openRecoveryLastAttemptAt: Long? = null,
+    /** Durable fairness cursor for perpetual reconciliation of closed/swept receivers. */
+    val lateRecoveryLastAttemptAt: Long? = null,
 )
 
 enum class InvoiceStatus {
@@ -38,6 +50,8 @@ enum class InvoiceStatus {
     PAID,
     OVERPAID,
     PARTIALLY_SETTLED,
+    LATE_PAYMENT_CONFIRMING,
+    LATE_PAYMENT_READY,
     SETTLED,
     SETTLEMENT_REVIEW_REQUIRED,
     EXPIRED

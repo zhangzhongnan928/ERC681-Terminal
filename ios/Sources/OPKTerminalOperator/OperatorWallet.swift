@@ -5,7 +5,11 @@ import P256K
 import Security
 
 protocol OperatorTransactionSigning: Sendable {
-    func sign(digest: Bytes32, reason: String) async throws -> EthereumRecoverableSignature
+    func sign(
+        digest: Bytes32,
+        reason: String,
+        postAuthenticationValidation: @Sendable () async throws -> Void
+    ) async throws -> EthereumRecoverableSignature
 }
 
 /// A device-local secp256k1 EOA. The private scalar is stored only in a non-synchronizing
@@ -25,7 +29,12 @@ public actor KeychainOperatorWallet: OperatorTransactionSigning {
 
     /// Creates one new key after explicit device authentication. Existing or orphaned keys
     /// are never overwritten; an orphan's public metadata is repaired instead.
-    public func create(reason: String) async throws -> EthereumAddress {
+    public func create(
+        reason: String,
+        persistenceAuthorization: @Sendable (
+            _ persistence: () throws -> EthereumAddress
+        ) throws -> EthereumAddress = { persistence in try persistence() }
+    ) async throws -> EthereumAddress {
         if try storage.readPublicAddress() != nil {
             throw OperatorWalletError.walletAlreadyExists
         }
@@ -36,8 +45,10 @@ public actor KeychainOperatorWallet: OperatorTransactionSigning {
         if var existingSecret = try storage.readPrivateKey(context: context, allowNotFound: true) {
             defer { existingSecret.resetBytes(in: 0..<existingSecret.count) }
             let address = try EthereumSecp256k1.address(privateKey: existingSecret)
-            try storage.storePublicAddress(address)
-            return address
+            return try persistenceAuthorization {
+                try storage.storePublicAddress(address)
+                return address
+            }
         }
 
         let key: P256K.Recovery.PrivateKey
@@ -49,15 +60,53 @@ public actor KeychainOperatorWallet: OperatorTransactionSigning {
         var secret = key.dataRepresentation
         defer { secret.resetBytes(in: 0..<secret.count) }
         let address = try EthereumSecp256k1.address(privateKey: secret)
-        try storage.insertPrivateKey(secret)
-        try storage.storePublicAddress(address)
-        return address
+        return try persistenceAuthorization {
+            try storage.insertPrivateKey(secret)
+            try storage.storePublicAddress(address)
+            return address
+        }
+    }
+
+    /// Permanently removes the local operator only after a fresh device-owner authentication.
+    /// Callers must separately ensure that no unsettled work still depends on this key.
+    public func reset(
+        reason: String,
+        beforeDeletion: @Sendable () async throws -> Void = {},
+        deletionAuthorization: @Sendable (
+            _ deletion: () throws -> Void
+        ) throws -> Void = { deletion in try deletion() }
+    ) async throws {
+        guard try storage.readPublicAddress() != nil else {
+            throw OperatorWalletError.walletNotCreated
+        }
+        let context = try await authenticatedContext(reason: reason)
+        defer { context.invalidate() }
+        // Run the caller's final live safety check after authentication, leaving only the
+        // protected Keychain read between that check and deletion.
+        try await beforeDeletion()
+        guard var secret = try storage.readPrivateKey(context: context, allowNotFound: false) else {
+            throw OperatorWalletError.walletNotCreated
+        }
+        secret.resetBytes(in: 0..<secret.count)
+        // The caller's process-local admin session gate wraps the actual Keychain deletion,
+        // making lock/background invalidation linearizable with this destructive boundary.
+        try deletionAuthorization { [storage] in
+            try storage.deleteWallet()
+        }
     }
 
     /// Every signature requires a fresh foreground device-owner authentication prompt.
-    func sign(digest: Bytes32, reason: String) async throws -> EthereumRecoverableSignature {
+    func sign(
+        digest: Bytes32,
+        reason: String,
+        postAuthenticationValidation: @Sendable () async throws -> Void
+    ) async throws -> EthereumRecoverableSignature {
         let context = try await authenticatedContext(reason: reason)
         defer { context.invalidate() }
+        // Device-owner authentication can remain on screen indefinitely. Revalidate all
+        // caller-owned chain and snapshot invariants only after it succeeds, with no further
+        // suspension between this callback and the protected Keychain read/sign operation.
+        try await postAuthenticationValidation()
         guard var secret = try storage.readPrivateKey(context: context, allowNotFound: false) else {
             throw OperatorWalletError.walletNotCreated
         }
@@ -206,6 +255,17 @@ private final class OperatorKeychainStorage: @unchecked Sendable {
             throw map(status == errSecSuccess ? errSecDecode : status)
         }
         return data
+    }
+
+    func deleteWallet() throws {
+        let publicStatus = SecItemDelete(baseQuery(account: publicAccount) as CFDictionary)
+        guard publicStatus == errSecSuccess || publicStatus == errSecItemNotFound else {
+            throw map(publicStatus)
+        }
+        let privateStatus = SecItemDelete(baseQuery(account: privateAccount) as CFDictionary)
+        guard privateStatus == errSecSuccess || privateStatus == errSecItemNotFound else {
+            throw map(privateStatus)
+        }
     }
 
     private func baseQuery(account: String) -> [String: Any] {

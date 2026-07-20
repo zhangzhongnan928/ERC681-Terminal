@@ -16,9 +16,9 @@ struct SettlementView: View {
                 if groups.isEmpty {
                     Section {
                         ContentUnavailableView(
-                            "No paid sessions to settle",
+                            "No funded sessions to settle",
                             systemImage: "checkmark.circle",
-                            description: Text("Paid and overpaid invoices appear here after confirmation. Failed or confirmed-partial sweeps can be retried when the receiver has a new nonzero balance.")
+                            description: Text("Invoices appear only after the currently sweepable receiver balance reaches the saved confirmation requirement. This includes confirmed late payments to closed or expired QRs.")
                         )
                     }
                 } else {
@@ -36,7 +36,7 @@ struct SettlementView: View {
                                     systemImage: "square.stack.3d.up.fill"
                                 )
                             }
-                            .disabled(model.operatorAddress == nil || model.settlementBusy)
+                            .disabled(model.operatorAddress == nil || model.operationBusy)
 
                             ForEach(group.invoices) { invoice in
                                 HStack(spacing: 12) {
@@ -52,7 +52,7 @@ struct SettlementView: View {
                                         Task { await model.prepareSettlement(for: [invoice]) }
                                     }
                                     .buttonStyle(.bordered)
-                                    .disabled(model.operatorAddress == nil || model.settlementBusy)
+                                    .disabled(model.operatorAddress == nil || model.operationBusy)
                                 }
                             }
                         } header: {
@@ -75,12 +75,15 @@ struct SettlementView: View {
                                     Spacer()
                                     Text(settlement.statusLabel)
                                         .font(.caption.weight(.semibold))
-                                        .foregroundStyle(statusColor(settlement.phase))
+                                        .foregroundStyle(statusColor(settlement))
                                 }
                                 Text(abbreviateSettlement(settlement.transactionHash))
                                     .font(.system(.caption, design: .monospaced))
                                     .foregroundStyle(.secondary)
-                                if let message = settlement.failureReason ?? settlement.broadcastError {
+                                if let message = settlement.cumulativeEvidenceLastError
+                                    ?? settlement.cumulativeReviewLastError
+                                    ?? settlement.failureReason
+                                    ?? settlement.broadcastError {
                                     Text(message)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
@@ -93,6 +96,7 @@ struct SettlementView: View {
             }
             .navigationTitle("Settlement")
             .refreshable {
+                await model.reconcileForegroundInvoices()
                 await model.reconcileSettlements()
                 await model.refreshOperatorStatus()
             }
@@ -145,8 +149,14 @@ struct SettlementView: View {
                 .flatMap(\.invoiceIDs)
         )
         let eligible = invoices.filter {
-            ($0.statusLabel == "Paid" || $0.statusLabel == "Overpaid")
-                && !activeIDs.contains($0.invoiceID)
+            guard !activeIDs.contains($0.invoiceID),
+                  let cumulative = try? UInt256(
+                    decimalString: $0.confirmedCumulativeSweptAmount
+                  )
+            else { return false }
+            return $0.hasConfirmedSweepableFunds(
+                confirmedCumulative: cumulative
+            )
         }
         return Dictionary(grouping: eligible) {
             "\($0.chainID)|\($0.rpcURL)|\($0.vault.lowercased())|\($0.tokenAddress.lowercased())"
@@ -169,12 +179,17 @@ struct SettlementView: View {
         )
     }
 
-    private func statusColor(_ phase: SettlementTransactionPhase) -> Color {
-        switch phase {
-        case .final: .green
-        case .failed: .red
-        case .needsReview, .unknown: .orange
-        case .pending, .mined: .secondary
+    private func statusColor(_ settlement: StoredSettlement) -> Color {
+        if (!settlement.cumulativeEvidenceIndexed
+            && settlement.cumulativeEvidenceLastError != nil)
+            || settlement.cumulativeReviewLastError != nil {
+            return .orange
+        }
+        switch settlement.phase {
+        case .final: return .green
+        case .failed: return .red
+        case .needsReview, .unknown: return .orange
+        case .pending, .mined: return .secondary
         }
     }
 }
@@ -237,7 +252,7 @@ private struct SettlementConfirmationView: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(model.settlementBusy)
+                    .disabled(model.operationBusy)
                 } footer: {
                     Text("Device authentication unlocks one typed EIP-1559 sweep signature. The signed raw transaction is saved before the first broadcast and reused unchanged if RPC acceptance is ambiguous.")
                 }
@@ -250,17 +265,17 @@ private struct SettlementConfirmationView: View {
                         model.cancelPreparedSettlement()
                         dismiss()
                     }
-                    .disabled(model.settlementBusy)
+                    .disabled(model.operationBusy)
                 }
             }
         }
     }
 
     private func formattedToken(_ amount: UInt256) -> String {
-        guard let decimals = UInt8(model.settings.tokenDecimals) else {
+        guard let token = model.preparedSettlementToken else {
             return amount.decimalString
         }
-        return "\(TokenAmount(rawValue: amount, decimals: decimals).displayString()) \(model.settings.tokenSymbol)"
+        return "\(TokenAmount(rawValue: amount, decimals: token.decimals).displayString()) \(token.symbol)"
     }
 }
 

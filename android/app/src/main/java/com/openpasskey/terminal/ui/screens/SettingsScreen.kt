@@ -12,13 +12,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.QrCodeScanner
-import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -45,47 +45,50 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
-import com.openpasskey.terminal.ui.components.AddressScannerDialog
 import com.openpasskey.terminal.ui.components.DeviceAuthentication
+import com.openpasskey.terminal.ui.components.AddressScannerDialog
+import com.openpasskey.terminal.ui.components.ProvisioningScannerDialog
 import com.openpasskey.terminal.ui.components.QRCodeView
+import com.openpasskey.terminal.viewmodel.SettingsState
 import com.openpasskey.terminal.viewmodel.SettingsViewModel
+import com.openpasskey.terminal.viewmodel.TerminalSetupStatus
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
 import java.math.BigDecimal
-import java.math.BigInteger
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(viewModel: SettingsViewModel) {
     val state by viewModel.state.collectAsState()
-    var showTokenDialog by remember { mutableStateOf(false) }
-    var showWalletCreationDialog by remember { mutableStateOf(false) }
     val activity = LocalContext.current as? FragmentActivity
+    var showWalletCreation by remember { mutableStateOf(false) }
+    var showSetPin by remember { mutableStateOf(false) }
+    var showUnlock by remember { mutableStateOf(false) }
+    var showProvisioningScanner by remember { mutableStateOf(false) }
+    var showReset by remember { mutableStateOf(false) }
+    var showAdvancedManualSetup by remember { mutableStateOf(false) }
 
-    if (showTokenDialog) {
-        AddTokenDialog(
-            onDismiss = { showTokenDialog = false },
-            onAdd = { address, symbol, decimals ->
-                viewModel.addPaymentToken(address, symbol, decimals)
-                showTokenDialog = false
-            },
+    if (showProvisioningScanner) {
+        ProvisioningScannerDialog(
+            onDismiss = { showProvisioningScanner = false },
+            onProvisioningPayloadScanned = viewModel::provision,
         )
     }
-
-    if (showWalletCreationDialog) {
+    if (showWalletCreation) {
         AlertDialog(
-            onDismissRequest = { showWalletCreationDialog = false },
+            onDismissRequest = { showWalletCreation = false },
             title = { Text("Create terminal operator?") },
             text = {
                 Text(
-                    "This creates a new secp256k1 wallet protected by Android Keystore and device authentication. " +
-                        "Its public address identifies new invoices. Fund it with native gas and authorize it on the vault before settlement."
+                    "This creates the device-local EOA protected by Android Keystore and device " +
+                        "authentication. The merchant passkey is never stored on this terminal.",
                 )
             },
             confirmButton = {
                 Button(onClick = {
-                    showWalletCreationDialog = false
+                    showWalletCreation = false
                     if (viewModel.prepareWalletCreation()) {
                         if (activity == null) {
                             viewModel.authenticationFailed("System authentication is unavailable")
@@ -95,105 +98,132 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                                 "Create operator wallet",
                                 "Authenticate to protect the new private key",
                                 viewModel::createWalletAuthenticated,
-                                viewModel::authenticationFailed
+                                viewModel::authenticationFailed,
                             )
                         }
                     }
                 }) { Text("Authenticate & create") }
             },
             dismissButton = {
-                TextButton(onClick = { showWalletCreationDialog = false }) { Text("Cancel") }
-            }
+                TextButton(onClick = { showWalletCreation = false }) { Text("Cancel") }
+            },
+        )
+    }
+    if (showSetPin) {
+        SetAdminPinDialog(
+            onDismiss = { showSetPin = false },
+            onSave = { pin, confirmation ->
+                showSetPin = false
+                viewModel.setInitialAdminPin(pin, confirmation)
+            },
+        )
+    }
+    if (showUnlock) {
+        UnlockAdminDialog(
+            retryAfterSeconds = state.adminRetryAfterSeconds,
+            onDismiss = { showUnlock = false },
+            onUnlock = { pin ->
+                showUnlock = false
+                viewModel.unlockAdmin(pin)
+            },
+        )
+    }
+    if (showReset) {
+        AlertDialog(
+            onDismissRequest = { showReset = false },
+            title = { Text("Permanently reset operator wallet?") },
+            text = {
+                Text(
+                    "This permanently deletes the local private key and current provisioning. " +
+                        "Before continuing, revoke ${state.operatorWalletAddress ?: "this operator"} " +
+                        "from the vault and withdraw all native gas. The app checks both latest and pending " +
+                        "balances twice and cancels reset unless both are exactly zero. This app cannot undo " +
+                        "the reset. Funds sent later to this previously shared address cannot be recovered. " +
+                        "Reset is available only before this terminal issues its first payment QR. A published " +
+                        "receiver remains payable forever, so its signing key cannot later be deleted safely. " +
+                        "Invoice history remains available.",
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showReset = false
+                    viewModel.resetWalletConfirmed()
+                }) {
+                    Icon(Icons.Default.DeleteForever, contentDescription = null)
+                    Text(" I revoked it and withdrew all gas — reset")
+                }
+            },
+            dismissButton = { TextButton(onClick = { showReset = false }) { Text("Cancel") } },
+        )
+    }
+    if (showAdvancedManualSetup) {
+        AdvancedManualSetupDialog(
+            onDismiss = { showAdvancedManualSetup = false },
+            onProvision = { vault, token ->
+                showAdvancedManualSetup = false
+                viewModel.provisionManual(vault, token)
+            },
         )
     }
 
-    Scaffold(topBar = { TopAppBar(title = { Text("Terminal Settings") }) }) { padding ->
+    Scaffold(topBar = { TopAppBar(title = { Text("Terminal Setup") }) }) { padding ->
         LazyColumn(
             modifier = Modifier.padding(padding).padding(horizontal = 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            item {
-                Text("Payment and settlement terminal", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Payment observation remains read-only. A separate, encrypted operator wallet can sign only reviewed sweepSessions transactions.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            item {
-                SettingField("Network name", state.networkName, viewModel::updateNetworkName)
-                SettingField("HTTPS RPC URL", state.rpcUrl, viewModel::updateRpcUrl)
-                SettingField("Chain ID", state.chainId, viewModel::updateChainId, KeyboardType.Number)
-                ScannableAddressField(
-                    fieldLabel = "Factory address",
-                    address = state.factoryAddress,
-                    onAddressChange = viewModel::updateFactoryAddress,
-                )
-                ScannableAddressField(
-                    fieldLabel = "Receiver implementation address",
-                    address = state.receiverImplementationAddress,
-                    onAddressChange = viewModel::updateReceiverImplementationAddress,
-                )
-                ScannableAddressField(
-                    fieldLabel = "Vault address",
-                    address = state.vaultAddress,
-                    onAddressChange = viewModel::updateVaultAddress,
-                )
-                SettingField(
-                    "Confirmation blocks",
-                    state.confirmationBlocks,
-                    viewModel::updateConfirmationBlocks,
-                    KeyboardType.Number,
-                )
-            }
+            item { SetupStatusCard(state) }
             item {
                 OperatorWalletCard(
-                    availability = state.operatorWalletAvailability,
-                    address = state.operatorWalletAddress,
-                    chainId = state.operatorNetworkChainId.takeIf { it > 0 },
-                    balanceWei = state.operatorBalanceWei,
-                    authorized = state.operatorAuthorized,
-                    settlementTargetVerified = state.settlementTargetVerified,
-                    hardwareBacked = state.walletHardwareBacked,
-                    strongBoxBacked = state.walletStrongBoxBacked,
-                    deviceAuthenticationRequired = state.walletDeviceAuthenticationRequired,
-                    refreshing = state.refreshingOperator,
-                    onCreate = { showWalletCreationDialog = true },
-                    onRefresh = viewModel::refreshOperatorStatus
+                    state = state,
+                    onCreate = { showWalletCreation = true },
+                    onRefresh = viewModel::refreshOperatorStatus,
                 )
             }
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Payment tokens", style = MaterialTheme.typography.titleMedium)
-                    OutlinedButton(onClick = { showTokenDialog = true }) {
-                        Icon(Icons.Default.Add, contentDescription = null)
-                        Text(" Add")
-                    }
-                }
-            }
-            if (state.paymentTokens.isEmpty()) {
-                item { Text("Add at least one vault-whitelisted ERC-20 token.") }
-            }
-            state.paymentTokens.forEach { token ->
-                item(key = token.address) {
-                    Card(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("${token.symbol} · ${token.decimals} decimals")
-                                Text(token.address, style = MaterialTheme.typography.bodySmall)
-                            }
-                            IconButton(onClick = { viewModel.removePaymentToken(token.address) }) {
-                                Icon(Icons.Default.Delete, contentDescription = "Remove token")
+            if (state.operatorWalletAvailability == OperatorWalletAvailability.READY &&
+                !state.adminPinConfigured
+            ) {
+                item {
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Protect setup", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "Set a local 6-digit admin PIN. It hides reprovisioning and wallet reset; " +
+                                    "it is not your merchant passkey.",
+                            )
+                            Button(onClick = { showSetPin = true }, modifier = Modifier.fillMaxWidth()) {
+                                Icon(Icons.Default.Security, contentDescription = null)
+                                Text(" Set admin PIN")
                             }
                         }
                     }
+                }
+            }
+            if (state.operatorWalletAvailability == OperatorWalletAvailability.READY &&
+                state.adminPinConfigured && state.adminUnlocked && !state.provisioned
+            ) {
+                item {
+                    Button(
+                        onClick = { showProvisioningScanner = true },
+                        enabled = state.setupStatus != TerminalSetupStatus.PROVISIONING,
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                    ) {
+                        Icon(Icons.Default.QrCodeScanner, contentDescription = null)
+                        Text(" Scan merchant portal setup")
+                    }
+                }
+            }
+            if (state.provisioned) item { ConfigurationSummary(state) }
+            if (state.adminPinConfigured) {
+                item {
+                    AdminSetupCard(
+                        unlocked = state.adminUnlocked,
+                        busy = state.setupStatus == TerminalSetupStatus.PROVISIONING,
+                        onUnlock = { showUnlock = true },
+                        onLock = viewModel::lockAdmin,
+                        onReprovision = { showProvisioningScanner = true },
+                        onManualSetup = { showAdvancedManualSetup = true },
+                        onReset = { showReset = true },
+                    )
                 }
             }
             state.message?.let { message ->
@@ -205,45 +235,53 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                     )
                 }
             }
-            item {
-                Button(
-                    onClick = viewModel::saveSettings,
-                    modifier = Modifier.fillMaxWidth().height(52.dp),
-                ) {
-                    Icon(Icons.Default.Save, contentDescription = null)
-                    Text(" Save settings")
-                }
-                Spacer(Modifier.height(24.dp))
-            }
+            item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun SetupStatusCard(state: SettingsState) {
+    val (title, detail) = when (state.setupStatus) {
+        TerminalSetupStatus.CREATE_WALLET -> "Step 1 of 2 · Create terminal wallet" to
+            "Create the device EOA used for terminal identity and constrained settlement signing."
+        TerminalSetupStatus.SET_ADMIN_PIN -> "Protect setup" to
+            "Set a local admin PIN before importing merchant configuration."
+        TerminalSetupStatus.SCAN_PORTAL -> "Step 2 of 2 · Connect merchant portal" to
+            "On a personal phone or computer, authorize this terminal and show its unified setup QR."
+        TerminalSetupStatus.PROVISIONING -> "Validating configuration" to
+            "Checking the known chain, vault, deployment pins, token metadata, and whitelist."
+        TerminalSetupStatus.AWAITING_AUTHORIZATION -> "Awaiting portal authorization" to
+            "Confirm the terminal operator transaction in the merchant portal, then refresh."
+        TerminalSetupStatus.AWAITING_GAS -> "Awaiting terminal gas" to
+            "Send at least 0.0001 native currency to the funding address below."
+        TerminalSetupStatus.READY -> "Ready" to
+            "Configuration, operator authorization, and minimum gas reserve are valid."
+        TerminalSetupStatus.ERROR -> "Setup needs attention" to
+            "Review the error below. Existing invoices and history remain accessible."
+    }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(detail, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
 
 @Composable
 private fun OperatorWalletCard(
-    availability: OperatorWalletAvailability,
-    address: String?,
-    chainId: Long?,
-    balanceWei: String?,
-    authorized: Boolean?,
-    settlementTargetVerified: Boolean,
-    hardwareBacked: Boolean,
-    strongBoxBacked: Boolean,
-    deviceAuthenticationRequired: Boolean,
-    refreshing: Boolean,
+    state: SettingsState,
     onCreate: () -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
 ) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Terminal operator wallet", style = MaterialTheme.typography.titleMedium)
-            when (availability) {
+            when (state.operatorWalletAvailability) {
                 OperatorWalletAvailability.NOT_CREATED -> {
-                    Text(
-                        "Create the device-local wallet used as the terminal identity for new payment QRs and to sign reviewed settlement transactions."
-                    )
+                    Text("No device-local EOA exists yet.")
                     Button(onClick = onCreate, modifier = Modifier.fillMaxWidth()) {
                         Icon(Icons.Default.Security, contentDescription = null)
                         Text(" Create protected wallet")
@@ -251,67 +289,66 @@ private fun OperatorWalletCard(
                 }
                 OperatorWalletAvailability.UNAVAILABLE -> {
                     Text(
-                        "The stored operator cannot be used safely. Revoke its address on the vault before replacing the app or wallet.",
-                        color = MaterialTheme.colorScheme.error
+                        "The stored operator cannot be used safely. Revoke it on the vault before replacement.",
+                        color = MaterialTheme.colorScheme.error,
                     )
-                    address?.let { Text(it, fontFamily = FontFamily.Monospace) }
+                    state.operatorWalletAddress?.let { Text(it, fontFamily = FontFamily.Monospace) }
                 }
                 OperatorWalletAvailability.READY -> {
-                    val walletAddress = requireNotNull(address)
-                    SelectionContainer {
-                        Text(walletAddress, fontFamily = FontFamily.Monospace)
-                    }
+                    val address = requireNotNull(state.operatorWalletAddress)
+                    SelectionContainer { Text(address, fontFamily = FontFamily.Monospace) }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = {
-                            clipboard.setText(AnnotatedString(walletAddress))
+                            clipboard.setText(AnnotatedString(address))
                             Toast.makeText(context, "Operator address copied", Toast.LENGTH_SHORT).show()
                         }) {
                             Icon(Icons.Default.ContentCopy, contentDescription = null)
-                            Text(" Copy full address")
+                            Text(" Copy")
                         }
-                        IconButton(onClick = onRefresh, enabled = !refreshing) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh operator status")
+                        IconButton(onClick = onRefresh, enabled = !state.refreshingOperator) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Refresh setup status")
                         }
                     }
-                    QRCodeView(
-                        data = chainId?.let { "ethereum:$walletAddress@$it" } ?: walletAddress,
-                        size = 180.dp,
-                        contentDescription = "Chain-qualified settlement operator funding QR code",
-                        modifier = Modifier.align(Alignment.CenterHorizontally)
-                    )
-                    Text(
-                        "The QR is address-only${chainId?.let { " for chain $it" } ?: ""}. Fund this address with native gas only. " +
-                            "ERC-20 payment funds go to one-time invoice receivers.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text(
-                        "This public address identifies every new invoice. Vault authorization is checked separately before settlement.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    val balance = balanceWei?.let(::formatNativeBalance) ?: "Not checked"
-                    Text("Native balance: $balance")
-                    if (balanceWei?.let { BigInteger(it) < MINIMUM_GAS_RESERVE_WEI } == true) {
+                    state.operatorPairingPayload?.let { payload ->
+                        Text("Portal pairing QR", style = MaterialTheme.typography.labelLarge)
+                        QRCodeView(
+                            data = payload,
+                            size = 190.dp,
+                            contentDescription = "Terminal operator pairing QR code",
+                            modifier = Modifier.align(Alignment.CenterHorizontally),
+                        )
                         Text(
-                            "LOW GAS — add native currency before settlement. Exact gas plus safety/L1 reserve is checked again before signing.",
-                            color = MaterialTheme.colorScheme.error
+                            "From Add terminal in the merchant portal, scan this QR and confirm authorization.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    state.operatorFundingPayload?.let { payload ->
+                        Text("Gas funding QR", style = MaterialTheme.typography.labelLarge)
+                        QRCodeView(
+                            data = payload,
+                            size = 190.dp,
+                            contentDescription = "Chain-qualified terminal gas funding QR code",
+                            modifier = Modifier.align(Alignment.CenterHorizontally),
+                        )
+                        Text(
+                            "Send native gas only. ERC-20 customer payments go to one-time receiver addresses.",
+                            style = MaterialTheme.typography.bodySmall,
                         )
                     }
                     Text(
-                        when (authorized) {
-                            true -> "Vault authorization: authorized (owner or operator)"
-                            false -> "Vault authorization: NOT AUTHORIZED"
-                            null -> "Vault authorization: not checked"
-                        },
-                        color = if (authorized == false) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.onSurface
+                        "Native balance: ${state.operatorBalanceWei?.let(::formatNativeBalance) ?: "Not checked"}",
                     )
                     Text(
-                        "Settlement target: ${if (settlementTargetVerified) "verified for this chain/vault" else "verified again before signing"}"
+                        "Vault authorization: ${when (state.operatorAuthorized) {
+                            true -> "authorized"
+                            false -> "not authorized"
+                            null -> "not checked"
+                        }}",
                     )
                     Text(
-                        "Key protection: ${if (strongBoxBacked) "StrongBox" else if (hardwareBacked) "hardware-backed Keystore" else "Keystore"}; " +
-                            if (deviceAuthenticationRequired) "device authentication required" else "authentication unavailable",
-                        style = MaterialTheme.typography.bodySmall
+                        "Key protection: ${if (state.walletStrongBoxBacked) "StrongBox" else if (state.walletHardwareBacked) "hardware-backed Keystore" else "Keystore"}; " +
+                            if (state.walletDeviceAuthenticationRequired) "device authentication required" else "authentication unavailable",
+                        style = MaterialTheme.typography.bodySmall,
                     )
                 }
             }
@@ -319,94 +356,220 @@ private fun OperatorWalletCard(
     }
 }
 
-private fun formatNativeBalance(wei: String): String = runCatching {
-    BigDecimal(wei).movePointLeft(18).stripTrailingZeros().toPlainString() + " native"
-}.getOrDefault("Unknown")
-
-private val MINIMUM_GAS_RESERVE_WEI = BigInteger("100000000000000")
+@Composable
+private fun ConfigurationSummary(state: SettingsState) {
+    val token = state.paymentTokens.singleOrNull()
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Provisioned configuration", style = MaterialTheme.typography.titleMedium)
+            SummaryLine("Network", "${state.networkName} (${state.chainId})")
+            SummaryLine("Protocol", state.protocolVersion)
+            state.provisionedOperatorAddress?.let { SummaryLine("Bound operator", it) }
+            SummaryLine("Vault", state.vaultAddress)
+            SummaryLine("Factory", state.factoryAddress)
+            SummaryLine("Receiver implementation", state.receiverImplementationAddress)
+            token?.let {
+                SummaryLine("Payment token", "${it.symbol} · ${it.decimals} decimals")
+                SummaryLine("Token contract", it.address)
+            }
+            Text(
+                "These values are chain-derived and read-only. Unlock Admin/setup to scan a replacement portal QR.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
 
 @Composable
-private fun SettingField(
+private fun SummaryLine(label: String, value: String) {
+    Text(label, style = MaterialTheme.typography.labelMedium)
+    SelectionContainer { Text(value, style = MaterialTheme.typography.bodySmall) }
+}
+
+@Composable
+private fun AdminSetupCard(
+    unlocked: Boolean,
+    busy: Boolean,
+    onUnlock: () -> Unit,
+    onLock: () -> Unit,
+    onReprovision: () -> Unit,
+    onManualSetup: () -> Unit,
+    onReset: () -> Unit,
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Admin/setup", style = MaterialTheme.typography.titleMedium)
+            if (!unlocked) {
+                Text("Reprovisioning and wallet reset are hidden while locked.")
+                OutlinedButton(onClick = onUnlock, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Lock, contentDescription = null)
+                    Text(" Unlock with local PIN")
+                }
+            } else {
+                Text("Unlocked until setup completes or the app goes to the background.")
+                OutlinedButton(
+                    onClick = onReprovision,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Default.QrCodeScanner, contentDescription = null)
+                    Text(" Reprovision from portal")
+                }
+                OutlinedButton(
+                    onClick = onManualSetup,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Default.Security, contentDescription = null)
+                    Text(" Advanced manual setup")
+                }
+                OutlinedButton(
+                    onClick = onReset,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Default.DeleteForever, contentDescription = null)
+                    Text(" Reset operator wallet")
+                }
+                TextButton(onClick = onLock, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.LockOpen, contentDescription = null)
+                    Text(" Lock admin now")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AdvancedManualSetupDialog(
+    onDismiss: () -> Unit,
+    onProvision: (String, String) -> Unit,
+) {
+    var vault by remember { mutableStateOf("") }
+    var token by remember { mutableStateOf("") }
+    var scanTarget by remember { mutableStateOf<String?>(null) }
+    scanTarget?.let { target ->
+        AddressScannerDialog(
+            onDismiss = { scanTarget = null },
+            onAddressScanned = { address ->
+                if (target == "vault") vault = address else token = address
+                scanTarget = null
+            },
+        )
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Advanced manual setup") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Base Sepolia only. Enter or scan the vault and selected token. Factory, receiver " +
+                        "implementation, symbol, and decimals remain chain-derived and pinned.",
+                )
+                ManualAddressField("Vault address", vault, { vault = it }) { scanTarget = "vault" }
+                ManualAddressField("Token contract", token, { token = it }) { scanTarget = "token" }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onProvision(vault, token) },
+                enabled = vault.isNotBlank() && token.isNotBlank(),
+            ) { Text("Validate & provision") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun ManualAddressField(
     label: String,
     value: String,
     onValueChange: (String) -> Unit,
-    keyboardType: KeyboardType = KeyboardType.Text,
+    onScan: () -> Unit,
 ) {
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         label = { Text(label) },
         singleLine = true,
-        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+        trailingIcon = {
+            IconButton(onClick = onScan) {
+                Icon(Icons.Default.QrCodeScanner, contentDescription = "Scan $label")
+            }
+        },
+        modifier = Modifier.fillMaxWidth(),
     )
 }
 
 @Composable
-private fun ScannableAddressField(
-    fieldLabel: String,
-    address: String,
-    onAddressChange: (String) -> Unit,
-) {
-    var showScanner by remember { mutableStateOf(false) }
-    if (showScanner) {
-        AddressScannerDialog(
-            onDismiss = { showScanner = false },
-            onAddressScanned = onAddressChange,
-        )
-    }
-
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        OutlinedTextField(
-            value = address,
-            onValueChange = onAddressChange,
-            label = { Text(fieldLabel) },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
-            trailingIcon = {
-                IconButton(onClick = { showScanner = true }) {
-                    Icon(
-                        Icons.Default.QrCodeScanner,
-                        contentDescription = "Scan $fieldLabel QR",
-                    )
-                }
-            },
-            supportingText = { Text("Scan a non-zero address-only QR or enter 0x plus 40 hex digits.") },
-            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        )
-    }
-}
-
-@Composable
-private fun AddTokenDialog(
+private fun SetAdminPinDialog(
     onDismiss: () -> Unit,
-    onAdd: (String, String, Int) -> Unit,
+    onSave: (String, String) -> Unit,
 ) {
-    var address by remember { mutableStateOf("") }
-    var symbol by remember { mutableStateOf("") }
-    var decimals by remember { mutableStateOf("6") }
+    var pin by remember { mutableStateOf("") }
+    var confirmation by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Add ERC-20 token") },
+        title = { Text("Set local admin PIN") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                ScannableAddressField(
-                    fieldLabel = "Token contract address",
-                    address = address,
-                    onAddressChange = { address = it },
-                )
-                SettingField("Symbol", symbol, { symbol = it })
-                SettingField("Decimals", decimals, { decimals = it }, KeyboardType.Number)
+                PinField("6-digit PIN", pin) { pin = it.filter(Char::isDigit).take(6) }
+                PinField("Confirm PIN", confirmation) {
+                    confirmation = it.filter(Char::isDigit).take(6)
+                }
+                Text("This PIN protects setup controls only. It is not a merchant credential.")
             }
         },
         confirmButton = {
             TextButton(
-                onClick = {
-                    decimals.toIntOrNull()?.let { onAdd(address, symbol, it) }
-                },
-                enabled = address.isNotBlank() && symbol.isNotBlank() && decimals.toIntOrNull() != null,
-            ) { Text("Add") }
+                onClick = { onSave(pin, confirmation) },
+                enabled = pin.length == 6 && confirmation.length == 6,
+            ) { Text("Save PIN") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
+
+@Composable
+private fun UnlockAdminDialog(
+    retryAfterSeconds: Long,
+    onDismiss: () -> Unit,
+    onUnlock: (String) -> Unit,
+) {
+    var pin by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Unlock Admin/setup") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                PinField("Admin PIN", pin) { pin = it.filter(Char::isDigit).take(6) }
+                if (retryAfterSeconds > 0) Text("Try again in $retryAfterSeconds seconds.")
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onUnlock(pin) },
+                enabled = pin.length == 6 && retryAfterSeconds == 0L,
+            ) { Text("Unlock") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun PinField(label: String, value: String, onValueChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+        visualTransformation = PasswordVisualTransformation(),
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+private fun formatNativeBalance(wei: String): String = runCatching {
+    BigDecimal(wei).movePointLeft(18).stripTrailingZeros().toPlainString() + " native"
+}.getOrDefault("Unknown")

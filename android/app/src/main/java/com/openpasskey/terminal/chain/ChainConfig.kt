@@ -3,12 +3,12 @@ package com.openpasskey.terminal.chain
 import android.content.Context
 import android.content.SharedPreferences
 import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
+import com.openpasskey.erc681.EvmAddress
 
 data class PaymentToken(
     val address: String,
     val symbol: String,
-    val decimals: Int
+    val decimals: Int,
 )
 
 data class TerminalConfigSnapshot(
@@ -19,16 +19,23 @@ data class TerminalConfigSnapshot(
     val receiverImplementationAddress: String,
     val vaultAddress: String,
     val confirmationBlocks: Int,
-    val paymentTokens: List<PaymentToken>
+    val paymentTokens: List<PaymentToken>,
+    val protocolVersion: String,
+    val provisionedOperatorAddress: String?,
+    val provisioned: Boolean,
 )
 
 /**
- * Local, non-secret merchant configuration. No wallet credentials or signing material are stored.
+ * Non-secret terminal configuration. A provisioned candidate is stored as one JSON value by one
+ * synchronous SharedPreferences editor commit so a failed write cannot expose a partial config.
  */
 class ChainConfig(context: Context) {
     companion object {
-        // Preserve the original non-secret chain/token preferences on app upgrade.
         private const val PREFS_NAME = "opk_chain_config"
+        private const val KEY_CONFIG_JSON_V2 = "provisioned_config_v2"
+        private const val KEY_PROVISIONED_V2 = "is_provisioned_v2"
+
+        // Legacy per-field keys are read only to preserve the merchant's confirmation preference.
         private const val KEY_NETWORK_NAME = "network_name"
         private const val KEY_RPC_URL = "rpc_url"
         private const val KEY_CHAIN_ID = "chain_id"
@@ -43,12 +50,17 @@ class ChainConfig(context: Context) {
         const val DEFAULT_CHAIN_ID = 84532L
         const val DEFAULT_FACTORY_ADDRESS = "0x062e3b5d3107e4d1b8dDA314E16b9F8cA6EB63D5"
         const val DEFAULT_RECEIVER_IMPLEMENTATION = "0xDAa292B1bf533737C5cE5d27F220273971Db3Bdc"
-        const val DEFAULT_VAULT_ADDRESS = "0x1ed67E540E6AB92dC3537A7bba3BcAb6FdD69Da1"
         const val DEFAULT_CONFIRMATION_BLOCKS = 2
 
-        val DEFAULT_PAYMENT_TOKENS = listOf(
-            PaymentToken("0x7ffba642bc902880a737cb1c18a4e9540879e211", "AUD", 18),
-            PaymentToken("0xc6813d7bf21c9c6747ef231da80bb8625d5607a3", "OPK2", 18)
+        private val LEGACY_MUTABLE_KEYS = listOf(
+            KEY_NETWORK_NAME,
+            KEY_RPC_URL,
+            KEY_CHAIN_ID,
+            KEY_FACTORY_ADDRESS,
+            KEY_RECEIVER_IMPLEMENTATION,
+            KEY_VAULT_ADDRESS,
+            KEY_CONFIRMATION_BLOCKS,
+            KEY_PAYMENT_TOKENS,
         )
     }
 
@@ -56,68 +68,95 @@ class ChainConfig(context: Context) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val gson = Gson()
 
-    var networkName: String
-        get() = prefs.getString(KEY_NETWORK_NAME, DEFAULT_NETWORK_NAME) ?: DEFAULT_NETWORK_NAME
-        set(value) = prefs.edit().putString(KEY_NETWORK_NAME, value.trim()).apply()
+    val networkName: String get() = snapshot().networkName
+    val rpcUrl: String get() = snapshot().rpcUrl
+    val chainId: Long get() = snapshot().chainId
+    val factoryAddress: String get() = snapshot().factoryAddress
+    val receiverImplementationAddress: String get() = snapshot().receiverImplementationAddress
+    val vaultAddress: String get() = snapshot().vaultAddress
+    val confirmationBlocks: Int get() = snapshot().confirmationBlocks
+    val paymentTokens: List<PaymentToken> get() = snapshot().paymentTokens
 
-    var rpcUrl: String
-        get() = prefs.getString(KEY_RPC_URL, DEFAULT_RPC_URL) ?: DEFAULT_RPC_URL
-        set(value) = prefs.edit().putString(KEY_RPC_URL, value.trim()).apply()
-
-    var chainId: Long
-        get() = prefs.getLong(KEY_CHAIN_ID, DEFAULT_CHAIN_ID)
-        set(value) = prefs.edit().putLong(KEY_CHAIN_ID, value).apply()
-
-    var factoryAddress: String
-        get() = prefs.getString(KEY_FACTORY_ADDRESS, DEFAULT_FACTORY_ADDRESS) ?: DEFAULT_FACTORY_ADDRESS
-        set(value) = prefs.edit().putString(KEY_FACTORY_ADDRESS, value.trim()).apply()
-
-    var receiverImplementationAddress: String
-        get() = prefs.getString(KEY_RECEIVER_IMPLEMENTATION, DEFAULT_RECEIVER_IMPLEMENTATION)
-            ?: DEFAULT_RECEIVER_IMPLEMENTATION
-        set(value) = prefs.edit().putString(KEY_RECEIVER_IMPLEMENTATION, value.trim()).apply()
-
-    var vaultAddress: String
-        get() = prefs.getString(KEY_VAULT_ADDRESS, DEFAULT_VAULT_ADDRESS) ?: DEFAULT_VAULT_ADDRESS
-        set(value) = prefs.edit().putString(KEY_VAULT_ADDRESS, value.trim()).apply()
-
-    var confirmationBlocks: Int
-        get() = prefs.getInt(KEY_CONFIRMATION_BLOCKS, DEFAULT_CONFIRMATION_BLOCKS)
-        set(value) = prefs.edit().putInt(KEY_CONFIRMATION_BLOCKS, value.coerceIn(1, 64)).apply()
-
-    var paymentTokens: List<PaymentToken>
-        get() {
-            val json = prefs.getString(KEY_PAYMENT_TOKENS, null) ?: return DEFAULT_PAYMENT_TOKENS
-            val type = object : TypeToken<List<PaymentToken>>() {}.type
-            return runCatching { gson.fromJson<List<PaymentToken>>(json, type) }
-                .getOrDefault(emptyList())
+    @Synchronized
+    fun snapshot(): TerminalConfigSnapshot {
+        if (prefs.getBoolean(KEY_PROVISIONED_V2, false)) {
+            val json = prefs.getString(KEY_CONFIG_JSON_V2, null)
+            val stored = json?.let {
+                runCatching { gson.fromJson(it, TerminalConfigSnapshot::class.java) }.getOrNull()
+            }
+            if (stored != null && stored.provisioned && stored.hasCompleteProvisioning()) return stored
         }
-        set(value) {
-            prefs.edit().putString(KEY_PAYMENT_TOKENS, gson.toJson(value)).apply()
-        }
-
-    fun addPaymentToken(token: PaymentToken) {
-        paymentTokens = paymentTokens
-            .filterNot { it.address.equals(token.address, ignoreCase = true) } + token
+        val legacyChainId = prefs.getLong(KEY_CHAIN_ID, DEFAULT_CHAIN_ID)
+        val legacyRpcUrl = prefs.getString(KEY_RPC_URL, DEFAULT_RPC_URL) ?: DEFAULT_RPC_URL
+        return TerminalConfigSnapshot(
+            networkName = DEFAULT_NETWORK_NAME,
+            rpcUrl = if (legacyChainId == DEFAULT_CHAIN_ID) legacyRpcUrl else DEFAULT_RPC_URL,
+            chainId = DEFAULT_CHAIN_ID,
+            factoryAddress = DEFAULT_FACTORY_ADDRESS.lowercase(),
+            receiverImplementationAddress = DEFAULT_RECEIVER_IMPLEMENTATION.lowercase(),
+            vaultAddress = "",
+            confirmationBlocks = prefs.getInt(
+                KEY_CONFIRMATION_BLOCKS,
+                DEFAULT_CONFIRMATION_BLOCKS,
+            ).coerceIn(1, 64),
+            paymentTokens = emptyList(),
+            protocolVersion = "",
+            provisionedOperatorAddress = null,
+            provisioned = false,
+        )
     }
 
-    fun removePaymentToken(address: String) {
-        paymentTokens = paymentTokens.filterNot { it.address.equals(address, ignoreCase = true) }
+    /** The sole production configuration write path, with snapshot compare-and-set semantics. */
+    @Synchronized
+    fun compareAndReplaceProvisioned(
+        expected: TerminalConfigSnapshot,
+        candidate: TerminalConfigSnapshot,
+    ): Boolean {
+        if (snapshot() != expected) return false
+        require(candidate.provisioned) { "Replacement configuration must be provisioned" }
+        require(candidate.hasCompleteProvisioning()) { "Replacement configuration is incomplete" }
+        val canonical = candidate.copy(
+            factoryAddress = EvmAddress.parse(candidate.factoryAddress).value,
+            receiverImplementationAddress = EvmAddress.parse(candidate.receiverImplementationAddress).value,
+            vaultAddress = EvmAddress.parse(candidate.vaultAddress).value,
+            provisionedOperatorAddress = EvmAddress.parse(
+                requireNotNull(candidate.provisionedOperatorAddress),
+            ).value,
+            paymentTokens = candidate.paymentTokens.map { token ->
+                token.copy(address = EvmAddress.parse(token.address).value)
+            },
+        )
+        val editor = prefs.edit()
+            .putString(KEY_CONFIG_JSON_V2, gson.toJson(canonical))
+            .putBoolean(KEY_PROVISIONED_V2, true)
+        LEGACY_MUTABLE_KEYS.forEach(editor::remove)
+        return editor.commit()
     }
 
-    fun snapshot(): TerminalConfigSnapshot = TerminalConfigSnapshot(
-        networkName = networkName,
-        rpcUrl = rpcUrl,
-        chainId = chainId,
-        factoryAddress = factoryAddress,
-        receiverImplementationAddress = receiverImplementationAddress,
-        vaultAddress = vaultAddress,
-        confirmationBlocks = confirmationBlocks,
-        paymentTokens = paymentTokens
-    )
+    /** Admin-only reset of configuration; invoice history is intentionally untouched. */
+    @Synchronized
+    fun clearProvisioning(): Boolean = prefs.edit()
+        .remove(KEY_CONFIG_JSON_V2)
+        .remove(KEY_PROVISIONED_V2)
+        .commit()
 
-    fun isConfigured(): Boolean =
-        networkName.isNotBlank() && rpcUrl.isNotBlank() && chainId > 0 &&
-            factoryAddress.isNotBlank() && receiverImplementationAddress.isNotBlank() &&
-            vaultAddress.isNotBlank() && paymentTokens.isNotEmpty()
+    fun isConfigured(): Boolean = snapshot().let { it.provisioned && it.hasCompleteProvisioning() }
 }
+
+internal fun TerminalConfigSnapshot.hasCompleteProvisioning(): Boolean = runCatching {
+        require(provisioned)
+        require(networkName.isNotBlank())
+        require(rpcUrl.isNotBlank())
+        require(chainId > 0)
+        require(!EvmAddress.parse(factoryAddress).isZero)
+        require(!EvmAddress.parse(receiverImplementationAddress).isZero)
+        require(!EvmAddress.parse(vaultAddress).isZero)
+        require(confirmationBlocks in 1..64)
+        require(protocolVersion.isNotBlank())
+        require(!EvmAddress.parse(requireNotNull(provisionedOperatorAddress)).isZero)
+        require(paymentTokens.size == 1)
+        val token = paymentTokens.single()
+        require(!EvmAddress.parse(token.address).isZero)
+        require(token.symbol.isNotBlank())
+        require(token.decimals in 0..255)
+    }.isSuccess

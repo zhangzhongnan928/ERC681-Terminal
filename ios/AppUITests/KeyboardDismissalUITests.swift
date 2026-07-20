@@ -7,6 +7,7 @@ final class KeyboardDismissalUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
         app = XCUIApplication()
+        app.launchEnvironment["OPK_UI_TEST_KEYCHAIN_NAMESPACE"] = UUID().uuidString
         app.launch()
     }
 
@@ -23,22 +24,23 @@ final class KeyboardDismissalUITests: XCTestCase {
 
         let createPaymentButton = app.buttons["Create payment QR"]
         XCTAssertTrue(createPaymentButton.exists)
-        XCTAssertTrue(createPaymentButton.isHittable)
+        XCTAssertFalse(createPaymentButton.isEnabled)
     }
 
-    func testSettingsKeyboardsCanBeDismissedForNumberAndAddressFields() {
+    func testFirstRunAllowsOperatorBeforePINAndPINKeyboardCanBeDismissed() {
         app.tabBars.buttons["Settings"].tap()
 
-        let chainIDField = app.textFields["Chain ID"]
-        XCTAssertTrue(chainIDField.waitForExistence(timeout: 5))
-        assertKeyboardCanBeDismissed(from: chainIDField)
+        let operatorButton = app.buttons["createOperatorWalletButton"]
+        XCTAssertTrue(operatorButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(operatorButton.isEnabled)
 
-        let factoryField = app.textFields["Factory address"]
-        XCTAssertTrue(factoryField.waitForExistence(timeout: 5))
-        if !factoryField.isHittable {
+        let pinField = app.secureTextFields["createAdminPIN"]
+        XCTAssertTrue(pinField.waitForExistence(timeout: 5))
+        if !pinField.isHittable {
             app.swipeUp()
         }
-        assertKeyboardCanBeDismissed(from: factoryField)
+        assertKeyboardCanBeDismissed(from: pinField)
+        XCTAssertTrue(app.buttons["Create local admin PIN"].exists)
     }
 
     private func assertKeyboardCanBeDismissed(

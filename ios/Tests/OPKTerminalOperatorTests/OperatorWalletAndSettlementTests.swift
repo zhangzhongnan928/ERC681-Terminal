@@ -116,7 +116,7 @@ final class OperatorWalletAndSettlementTests: XCTestCase {
         XCTAssertEqual(verified[0].fee.decimalString, fixture.sweptLog.fee)
 
         let zeroLog = try makeLog(fixture: fixture, data: fixture.sweptLog.zeroSweptData)
-        XCTAssertThrowsError(
+        XCTAssertEqual(
             try SettlementABI.verifySweptEvents(
                 receipt: EthereumTransactionReceipt(
                     transactionHash: .zero,
@@ -126,12 +126,11 @@ final class OperatorWalletAndSettlementTests: XCTestCase {
                     logs: [zeroLog]
                 ),
                 intent: intent
-            )
-        ) { error in
-            XCTAssertEqual(error as? SettlementOperatorError, .zeroSweptAmount(intent.sessions[0].invoiceID))
-        }
+            ),
+            []
+        )
 
-        XCTAssertThrowsError(
+        XCTAssertEqual(
             try SettlementABI.verifySweptEvents(
                 receipt: EthereumTransactionReceipt(
                     transactionHash: .zero,
@@ -141,10 +140,9 @@ final class OperatorWalletAndSettlementTests: XCTestCase {
                     logs: [log, log]
                 ),
                 intent: intent
-            )
-        ) { error in
-            XCTAssertEqual(error as? SettlementOperatorError, .ambiguousSweptEvent(intent.sessions[0].invoiceID))
-        }
+            ),
+            []
+        )
 
         let identityMissingLog = EthereumLog(
             address: log.address,
@@ -237,7 +235,198 @@ final class OperatorWalletAndSettlementTests: XCTestCase {
         )
     }
 
-    func testInitialSweepRequiresExpectedLiveBalanceButProvenRetryRequiresRemaining() async throws {
+    func testConfirmedBatchRetainsPositiveProofWhenAnotherSessionSweepsZero() async throws {
+        let fixture = try loadFixture().settlementAbi
+        let baseIntent = try makeIntent()
+        let secondSession = SettlementSession(
+            invoiceID: try Bytes32(hex: "0x" + String(repeating: "aa", count: 32)),
+            receiver: baseIntent.sessions[0].receiver,
+            expectedAmount: baseIntent.sessions[0].expectedAmount
+        )
+        let intent = try SettlementIntent(
+            chainID: baseIntent.chainID,
+            vault: baseIntent.vault,
+            token: baseIntent.token,
+            sessions: baseIntent.sessions + [secondSession]
+        )
+        let blockHash = try Bytes32(hex: "0x" + String(repeating: "bb", count: 32))
+        let positiveLog = try makeLog(fixture: fixture, data: fixture.sweptLog.data)
+        let zeroLog = try makeLog(
+            fixture: fixture,
+            data: fixture.sweptLog.zeroSweptData,
+            invoiceID: secondSession.invoiceID,
+            logIndex: 4
+        )
+        let receipt = EthereumTransactionReceipt(
+            transactionHash: .zero,
+            blockNumber: 100,
+            blockHash: blockHash,
+            succeeded: true,
+            logs: [positiveLog, zeroLog]
+        )
+
+        let parsed = try SettlementABI.verifySweptEvents(receipt: receipt, intent: intent)
+        XCTAssertEqual(parsed.map(\.invoiceID), [baseIntent.sessions[0].invoiceID])
+
+        let coordinator = SettlementCoordinator(
+            rpc: MockOperatorRPC(receipt: receipt, head: 101, tokenBalance: UInt256(1)),
+            signer: NeverSigner(),
+            operatorAddress: try EthereumAddress(hex: fixture.operatorAddress)
+        )
+        let result = try await coordinator.reconcile(
+            transactionHash: .zero,
+            intent: intent,
+            requiredConfirmations: 2,
+            priorPhase: .mined
+        )
+
+        XCTAssertEqual(result.phase, .needsReview)
+        XCTAssertEqual(result.verifiedSweeps.map(\.invoiceID), [baseIntent.sessions[0].invoiceID])
+        XCTAssertNotNil(result.failureReason)
+    }
+
+    func testCanonicalReceiptDoesNotFinalizeAfterHeadRegressionAboveReceipt() async throws {
+        let fixture = try loadFixture().settlementAbi
+        let intent = try makeIntent()
+        let receipt = EthereumTransactionReceipt(
+            transactionHash: .zero,
+            blockNumber: 100,
+            blockHash: try Bytes32(hex: "0x" + String(repeating: "bb", count: 32)),
+            succeeded: true,
+            logs: [try makeLog(fixture: fixture, data: fixture.sweptLog.data)]
+        )
+        let rpc = MockOperatorRPC(
+            receipt: receipt,
+            heads: [101, 100],
+            tokenBalance: UInt256(1)
+        )
+        let coordinator = SettlementCoordinator(
+            rpc: rpc,
+            signer: NeverSigner(),
+            operatorAddress: try EthereumAddress(hex: fixture.operatorAddress)
+        )
+
+        let result = try await coordinator.reconcile(
+            transactionHash: .zero,
+            intent: intent,
+            requiredConfirmations: 2,
+            priorPhase: .mined
+        )
+
+        XCTAssertEqual(result.phase, .mined)
+        XCTAssertEqual(result.blockNumber, receipt.blockNumber)
+        XCTAssertEqual(result.confirmations, 1)
+        XCTAssertEqual(result.verifiedSweeps.count, 1)
+        XCTAssertNil(result.failureReason)
+    }
+
+    func testRevertedAndMalformedReceiptsWaitForCanonicalFinalityBeforeFailure() async throws {
+        let fixture = try loadFixture().settlementAbi
+        let intent = try makeIntent()
+        let blockHash = try Bytes32(hex: "0x" + String(repeating: "bb", count: 32))
+        let validLog = try makeLog(fixture: fixture, data: fixture.sweptLog.data)
+        let malformedLog = EthereumLog(
+            address: validLog.address,
+            topics: validLog.topics,
+            data: validLog.data
+        )
+        let receipts = [
+            EthereumTransactionReceipt(
+                transactionHash: .zero,
+                blockNumber: 100,
+                blockHash: blockHash,
+                succeeded: false,
+                logs: []
+            ),
+            EthereumTransactionReceipt(
+                transactionHash: .zero,
+                blockNumber: 100,
+                blockHash: blockHash,
+                succeeded: true,
+                logs: [malformedLog]
+            ),
+        ]
+        let operatorAddress = try EthereumAddress(
+            hex: "0x2222222222222222222222222222222222222222"
+        )
+
+        for receipt in receipts {
+            let unconfirmed = SettlementCoordinator(
+                rpc: MockOperatorRPC(receipt: receipt, head: 100, tokenBalance: UInt256(1)),
+                signer: NeverSigner(),
+                operatorAddress: operatorAddress
+            )
+            let mined = try await unconfirmed.reconcile(
+                transactionHash: .zero,
+                intent: intent,
+                requiredConfirmations: 2,
+                priorPhase: .pending
+            )
+            XCTAssertEqual(mined.phase, .mined)
+            XCTAssertEqual(mined.confirmations, 1)
+            XCTAssertNotNil(mined.failureReason)
+
+            let confirmed = SettlementCoordinator(
+                rpc: MockOperatorRPC(receipt: receipt, head: 101, tokenBalance: UInt256(1)),
+                signer: NeverSigner(),
+                operatorAddress: operatorAddress
+            )
+            let failed = try await confirmed.reconcile(
+                transactionHash: .zero,
+                intent: intent,
+                requiredConfirmations: 2,
+                priorPhase: .mined
+            )
+            XCTAssertEqual(failed.phase, .failed)
+            XCTAssertEqual(failed.confirmations, 2)
+            XCTAssertNotNil(failed.failureReason)
+        }
+    }
+
+    func testConfirmedLateRepeatSweepIsFinalAfterOriginalCumulativeProof() async throws {
+        let fixture = try loadFixture().settlementAbi
+        let original = try makeIntent()
+        let session = original.sessions[0]
+        let intent = try SettlementIntent(
+            chainID: original.chainID,
+            vault: original.vault,
+            token: original.token,
+            sessions: [
+                SettlementSession(
+                    invoiceID: session.invoiceID,
+                    receiver: session.receiver,
+                    expectedAmount: session.expectedAmount,
+                    priorConfirmedSweptAmount: session.expectedAmount
+                ),
+            ]
+        )
+        let blockHash = try Bytes32(hex: "0x" + String(repeating: "bb", count: 32))
+        let receipt = EthereumTransactionReceipt(
+            transactionHash: .zero,
+            blockNumber: 100,
+            blockHash: blockHash,
+            succeeded: true,
+            logs: [try makeLog(fixture: fixture, data: fixture.sweptLog.partialSweptData)]
+        )
+        let coordinator = SettlementCoordinator(
+            rpc: MockOperatorRPC(receipt: receipt, head: 101, tokenBalance: UInt256(1)),
+            signer: NeverSigner(),
+            operatorAddress: try EthereumAddress(hex: fixture.operatorAddress)
+        )
+
+        let result = try await coordinator.reconcile(
+            transactionHash: .zero,
+            intent: intent,
+            requiredConfirmations: 2,
+            priorPhase: .pending
+        )
+
+        XCTAssertEqual(result.phase, .final)
+        XCTAssertEqual(result.verifiedSweeps.count, 1)
+        XCTAssertFalse(result.verifiedSweeps[0].sweptAmount.isZero)
+    }
+
+    func testInitialSweepRequiresExpectedLiveBalanceButProvenAndRepeatSweepsUseLiveBalance() async throws {
         let baseIntent = try makeIntent()
         let expected = baseIntent.sessions[0].expectedAmount
         let prior = UInt256(5_000_000_000_000_000_000)
@@ -284,6 +473,174 @@ final class OperatorWalletAndSettlementTests: XCTestCase {
         )
         let prepared = try await retryCoordinator.prepare(retryIntent)
         XCTAssertEqual(prepared.observedTokenBalances, [remaining])
+
+        // ClearingVault is idempotent per receiver and sweeps its current balance. Once
+        // cumulative proof covers the original amount, any later nonzero payment remains
+        // sweepable even when it is smaller than the immutable invoice expectation.
+        let lateBalance = UInt256(7)
+        let repeatIntent = try SettlementIntent(
+            chainID: baseIntent.chainID,
+            vault: baseIntent.vault,
+            token: baseIntent.token,
+            sessions: [
+                SettlementSession(
+                    invoiceID: baseIntent.sessions[0].invoiceID,
+                    receiver: baseIntent.sessions[0].receiver,
+                    expectedAmount: expected,
+                    priorConfirmedSweptAmount: expected
+                ),
+            ]
+        )
+        let repeatCoordinator = SettlementCoordinator(
+            rpc: MockOperatorRPC(receipt: nil, head: 100, tokenBalance: lateBalance),
+            signer: NeverSigner(),
+            operatorAddress: operatorAddress
+        )
+        let repeatPrepared = try await repeatCoordinator.prepare(repeatIntent)
+        XCTAssertEqual(repeatPrepared.observedTokenBalances, [lateBalance])
+    }
+
+    func testSignRejectsBalanceAddedAfterPreparedObservation() async throws {
+        let intent = try makeIntent()
+        let confirmed = intent.sessions[0].expectedAmount
+        let (changed, overflow) = confirmed.addingReportingOverflow(UInt256(1))
+        XCTAssertFalse(overflow)
+        let rpc = MockOperatorRPC(
+            receipt: nil,
+            head: 100,
+            tokenBalances: [confirmed, confirmed, changed]
+        )
+        let coordinator = SettlementCoordinator(
+            rpc: rpc,
+            signer: NeverSigner(),
+            operatorAddress: try EthereumAddress(
+                hex: "0x2222222222222222222222222222222222222222"
+            )
+        )
+        let prepared = try await coordinator.prepare(intent)
+
+        do {
+            _ = try await coordinator.sign(prepared, authenticationReason: "test")
+            XCTFail("Expected a changed receiver balance to invalidate confirmation")
+        } catch let error as SettlementOperatorError {
+            XCTAssertEqual(
+                error,
+                .receiverBalanceChanged(
+                    invoiceID: intent.sessions[0].invoiceID,
+                    confirmed: confirmed,
+                    current: changed
+                )
+            )
+        }
+    }
+
+    func testPostAuthenticationBalanceMutationProducesNoSignature() async throws {
+        let intent = try makeIntent()
+        let confirmed = intent.sessions[0].expectedAmount
+        let (changed, overflow) = confirmed.addingReportingOverflow(UInt256(1))
+        XCTAssertFalse(overflow)
+        let rpc = MockOperatorRPC(
+            receipt: nil,
+            head: 100,
+            tokenBalances: [confirmed, confirmed, confirmed, confirmed]
+        )
+        let signer = SuspendedAuthenticationSigner()
+        let coordinator = SettlementCoordinator(
+            rpc: rpc,
+            signer: signer,
+            operatorAddress: try EthereumAddress(
+                hex: "0x2222222222222222222222222222222222222222"
+            )
+        )
+        let prepared = try await coordinator.prepare(intent)
+        let signing = Task {
+            try await coordinator.sign(prepared, authenticationReason: "test")
+        }
+
+        await signer.waitUntilAuthenticationIsPending()
+        await rpc.replaceTokenBalances(with: [changed])
+        await signer.completeAuthentication()
+
+        do {
+            _ = try await signing.value
+            XCTFail("Expected the post-authentication balance check to reject signing")
+        } catch let error as SettlementOperatorError {
+            XCTAssertEqual(
+                error,
+                .receiverBalanceChanged(
+                    invoiceID: intent.sessions[0].invoiceID,
+                    confirmed: confirmed,
+                    current: changed
+                )
+            )
+        }
+        let privateKeyUses = await signer.privateKeyUseCount()
+        XCTAssertEqual(privateKeyUses, 0)
+    }
+
+    func testPostAuthenticationCursorHashMutationProducesNoSignature() async throws {
+        let intent = try makeIntent()
+        let confirmed = intent.sessions[0].expectedAmount
+        let rpc = MockOperatorRPC(
+            receipt: nil,
+            head: 100,
+            tokenBalances: [confirmed, confirmed, confirmed, confirmed]
+        )
+        let signer = SuspendedAuthenticationSigner()
+        let cursorState = MutableConfirmationHashState()
+        let coordinator = SettlementCoordinator(
+            rpc: rpc,
+            signer: signer,
+            operatorAddress: try EthereumAddress(
+                hex: "0x2222222222222222222222222222222222222222"
+            )
+        )
+        let prepared = try await coordinator.prepare(intent)
+        let signing = Task {
+            try await coordinator.sign(
+                prepared,
+                authenticationReason: "test",
+                postAuthenticationValidation: {
+                    try await cursorState.validateExpectedHash()
+                }
+            )
+        }
+
+        await signer.waitUntilAuthenticationIsPending()
+        try await cursorState.replaceHash()
+        await signer.completeAuthentication()
+
+        do {
+            _ = try await signing.value
+            XCTFail("Expected the post-authentication cursor check to reject signing")
+        } catch let error as PostAuthenticationTestError {
+            XCTAssertEqual(error, .confirmationHashChanged)
+        }
+        let privateKeyUses = await signer.privateKeyUseCount()
+        XCTAssertEqual(privateKeyUses, 0)
+    }
+
+    func testResetSafetyReadsLatestAndPendingBalancesSeparately() async throws {
+        let operatorAddress = try EthereumAddress(
+            hex: "0x2222222222222222222222222222222222222222"
+        )
+        let coordinator = SettlementCoordinator(
+            rpc: MockOperatorRPC(
+                receipt: nil,
+                head: 100,
+                tokenBalance: UInt256(1),
+                latestNativeBalance: .zero,
+                pendingNativeBalance: UInt256(7)
+            ),
+            signer: NeverSigner(),
+            operatorAddress: operatorAddress
+        )
+
+        let snapshot = try await coordinator.resetSafetyBalances(expectedChainID: 84_532)
+
+        XCTAssertEqual(snapshot.latest, .zero)
+        XCTAssertEqual(snapshot.pending, UInt256(7))
+        XCTAssertFalse(snapshot.isExactlyZero)
     }
 
     private func makeIntent() throws -> SettlementIntent {
@@ -301,12 +658,21 @@ final class OperatorWalletAndSettlementTests: XCTestCase {
         )
     }
 
-    private func makeLog(fixture: SettlementFixture, data: String) throws -> EthereumLog {
-        EthereumLog(
+    private func makeLog(
+        fixture: SettlementFixture,
+        data: String,
+        invoiceID: Bytes32? = nil,
+        logIndex: UInt64 = 3
+    ) throws -> EthereumLog {
+        var eventData = try Data(hex: data)
+        if let invoiceID {
+            eventData.replaceSubrange(0..<32, with: invoiceID.data)
+        }
+        return EthereumLog(
             address: try EthereumAddress(hex: fixture.sweptLog.address),
             topics: try fixture.sweptLog.topics.map(Bytes32.init(hex:)),
-            data: try Data(hex: data),
-            logIndex: 3,
+            data: eventData,
+            logIndex: logIndex,
             blockHash: try Bytes32(hex: "0x" + String(repeating: "bb", count: 32)),
             transactionHash: .zero
         )
@@ -366,26 +732,84 @@ private struct SweptLogFixture: Decodable {
 
 private actor MockOperatorRPC: EthereumOperatorRPC {
     let receiptValue: EthereumTransactionReceipt?
-    let head: UInt64
-    let tokenBalanceValue: UInt256
+    var headValues: [UInt64]
+    var tokenBalanceValues: [UInt256]
+    let latestNativeBalance: UInt256
+    let pendingNativeBalance: UInt256
 
-    init(receipt: EthereumTransactionReceipt?, head: UInt64, tokenBalance: UInt256) {
+    init(
+        receipt: EthereumTransactionReceipt?,
+        head: UInt64,
+        tokenBalance: UInt256,
+        latestNativeBalance: UInt256 = UInt256(UInt64.max),
+        pendingNativeBalance: UInt256 = UInt256(UInt64.max)
+    ) {
         receiptValue = receipt
-        self.head = head
-        tokenBalanceValue = tokenBalance
+        headValues = [head]
+        tokenBalanceValues = [tokenBalance]
+        self.latestNativeBalance = latestNativeBalance
+        self.pendingNativeBalance = pendingNativeBalance
+    }
+
+    init(
+        receipt: EthereumTransactionReceipt?,
+        head: UInt64,
+        tokenBalances: [UInt256],
+        latestNativeBalance: UInt256 = UInt256(UInt64.max),
+        pendingNativeBalance: UInt256 = UInt256(UInt64.max)
+    ) {
+        receiptValue = receipt
+        headValues = [head]
+        tokenBalanceValues = tokenBalances
+        self.latestNativeBalance = latestNativeBalance
+        self.pendingNativeBalance = pendingNativeBalance
+    }
+
+    init(
+        receipt: EthereumTransactionReceipt?,
+        heads: [UInt64],
+        tokenBalance: UInt256,
+        latestNativeBalance: UInt256 = UInt256(UInt64.max),
+        pendingNativeBalance: UInt256 = UInt256(UInt64.max)
+    ) {
+        receiptValue = receipt
+        headValues = heads
+        tokenBalanceValues = [tokenBalance]
+        self.latestNativeBalance = latestNativeBalance
+        self.pendingNativeBalance = pendingNativeBalance
     }
 
     func chainID() async throws -> UInt64 { 84_532 }
-    func blockNumber() async throws -> UInt64 { head }
+    func blockNumber() async throws -> UInt64 {
+        guard let head = headValues.first else {
+            throw SettlementOperatorError.malformedRPCResponse
+        }
+        if headValues.count > 1 {
+            headValues.removeFirst()
+        }
+        return head
+    }
     func canonicalBlockHash(at blockNumber: UInt64) async throws -> Bytes32 {
         guard blockNumber == receiptValue?.blockNumber, let hash = receiptValue?.blockHash else {
             throw SettlementOperatorError.malformedRPCResponse
         }
         return hash
     }
-    func balance(of address: EthereumAddress) async throws -> UInt256 { UInt256(UInt64.max) }
+    func balance(of address: EthereumAddress) async throws -> UInt256 { pendingNativeBalance }
+    func latestBalance(of address: EthereumAddress) async throws -> UInt256 {
+        latestNativeBalance
+    }
     func tokenBalance(token: EthereumAddress, account: EthereumAddress) async throws -> UInt256 {
-        tokenBalanceValue
+        guard let value = tokenBalanceValues.first else {
+            throw SettlementOperatorError.malformedRPCResponse
+        }
+        if tokenBalanceValues.count > 1 {
+            tokenBalanceValues.removeFirst()
+        }
+        return value
+    }
+    func replaceTokenBalances(with values: [UInt256]) {
+        tokenBalanceValues = values
     }
     func vaultAuthorization(
         vault: EthereumAddress,
@@ -408,9 +832,77 @@ private actor MockOperatorRPC: EthereumOperatorRPC {
 }
 
 private struct NeverSigner: OperatorTransactionSigning {
-    func sign(digest: Bytes32, reason: String) async throws -> EthereumRecoverableSignature {
+    func sign(
+        digest: Bytes32,
+        reason: String,
+        postAuthenticationValidation: @Sendable () async throws -> Void
+    ) async throws -> EthereumRecoverableSignature {
         throw OperatorWalletError.authenticationFailed
     }
+}
+
+private actor SuspendedAuthenticationSigner: OperatorTransactionSigning {
+    private var authenticationPending = false
+    private var authenticationContinuation: CheckedContinuation<Void, Never>?
+    private var pendingWaiters = [CheckedContinuation<Void, Never>]()
+    private var privateKeyUses = 0
+
+    func sign(
+        digest: Bytes32,
+        reason: String,
+        postAuthenticationValidation: @Sendable () async throws -> Void
+    ) async throws -> EthereumRecoverableSignature {
+        authenticationPending = true
+        pendingWaiters.forEach { $0.resume() }
+        pendingWaiters.removeAll()
+        await withCheckedContinuation { continuation in
+            authenticationContinuation = continuation
+        }
+        try await postAuthenticationValidation()
+        privateKeyUses += 1
+        return try EthereumRecoverableSignature(
+            r: Data(repeating: 1, count: 32),
+            s: Data(repeating: 2, count: 32),
+            yParity: 0
+        )
+    }
+
+    func waitUntilAuthenticationIsPending() async {
+        guard !authenticationPending else { return }
+        await withCheckedContinuation { continuation in
+            pendingWaiters.append(continuation)
+        }
+    }
+
+    func completeAuthentication() {
+        authenticationContinuation?.resume()
+        authenticationContinuation = nil
+    }
+
+    func privateKeyUseCount() -> Int { privateKeyUses }
+}
+
+private actor MutableConfirmationHashState {
+    private let expected = try! Bytes32(
+        hex: "0x" + String(repeating: "11", count: 32)
+    )
+    private var current = try! Bytes32(
+        hex: "0x" + String(repeating: "11", count: 32)
+    )
+
+    func replaceHash() throws {
+        current = try Bytes32(hex: "0x" + String(repeating: "22", count: 32))
+    }
+
+    func validateExpectedHash() throws {
+        guard current == expected else {
+            throw PostAuthenticationTestError.confirmationHashChanged
+        }
+    }
+}
+
+private enum PostAuthenticationTestError: Error, Equatable {
+    case confirmationHashChanged
 }
 
 private func XCTAssertThrowsErrorAsync(
