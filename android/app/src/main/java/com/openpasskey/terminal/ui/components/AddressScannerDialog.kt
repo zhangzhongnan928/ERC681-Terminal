@@ -49,6 +49,7 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import com.openpasskey.terminal.provisioning.TerminalProvisioningPayloadCodec
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -56,6 +57,57 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal fun AddressScannerDialog(
     onDismiss: () -> Unit,
     onAddressScanned: (String) -> Unit,
+) {
+    ConfigurationQrScannerDialog(
+        title = "Scan configuration address",
+        instructions = "Address-only QR codes are accepted. Payment requests, WalletConnect, links, " +
+            "and JSON are rejected and never acted on.",
+        manualFallback = "You can still paste the address.",
+        onDismiss = onDismiss,
+        acceptPayload = { rawValue ->
+            runCatching { AddressQrParser.parse(rawValue) }
+                .fold(
+                    onSuccess = { address ->
+                        onAddressScanned(address)
+                        null
+                    },
+                    onFailure = { "Not an address-only QR. No value was imported." },
+                )
+        },
+    )
+}
+
+@Composable
+internal fun ProvisioningScannerDialog(
+    onDismiss: () -> Unit,
+    onProvisioningPayloadScanned: (String) -> Unit,
+) {
+    ConfigurationQrScannerDialog(
+        title = "Scan merchant portal",
+        instructions = "Scan the unified OPK terminal provisioning QR shown by the merchant portal. " +
+            "Payment requests, links, and address-only QRs are rejected.",
+        manualFallback = "Return to the merchant portal and display its provisioning QR.",
+        onDismiss = onDismiss,
+        acceptPayload = { rawValue ->
+            runCatching { TerminalProvisioningPayloadCodec.parse(rawValue) }
+                .fold(
+                    onSuccess = {
+                        onProvisioningPayloadScanned(rawValue)
+                        null
+                    },
+                    onFailure = { "Not a canonical OPK terminal provisioning QR." },
+                )
+        },
+    )
+}
+
+@Composable
+private fun ConfigurationQrScannerDialog(
+    title: String,
+    instructions: String,
+    manualFallback: String,
+    onDismiss: () -> Unit,
+    acceptPayload: (String) -> String?,
 ) {
     val context = LocalContext.current
     var permissionGranted by remember {
@@ -74,7 +126,7 @@ internal fun AddressScannerDialog(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted ->
         permissionGranted = granted
-        if (!granted) scanError = "Camera access was not granted. You can still paste the address."
+        if (!granted) scanError = "Camera access was not granted. $manualFallback"
     }
 
     LaunchedEffect(Unit) {
@@ -91,10 +143,9 @@ internal fun AddressScannerDialog(
                 modifier = Modifier.padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text("Scan configuration address", style = MaterialTheme.typography.titleLarge)
+                Text(title, style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "Address-only QR codes are accepted. Payment requests, WalletConnect, links, " +
-                        "and JSON are rejected and never acted on.",
+                    instructions,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -103,18 +154,16 @@ internal fun AddressScannerDialog(
                     CameraQrPreview(
                         onBarcode = { rawValue ->
                             if (!accepted) {
-                                runCatching { AddressQrParser.parse(rawValue) }
-                                    .onSuccess { address ->
-                                        accepted = true
-                                        onAddressScanned(address)
-                                        onDismiss()
-                                    }
-                                    .onFailure {
-                                        scanError = "Not an address-only QR. No value was imported."
-                                    }
+                                val error = acceptPayload(rawValue)
+                                if (error == null) {
+                                    accepted = true
+                                    onDismiss()
+                                } else {
+                                    scanError = error
+                                }
                             }
                         },
-                        onError = { scanError = it },
+                        onError = { scanError = "$it $manualFallback" },
                     )
                 } else {
                     Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {

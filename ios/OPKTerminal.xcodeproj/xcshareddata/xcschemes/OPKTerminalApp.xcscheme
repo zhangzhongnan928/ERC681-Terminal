@@ -44,6 +44,17 @@
             parallelizable = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "132BBF504E0786330423FDD6"
+               BuildableName = "OPKTerminalAppTests.xctest"
+               BlueprintName = "OPKTerminalAppTests"
+               ReferencedContainer = "container:OPKTerminal.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "CAD15416F078AE8FA6FC8994"
                BuildableName = "OPKTerminalAppUITests.xctest"
                BlueprintName = "OPKTerminalAppUITests"

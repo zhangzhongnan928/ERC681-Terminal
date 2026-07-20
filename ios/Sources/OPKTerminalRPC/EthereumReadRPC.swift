@@ -22,6 +22,7 @@ public enum RPCDecodingError: Error, Equatable, Sendable {
 public protocol EthereumReadRPC: Sendable {
     func chainID() async throws -> UInt64
     func blockNumber() async throws -> UInt64
+    func canonicalBlockHash(at blockNumber: UInt64) async throws -> Bytes32
     func code(at address: EthereumAddress, block: RPCBlockTag) async throws -> Data
     func call(to address: EthereumAddress, data: Data, block: RPCBlockTag) async throws -> Data
 }
@@ -41,6 +42,17 @@ public actor JSONRPCEthereumClient: EthereumReadRPC {
     public func blockNumber() async throws -> UInt64 {
         let result: String = try await client.call("eth_blockNumber")
         return try Self.decodeQuantity(result)
+    }
+
+    public func canonicalBlockHash(at blockNumber: UInt64) async throws -> Bytes32 {
+        let result: RPCBlockIdentity = try await client.call(
+            "eth_getBlockByNumber",
+            params: [
+                .string("0x" + String(blockNumber, radix: 16)),
+                .bool(false),
+            ]
+        )
+        return try Bytes32(hex: result.hash)
     }
 
     public func code(at address: EthereumAddress, block: RPCBlockTag = .latest) async throws -> Data {
@@ -82,6 +94,10 @@ public actor JSONRPCEthereumClient: EthereumReadRPC {
             throw RPCDecodingError.invalidData(value)
         }
     }
+}
+
+private struct RPCBlockIdentity: Decodable, Sendable {
+    let hash: String
 }
 
 extension Character {

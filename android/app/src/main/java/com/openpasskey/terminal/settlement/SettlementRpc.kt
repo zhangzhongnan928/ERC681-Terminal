@@ -3,6 +3,7 @@ package com.openpasskey.terminal.settlement
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.terminal.data.model.SettlementFeeMode
 import org.web3j.protocol.Web3j
+import org.web3j.protocol.core.DefaultBlockParameter
 import org.web3j.protocol.core.DefaultBlockParameterName
 import org.web3j.protocol.core.methods.request.Transaction
 import org.web3j.protocol.http.HttpService
@@ -100,7 +101,10 @@ class SettlementRpcException(message: String, val rpcCode: Int? = null) : Runtim
 
 interface SettlementChainClient : Closeable {
     fun chainId(): Long
+    /** Pending balance is used for fee readiness and accounts for accepted withdrawals. */
     fun nativeBalance(address: String): BigInteger
+    /** Latest canonical balance is required by destructive key-reset safety. */
+    fun latestNativeBalance(address: String): BigInteger
     fun tokenBalance(tokenAddress: String, accountAddress: String): BigInteger
     fun isOperator(vaultAddress: String, operatorAddress: String): Boolean
     fun owner(vaultAddress: String): String
@@ -111,6 +115,8 @@ interface SettlementChainClient : Closeable {
     fun sendRawTransaction(signedTransaction: String): String
     fun transactionReceipt(txHash: String): SettlementReceipt?
     fun blockNumber(): Long
+    /** Canonical block hash for an exact height, or null when that height is unavailable. */
+    fun canonicalBlockHash(blockNumber: Long): String?
 }
 
 class Web3jSettlementChainClient(rpcUrl: String) : SettlementChainClient {
@@ -126,6 +132,15 @@ class Web3jSettlementChainClient(rpcUrl: String) : SettlementChainClient {
         val response = web3j.ethGetBalance(
             EvmAddress.parse(address).value,
             DefaultBlockParameterName.PENDING
+        ).send()
+        response.throwIfError("eth_getBalance")
+        return response.balance
+    }
+
+    override fun latestNativeBalance(address: String): BigInteger {
+        val response = web3j.ethGetBalance(
+            EvmAddress.parse(address).value,
+            DefaultBlockParameterName.LATEST,
         ).send()
         response.throwIfError("eth_getBalance")
         return response.balance
@@ -263,6 +278,16 @@ class Web3jSettlementChainClient(rpcUrl: String) : SettlementChainClient {
         val response = web3j.ethBlockNumber().send()
         response.throwIfError("eth_blockNumber")
         return response.blockNumber.toLongExactCompat("block number")
+    }
+
+    override fun canonicalBlockHash(blockNumber: Long): String? {
+        require(blockNumber >= 0) { "Block number cannot be negative" }
+        val response = web3j.ethGetBlockByNumber(
+            DefaultBlockParameter.valueOf(BigInteger.valueOf(blockNumber)),
+            false,
+        ).send()
+        response.throwIfError("eth_getBlockByNumber")
+        return response.block?.hash
     }
 
     override fun close() {

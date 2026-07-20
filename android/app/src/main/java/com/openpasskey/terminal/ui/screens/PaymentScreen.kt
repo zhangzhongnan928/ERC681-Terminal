@@ -145,18 +145,40 @@ private fun StatusCard(invoice: Invoice) {
         InvoiceStatus.PAID -> "Paid" to "Expected amount confirmed"
         InvoiceStatus.OVERPAID -> "Overpaid" to "More than the requested amount was confirmed"
         InvoiceStatus.PARTIALLY_SETTLED -> "Partially settled" to
-            "A sweep moved less than expected; operator review is required"
+            "A sweep moved less than expected; this receiver remains under reconciliation"
+        InvoiceStatus.LATE_PAYMENT_CONFIRMING -> if (invoice.settlementAmbiguous) {
+            "Recovery payment confirming" to
+                "Value is present, but its exact balance must remain stable through confirmation"
+        } else {
+            "Late payment confirming" to
+                "New value arrived after a prior sweep and is waiting for confirmation blocks"
+        }
+        InvoiceStatus.LATE_PAYMENT_READY -> if (invoice.settlementAmbiguous) {
+            "Recovery payment ready" to
+                "Confirmed positive value can be swept; review remains until canonical proof covers the invoice"
+        } else {
+            "Late payment ready" to
+                "Confirmed value arrived after a prior sweep and is ready to sweep again"
+        }
         InvoiceStatus.SETTLED -> "Settled" to "A confirmed receipt proves the funds were swept"
         InvoiceStatus.SETTLEMENT_REVIEW_REQUIRED -> "Settlement review" to
-            "Receipt evidence is missing or ambiguous; do not assume funds were swept"
+            "Receipt evidence is ambiguous. This receiver stays monitored and confirmed value can be recovered"
         InvoiceStatus.EXPIRED -> "Closed" to "This invoice was closed locally"
+    }
+    val observedAmount = if (
+        invoice.status == InvoiceStatus.LATE_PAYMENT_CONFIRMING ||
+        invoice.status == InvoiceStatus.LATE_PAYMENT_READY
+    ) {
+        invoice.pendingLateAmount
+    } else {
+        invoice.receivedAmount
     }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp)) {
             Text(title, style = MaterialTheme.typography.headlineSmall)
             Text(detail)
             Text(
-                "Received ${formatRaw(invoice.receivedAmount, invoice.tokenDecimals)} ${invoice.tokenSymbol}",
+                "Received ${formatRaw(observedAmount, invoice.tokenDecimals)} ${invoice.tokenSymbol}",
                 style = MaterialTheme.typography.titleMedium
             )
         }

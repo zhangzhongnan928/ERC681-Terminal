@@ -8,6 +8,7 @@ import com.openpasskey.terminal.data.model.SettlementTransaction
 import com.openpasskey.terminal.data.repository.PreparedSettlement
 import com.openpasskey.terminal.data.repository.SettlementRepository
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -26,6 +27,7 @@ data class SettlementUiState(
 class SettlementViewModel(private val repository: SettlementRepository) : ViewModel() {
     private val _state = MutableStateFlow(SettlementUiState())
     val state: StateFlow<SettlementUiState> = _state.asStateFlow()
+    private var recoveryInFlight = false
 
     init {
         viewModelScope.launch {
@@ -38,7 +40,12 @@ class SettlementViewModel(private val repository: SettlementRepository) : ViewMo
                 _state.value = _state.value.copy(recentTransactions = transactions)
             }
         }
-        viewModelScope.launch { repository.recoverPending() }
+        viewModelScope.launch {
+            while (true) {
+                recoverPending(reportError = false)
+                delay(RECOVERY_INTERVAL_MILLIS)
+            }
+        }
     }
 
     fun prepare(invoiceIds: List<String>) {
@@ -101,9 +108,36 @@ class SettlementViewModel(private val repository: SettlementRepository) : ViewMo
         _state.value = _state.value.copy(message = "Authentication failed: $message", isError = true)
     }
 
+    fun refreshPending() {
+        viewModelScope.launch { recoverPending(reportError = true) }
+    }
+
+    private suspend fun recoverPending(reportError: Boolean) {
+        if (recoveryInFlight) return
+        recoveryInFlight = true
+        try {
+            repository.recoverPending()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            if (reportError) {
+                _state.value = _state.value.copy(
+                    message = error.message ?: "Settlement recovery failed",
+                    isError = true,
+                )
+            }
+        } finally {
+            recoveryInFlight = false
+        }
+    }
+
     class Factory(private val repository: SettlementRepository) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
             SettlementViewModel(repository) as T
+    }
+
+    private companion object {
+        const val RECOVERY_INTERVAL_MILLIS = 30_000L
     }
 }

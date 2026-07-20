@@ -28,6 +28,22 @@ final class StoredSettlement {
     var broadcastError: String?
     var failureReason: String?
     var eventProofsData: Data?
+    /// False for legacy rows and newly finalized receipts until their canonical events have been
+    /// applied idempotently to the bounded per-invoice cumulative proof index.
+    var cumulativeEvidenceIndexed: Bool = false
+    /// Durable retry cursor for fail-closed proof indexing. A malformed row remains visible and
+    /// retryable without monopolizing every bounded reconciliation pass.
+    var cumulativeEvidenceLastAttemptAt: Date?
+    var cumulativeEvidenceNextAttemptAt: Date = Date.distantPast
+    var cumulativeEvidenceFailureCount: Int = 0
+    var cumulativeEvidenceLastError: String?
+    /// Independent durable cursor for repairing needs-review rows from the cumulative invoice
+    /// ledger. It cannot share the proof-index cursor because indexed rows park that cursor in
+    /// the distant future.
+    var cumulativeReviewLastAttemptAt: Date?
+    var cumulativeReviewNextAttemptAt: Date = Date.distantPast
+    var cumulativeReviewFailureCount: Int = 0
+    var cumulativeReviewLastError: String?
 
     init(
         signed: SignedSettlement,
@@ -80,7 +96,7 @@ final class StoredSettlement {
     var invoiceCount: Int { invoiceIDs.count }
 
     var statusLabel: String {
-        switch phase {
+        let phaseLabel = switch phase {
         case .pending: "Pending"
         case .mined: "Mined \(confirmations)/\(requiredConfirmations)"
         case .final: "Final"
@@ -88,10 +104,17 @@ final class StoredSettlement {
         case .unknown: "Unknown"
         case .needsReview: "Needs review"
         }
+        if !cumulativeEvidenceIndexed, cumulativeEvidenceLastError != nil {
+            return "\(phaseLabel) · Proof review"
+        }
+        if cumulativeReviewLastError != nil {
+            return "\(phaseLabel) · Repair blocked"
+        }
+        return phaseLabel
     }
 
     var isActiveClaim: Bool {
-        phase == .pending || phase == .mined || phase == .final || phase == .unknown
+        phase == .pending || phase == .mined || phase == .unknown
     }
 
     func intent() throws -> SettlementIntent {
@@ -139,13 +162,28 @@ final class StoredSettlement {
                 throw AppSettingsError.invalidValue
             }
             minedBlock = storedBlock
+            // A canonical receipt supersedes any ambiguous/duplicate broadcast response.
+            broadcastError = nil
         }
         failureReason = reconciliation.failureReason
-        if !reconciliation.verifiedSweeps.isEmpty {
+        switch reconciliation.phase {
+        case .mined, .final, .needsReview:
+            // Store the exact proof set belonging to the currently observed receipt, including
+            // an empty canonical subset. Otherwise a pre-finality receipt that later reorgs can
+            // leave orphaned event bytes available for cumulative credit.
             eventProofsData = try JSONEncoder().encode(
                 reconciliation.verifiedSweeps.map(StoredSweepEvidence.init)
             )
+        case .pending, .unknown, .failed:
+            // No stable receipt identity exists in these phases. Fail closed rather than
+            // retaining provisional proof material from an earlier fork.
+            eventProofsData = nil
         }
+        cumulativeEvidenceIndexed = false
+        cumulativeEvidenceLastAttemptAt = nil
+        cumulativeEvidenceNextAttemptAt = .distantPast
+        cumulativeEvidenceFailureCount = 0
+        cumulativeEvidenceLastError = nil
         updatedAt = Date()
     }
 

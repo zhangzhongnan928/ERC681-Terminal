@@ -29,8 +29,9 @@ final class JSONRPCClientTests: XCTestCase {
         let transport = QueueTransport([
             #"{"jsonrpc":"2.0","id":1,"result":"0x14a34"}"#,
             #"{"jsonrpc":"2.0","id":2,"result":"0x10"}"#,
-            #"{"jsonrpc":"2.0","id":3,"result":"0x6001"}"#,
-            #"{"jsonrpc":"2.0","id":4,"result":"0x000000000000000000000000000000000000000000000000000000000000002a"}"#,
+            #"{"jsonrpc":"2.0","id":3,"result":{"hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
+            #"{"jsonrpc":"2.0","id":4,"result":"0x6001"}"#,
+            #"{"jsonrpc":"2.0","id":5,"result":"0x000000000000000000000000000000000000000000000000000000000000002a"}"#,
         ])
         let client = try JSONRPCEthereumClient(
             endpoint: URL(string: "https://rpc.example")!,
@@ -39,9 +40,14 @@ final class JSONRPCClientTests: XCTestCase {
         let address = try EthereumAddress(hex: "0x1111111111111111111111111111111111111111")
         let chainID = try await client.chainID()
         let blockNumber = try await client.blockNumber()
+        let blockHash = try await client.canonicalBlockHash(at: blockNumber)
         let code = try await client.code(at: address, block: .latest)
         XCTAssertEqual(chainID, 84_532)
         XCTAssertEqual(blockNumber, 16)
+        XCTAssertEqual(
+            blockHash.hex,
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
         XCTAssertEqual(code.hexString, "0x6001")
         let result = try await client.call(
             to: address,
@@ -51,8 +57,11 @@ final class JSONRPCClientTests: XCTestCase {
         XCTAssertEqual(try ABI.decodeUInt256(result), UInt256(42))
 
         let bodies = await transport.requestBodies
-        XCTAssertEqual(bodies.count, 4)
-        let callBody = String(decoding: bodies[3], as: UTF8.self)
+        XCTAssertEqual(bodies.count, 5)
+        let blockBody = String(decoding: bodies[2], as: UTF8.self)
+        XCTAssertTrue(blockBody.contains("eth_getBlockByNumber"))
+        XCTAssertTrue(blockBody.contains("0x10"))
+        let callBody = String(decoding: bodies[4], as: UTF8.self)
         XCTAssertTrue(callBody.contains("eth_call"))
         XCTAssertTrue(callBody.contains("0x10"))
         XCTAssertTrue(callBody.contains(ABI.decimalsSelector.hexString))

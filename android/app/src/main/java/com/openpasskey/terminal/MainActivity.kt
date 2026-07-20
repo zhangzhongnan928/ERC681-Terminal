@@ -13,6 +13,8 @@ import com.openpasskey.terminal.viewmodel.SettingsViewModel
 import com.openpasskey.terminal.viewmodel.SettlementViewModel
 
 class MainActivity : FragmentActivity() {
+    private lateinit var settingsViewModel: SettingsViewModel
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -23,9 +25,15 @@ class MainActivity : FragmentActivity() {
             this,
             InvoiceViewModel.Factory(app.invoiceRepository, app.chainConfig)
         )[InvoiceViewModel::class.java]
-        val settingsViewModel = ViewModelProvider(
+        settingsViewModel = ViewModelProvider(
             this,
-            SettingsViewModel.Factory(app.chainConfig, app.operatorWalletStore)
+            SettingsViewModel.Factory(
+                app.chainConfig,
+                app.operatorWalletStore,
+                app.adminPinStore,
+                app.terminalProvisioner,
+                app.terminalResetCoordinator,
+            )
         )[SettingsViewModel::class.java]
         val settlementViewModel = ViewModelProvider(
             this,
@@ -37,5 +45,15 @@ class MainActivity : FragmentActivity() {
                 AppNavigation(invoiceViewModel, settingsViewModel, settlementViewModel)
             }
         }
+    }
+
+    override fun onStop() {
+        if (::settingsViewModel.isInitialized) settingsViewModel.lockAdmin()
+        super.onStop()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (::settingsViewModel.isInitialized) settingsViewModel.refreshOperatorStatus()
     }
 }

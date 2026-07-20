@@ -12,6 +12,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -30,6 +31,7 @@ import com.openpasskey.terminal.ui.screens.SettlementScreen
 import com.openpasskey.terminal.viewmodel.InvoiceViewModel
 import com.openpasskey.terminal.viewmodel.SettingsViewModel
 import com.openpasskey.terminal.viewmodel.SettlementViewModel
+import com.openpasskey.terminal.viewmodel.TerminalSetupStatus
 
 private object Routes {
     const val INVOICE = "invoice"
@@ -55,6 +57,7 @@ fun AppNavigation(
     settlementViewModel: SettlementViewModel
 ) {
     val controller = rememberNavController()
+    val settingsState by settingsViewModel.state.collectAsState()
     val current by controller.currentBackStackEntryAsState()
     val currentRoute = current?.destination?.route
     val showBottomBar = currentRoute in navItems.map { it.route }
@@ -70,7 +73,11 @@ fun AppNavigation(
             modifier = Modifier.padding(padding)
         ) {
             composable(Routes.INVOICE) {
-                InvoiceScreen(invoiceViewModel) { controller.navigate(Routes.payment(it)) }
+                InvoiceScreen(
+                    viewModel = invoiceViewModel,
+                    terminalReady = settingsState.setupStatus == TerminalSetupStatus.READY,
+                    onRefreshTerminalStatus = settingsViewModel::refreshOperatorStatus,
+                ) { controller.navigate(Routes.payment(it)) }
             }
             composable(Routes.HISTORY) {
                 HistoryScreen(invoiceViewModel) { controller.navigate(Routes.payment(it)) }

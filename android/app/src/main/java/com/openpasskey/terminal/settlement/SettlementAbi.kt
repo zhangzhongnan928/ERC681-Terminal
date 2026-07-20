@@ -101,9 +101,11 @@ object SettlementAbi {
         require(previouslyProvenSwept.signum() >= 0) { "Prior swept evidence cannot be negative" }
         val cumulative = previouslyProvenSwept.add(proof.sweptAmount)
         return when {
-        cumulative.signum() == 0 -> SweepProofClassification.ZERO
-        cumulative < proof.expectedAmount -> SweepProofClassification.PARTIAL
-        else -> SweepProofClassification.FULL
+            // A previous full sweep must never turn a zero-value repeat event into proof that the
+            // newly observed late balance moved. Every settlement cycle requires positive proof.
+            proof.sweptAmount.signum() == 0 -> SweepProofClassification.ZERO
+            cumulative < proof.expectedAmount -> SweepProofClassification.PARTIAL
+            else -> SweepProofClassification.FULL
         }
     }
 

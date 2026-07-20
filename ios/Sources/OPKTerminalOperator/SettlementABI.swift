@@ -73,23 +73,21 @@ public enum SettlementABI {
             )
         }
 
-        return try intent.sessions.map { session in
+        return intent.sessions.compactMap { session in
             let matches = decoded.filter {
                 $0.invoiceID == session.invoiceID
                     && $0.receiver == session.receiver
                     && $0.vault == intent.vault
                     && $0.token == intent.token
                     && $0.expectedAmount == session.expectedAmount
+                    && !$0.sweptAmount.isZero
             }
-            guard !matches.isEmpty else {
-                throw SettlementOperatorError.missingSweptEvent(session.invoiceID)
-            }
-            guard matches.count == 1, let event = matches.first else {
-                throw SettlementOperatorError.ambiguousSweptEvent(session.invoiceID)
-            }
-            guard !event.sweptAmount.isZero else {
-                throw SettlementOperatorError.zeroSweptAmount(session.invoiceID)
-            }
+            // A successful batch can legitimately produce only a subset of useful proofs
+            // (for example, one receiver swept zero while another swept a positive balance).
+            // Preserve each session's single positive, immutable-field-bound event. Missing,
+            // zero-only, or ambiguous positive matches remain unproven and are reviewed by the
+            // coordinator without discarding proofs belonging to other sessions.
+            guard matches.count == 1, let event = matches.first else { return nil }
             return VerifiedSweep(
                 invoiceID: event.invoiceID,
                 receiver: event.receiver,

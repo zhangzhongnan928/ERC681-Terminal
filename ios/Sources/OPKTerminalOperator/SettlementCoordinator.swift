@@ -5,7 +5,7 @@ public actor SettlementCoordinator {
     /// Conservative extra balance reserved for the OP Stack L1 data charge, which is not
     /// represented by `gasLimit * maxFeePerGas`.
     public static let defaultL1DataFeeReserve = UInt256(20_000_000_000_000)
-    public static let minimumRecommendedBalance = UInt256(50_000_000_000_000)
+    public static let minimumRecommendedBalance = UInt256(100_000_000_000_000)
 
     private let rpc: any EthereumOperatorRPC
     private let signer: any OperatorTransactionSigning
@@ -57,6 +57,23 @@ public actor SettlementCoordinator {
             isVaultOwner: resolvedAuthorization.isOwner,
             isLowGas: resolvedBalance < Self.minimumRecommendedBalance
         )
+    }
+
+    /// Reads both canonical/latest and pending native balances for destructive reset safety.
+    /// Fee-readiness intentionally continues to use the pending view through `refreshStatus`.
+    public func resetSafetyBalances(
+        expectedChainID: UInt64
+    ) async throws -> OperatorNativeBalanceSnapshot {
+        let actualChainID = try await rpc.chainID()
+        guard actualChainID == expectedChainID else {
+            throw SettlementOperatorError.chainMismatch(
+                expected: expectedChainID,
+                actual: actualChainID
+            )
+        }
+        async let latest = rpc.latestBalance(of: operatorAddress)
+        async let pending = rpc.balance(of: operatorAddress)
+        return try await OperatorNativeBalanceSnapshot(latest: latest, pending: pending)
     }
 
     /// Performs authorization, simulation, gas estimation, fee selection, and balance checks.
@@ -117,13 +134,15 @@ public actor SettlementCoordinator {
     /// persist the returned raw transaction and hash before calling `broadcast`.
     public func sign(
         _ prepared: PreparedSettlement,
-        authenticationReason: String
+        authenticationReason: String,
+        postAuthenticationValidation: @escaping @Sendable () async throws -> Void = {}
     ) async throws -> SignedSettlement {
         await nonceGate.acquire()
         do {
             let signed = try await signWhileHoldingNonceGate(
                 prepared,
-                authenticationReason: authenticationReason
+                authenticationReason: authenticationReason,
+                postAuthenticationValidation: postAuthenticationValidation
             )
             await nonceGate.release()
             return signed
@@ -244,54 +263,49 @@ public actor SettlementCoordinator {
                     : nil
             )
         }
-        guard receipt.succeeded else {
-            return SettlementReconciliation(
-                phase: .failed,
-                blockNumber: receipt.blockNumber,
-                confirmations: 0,
-                verifiedSweeps: [],
-                failureReason: "The transaction reverted on-chain."
-            )
-        }
-
-        let verified: [VerifiedSweep]
-        do {
-            verified = try SettlementABI.verifySweptEvents(receipt: receipt, intent: intent)
-        } catch let error as SettlementOperatorError {
-            let isRemovedLog: Bool
-            if case let .invalidReceipt(message) = error {
-                isRemovedLog = message.contains("removed")
-            } else {
-                isRemovedLog = false
+        let preliminarySweeps: [VerifiedSweep]
+        let preliminaryFailure: String?
+        if receipt.succeeded {
+            do {
+                preliminarySweeps = try SettlementABI.verifySweptEvents(
+                    receipt: receipt,
+                    intent: intent
+                )
+                preliminaryFailure = preliminarySweeps.count == intent.sessions.count
+                    ? nil
+                    : "The successful receipt does not yet contain one unique nonzero Swept proof for every session."
+            } catch {
+                preliminarySweeps = []
+                preliminaryFailure = error.localizedDescription
             }
-            return SettlementReconciliation(
-                phase: isRemovedLog ? .unknown : .failed,
-                blockNumber: receipt.blockNumber,
-                confirmations: 0,
-                verifiedSweeps: [],
-                failureReason: error.localizedDescription
-            )
+        } else {
+            preliminarySweeps = []
+            preliminaryFailure = "The transaction receipt reports a revert."
         }
 
         let head = try await rpc.blockNumber()
-        guard head >= receipt.blockNumber else {
+        guard let confirmations = Self.confirmationDepth(
+            head: head,
+            receiptBlock: receipt.blockNumber
+        ) else {
             return SettlementReconciliation(
                 phase: .unknown,
                 blockNumber: receipt.blockNumber,
                 confirmations: 0,
-                verifiedSweeps: verified,
+                verifiedSweeps: preliminarySweeps,
                 failureReason: "The RPC head is behind the receipt block."
             )
         }
-        let confirmations = head - receipt.blockNumber + 1
         let required = max(requiredConfirmations, 1)
         guard confirmations >= required else {
             return SettlementReconciliation(
                 phase: .mined,
                 blockNumber: receipt.blockNumber,
                 confirmations: confirmations,
-                verifiedSweeps: verified,
-                failureReason: nil
+                verifiedSweeps: preliminarySweeps,
+                failureReason: preliminaryFailure.map {
+                    "\($0) Waiting for the configured finality window before marking this transaction failed."
+                }
             )
         }
 
@@ -307,23 +321,87 @@ public actor SettlementCoordinator {
                 failureReason: "The receipt or canonical block identity changed during finality verification."
             )
         }
-        let confirmedSweeps = try SettlementABI.verifySweptEvents(
-            receipt: confirmedReceipt,
-            intent: intent
+
+        // Receipt identity alone is not enough: blocks above an unchanged receipt may have
+        // reorganized while the verification calls were in flight. Re-read the head after
+        // identity verification and gate every terminal phase on the depth that still exists.
+        let finalHead = try await rpc.blockNumber()
+        guard let finalConfirmations = Self.confirmationDepth(
+            head: finalHead,
+            receiptBlock: confirmedReceipt.blockNumber
+        ) else {
+            return SettlementReconciliation(
+                phase: .unknown,
+                blockNumber: confirmedReceipt.blockNumber,
+                confirmations: 0,
+                verifiedSweeps: [],
+                failureReason: "The RPC head moved behind the receipt block during finality verification."
+            )
+        }
+        guard finalConfirmations >= required else {
+            return SettlementReconciliation(
+                phase: .mined,
+                blockNumber: confirmedReceipt.blockNumber,
+                confirmations: finalConfirmations,
+                verifiedSweeps: preliminarySweeps,
+                failureReason: preliminaryFailure.map {
+                    "\($0) The finality window no longer has the configured depth."
+                }
+            )
+        }
+        guard confirmedReceipt.succeeded else {
+            return SettlementReconciliation(
+                phase: .failed,
+                blockNumber: confirmedReceipt.blockNumber,
+                confirmations: finalConfirmations,
+                verifiedSweeps: [],
+                failureReason: "The same canonical reverted receipt survived the configured finality window."
+            )
+        }
+        let confirmedSweeps: [VerifiedSweep]
+        do {
+            confirmedSweeps = try SettlementABI.verifySweptEvents(
+                receipt: confirmedReceipt,
+                intent: intent
+            )
+        } catch {
+            return SettlementReconciliation(
+                phase: .failed,
+                blockNumber: confirmedReceipt.blockNumber,
+                confirmations: finalConfirmations,
+                verifiedSweeps: [],
+                failureReason: "The same canonical malformed receipt survived the configured finality window: \(error.localizedDescription)"
+            )
+        }
+        let sweepsByInvoiceID = Dictionary(
+            uniqueKeysWithValues: confirmedSweeps.map { ($0.invoiceID, $0) }
         )
-        if confirmedSweeps.contains(where: { $0.sweptAmount < $0.expectedAmount }) {
+        var isCumulativelyIncomplete = confirmedSweeps.count != intent.sessions.count
+        for session in intent.sessions {
+            guard let sweep = sweepsByInvoiceID[session.invoiceID] else {
+                isCumulativelyIncomplete = true
+                continue
+            }
+            let (cumulative, overflow) = session.priorConfirmedSweptAmount
+                .addingReportingOverflow(sweep.sweptAmount)
+            guard !overflow else { throw SettlementOperatorError.arithmeticOverflow }
+            if cumulative < session.expectedAmount {
+                isCumulativelyIncomplete = true
+            }
+        }
+        if isCumulativelyIncomplete {
             return SettlementReconciliation(
                 phase: .needsReview,
                 blockNumber: receipt.blockNumber,
-                confirmations: confirmations,
+                confirmations: finalConfirmations,
                 verifiedSweeps: confirmedSweeps,
-                failureReason: "At least one confirmed session swept less than its immutable expected amount. A later nonzero sweep may complete it cumulatively."
+                failureReason: "At least one confirmed session lacks a unique nonzero event or remains below its immutable expected amount. Preserved canonical proofs can be indexed, and a later nonzero sweep may complete the batch cumulatively."
             )
         }
         return SettlementReconciliation(
             phase: .final,
             blockNumber: receipt.blockNumber,
-            confirmations: confirmations,
+            confirmations: finalConfirmations,
             verifiedSweeps: confirmedSweeps,
             failureReason: nil
         )
@@ -331,7 +409,8 @@ public actor SettlementCoordinator {
 
     private func signWhileHoldingNonceGate(
         _ prepared: PreparedSettlement,
-        authenticationReason: String
+        authenticationReason: String,
+        postAuthenticationValidation: @escaping @Sendable () async throws -> Void
     ) async throws -> SignedSettlement {
         guard prepared.operatorAddress == operatorAddress,
               prepared.calldata == SettlementABI.encodeSweepSessions(prepared.intent),
@@ -355,7 +434,7 @@ public actor SettlementCoordinator {
         guard authorization.isAuthorized else {
             throw SettlementOperatorError.operatorNotAuthorized
         }
-        _ = try await liveTokenBalances(for: prepared.intent)
+        try await assertPreparedBalancesStillCurrent(prepared)
         try await rpc.simulate(
             from: operatorAddress,
             to: prepared.intent.vault,
@@ -380,9 +459,19 @@ public actor SettlementCoordinator {
             destination: prepared.intent.vault,
             data: prepared.calldata
         )
+        // Recheck after simulation, gas, and nonce reads so newly added value cannot inherit
+        // an older balance's confirmation window immediately before the signing call.
+        try await assertPreparedBalancesStillCurrent(prepared)
         let signature = try await signer.sign(
             digest: transaction.signingDigest,
-            reason: authenticationReason
+            reason: authenticationReason,
+            postAuthenticationValidation: { [self] in
+                // The authentication prompt is an unbounded suspension point. Bind the
+                // signature to the exact live balances again after authentication, then let
+                // the app revalidate its persisted balance and canonical-cursor snapshots.
+                try await assertPreparedBalancesStillCurrent(prepared)
+                try await postAuthenticationValidation()
+            }
         )
         let rawTransaction = transaction.serialized(with: signature)
         let (nextNonce, overflow) = nonce.addingReportingOverflow(1)
@@ -407,6 +496,17 @@ public actor SettlementCoordinator {
         return padded
     }
 
+    private static func confirmationDepth(
+        head: UInt64,
+        receiptBlock: UInt64
+    ) -> UInt64? {
+        let (distance, underflow) = head.subtractingReportingOverflow(receiptBlock)
+        guard !underflow else { return nil }
+        let (depth, overflow) = distance.addingReportingOverflow(1)
+        // A mathematical depth of UInt64.max + 1 exceeds any representable requirement.
+        return overflow ? UInt64.max : depth
+    }
+
     private func product(_ left: UInt64, _ right: UInt64) throws -> UInt256 {
         let (value, overflow) = left.multipliedReportingOverflow(by: right)
         guard !overflow else { throw SettlementOperatorError.arithmeticOverflow }
@@ -424,22 +524,37 @@ public actor SettlementCoordinator {
             guard !balance.isZero else {
                 throw SettlementOperatorError.receiverHasNoSweepableBalance(session.invoiceID)
             }
-            let (requiredBalance, underflow) = session.expectedAmount.subtractingReportingOverflow(
-                session.priorConfirmedSweptAmount
-            )
-            guard !underflow, !requiredBalance.isZero else {
-                throw SettlementOperatorError.alreadyFullySettled(session.invoiceID)
-            }
-            guard balance >= requiredBalance else {
-                throw SettlementOperatorError.receiverBalanceBelowRequired(
-                    invoiceID: session.invoiceID,
-                    required: requiredBalance,
-                    available: balance
-                )
+            if session.priorConfirmedSweptAmount < session.expectedAmount {
+                let (requiredBalance, underflow) = session.expectedAmount
+                    .subtractingReportingOverflow(session.priorConfirmedSweptAmount)
+                guard !underflow, !requiredBalance.isZero else {
+                    throw SettlementOperatorError.arithmeticOverflow
+                }
+                guard balance >= requiredBalance else {
+                    throw SettlementOperatorError.receiverBalanceBelowRequired(
+                        invoiceID: session.invoiceID,
+                        required: requiredBalance,
+                        available: balance
+                    )
+                }
             }
             balances.append(balance)
         }
         return balances
+    }
+
+    private func assertPreparedBalancesStillCurrent(
+        _ prepared: PreparedSettlement
+    ) async throws {
+        let currentBalances = try await liveTokenBalances(for: prepared.intent)
+        for (index, current) in currentBalances.enumerated()
+            where current != prepared.observedTokenBalances[index] {
+            throw SettlementOperatorError.receiverBalanceChanged(
+                invoiceID: prepared.intent.sessions[index].invoiceID,
+                confirmed: prepared.observedTokenBalances[index],
+                current: current
+            )
+        }
     }
 }
 

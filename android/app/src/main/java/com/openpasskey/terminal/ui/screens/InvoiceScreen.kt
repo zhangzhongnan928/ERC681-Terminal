@@ -20,6 +20,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -39,7 +40,12 @@ import com.openpasskey.terminal.viewmodel.InvoiceViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun InvoiceScreen(viewModel: InvoiceViewModel, onInvoiceCreated: (String) -> Unit) {
+fun InvoiceScreen(
+    viewModel: InvoiceViewModel,
+    terminalReady: Boolean,
+    onRefreshTerminalStatus: () -> Unit,
+    onInvoiceCreated: (String) -> Unit,
+) {
     val state by viewModel.createState.collectAsState()
     LaunchedEffect(Unit) { viewModel.refreshConfiguration() }
     LaunchedEffect(state.createdInvoice) {
@@ -72,18 +78,21 @@ fun InvoiceScreen(viewModel: InvoiceViewModel, onInvoiceCreated: (String) -> Uni
             )
             Spacer(Modifier.height(16.dp))
             Text(
-                "Before displaying a QR, the app checks RPC chain ID, deployment bytecode, " +
-                    "vault factory, token whitelist, and an empty receiver balance.",
+                "Before displaying a QR, the app rechecks chain and deployment pins, token metadata, " +
+                    "vault authorization, the terminal gas reserve, and an empty receiver balance.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            if (!state.operatorWalletReady) {
+            if (!state.operatorWalletReady || !terminalReady) {
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    "Create the terminal operator wallet in Settings first. Its public address " +
-                        "identifies every new invoice; existing invoices are unchanged.",
+                    "Finish the two-step terminal setup in Settings first. Existing invoices and " +
+                        "History remain available even while new payments are blocked.",
                     color = MaterialTheme.colorScheme.error
                 )
+                OutlinedButton(onClick = onRefreshTerminalStatus) {
+                    Text("Check setup readiness")
+                }
             }
             state.error?.let {
                 Spacer(Modifier.height(12.dp))
@@ -92,7 +101,7 @@ fun InvoiceScreen(viewModel: InvoiceViewModel, onInvoiceCreated: (String) -> Uni
             Spacer(Modifier.height(20.dp))
             Button(
                 onClick = viewModel::createInvoice,
-                enabled = !state.isCreating && state.operatorWalletReady &&
+                enabled = !state.isCreating && state.operatorWalletReady && terminalReady &&
                     state.selectedToken != null && state.amount.isNotBlank(),
                 modifier = Modifier.fillMaxWidth().height(56.dp)
             ) {

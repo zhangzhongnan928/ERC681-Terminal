@@ -86,6 +86,10 @@ class SettlementConformanceTest {
 
         val zero = verified(log(sweptLog["zeroSweptData"].asString), intent)
         assertEquals(SweepProofClassification.ZERO, SettlementAbi.classify(zero))
+        assertEquals(
+            SweepProofClassification.ZERO,
+            SettlementAbi.classify(zero, previouslyProvenSwept = full.sweptAmount),
+        )
         assertEquals(BigInteger.ZERO, zero.sweptAmount)
 
         val partial = verified(log(sweptLog["partialSweptData"].asString), intent)
@@ -142,6 +146,90 @@ class SettlementConformanceTest {
         val requirement = SettlementBalancePolicy.requirement(BigInteger("100000"), typeTwo)
         assertTrue(requirement.requiredBalance > requirement.maximumGasCost)
         assertTrue(requirement.safetyReserve >= BigInteger("100000000000000"))
+    }
+
+    @Test
+    fun `orphan or unavailable receipt block is never canonical proof`() {
+        val receipt = SettlementReceipt(
+            successful = true,
+            blockNumber = 123,
+            blockHash = BLOCK_HASH,
+            transactionHash = TX_HASH,
+            logs = emptyList(),
+        )
+        assertTrue(
+            com.openpasskey.terminal.data.repository.receiptMatchesCanonicalBlock(
+                receipt,
+                BLOCK_HASH.uppercase(),
+            ),
+        )
+        assertFalse(
+            com.openpasskey.terminal.data.repository.receiptMatchesCanonicalBlock(
+                receipt,
+                "0x" + "cc".repeat(32),
+            ),
+        )
+        assertFalse(
+            com.openpasskey.terminal.data.repository.receiptMatchesCanonicalBlock(receipt, null),
+        )
+    }
+
+    @Test
+    fun `confirmation depth must still hold after final receipt identity checks`() {
+        val receiptBlock = 123L
+        val requiredConfirmations = 2
+        val firstHead = 124L
+        val regressedFinalHead = 123L
+
+        assertTrue(
+            com.openpasskey.terminal.data.repository.settlementHasRequiredConfirmationDepth(
+                receiptBlock,
+                requiredConfirmations,
+                firstHead,
+            ),
+        )
+        assertFalse(
+            com.openpasskey.terminal.data.repository.settlementHasRequiredConfirmationDepth(
+                receiptBlock,
+                requiredConfirmations,
+                regressedFinalHead,
+            ),
+        )
+        assertThrows(ArithmeticException::class.java) {
+            com.openpasskey.terminal.data.repository.settlementConfirmationTarget(
+                Long.MAX_VALUE,
+                2,
+            )
+        }
+    }
+
+    @Test
+    fun `ambiguous recovery stays under review until cumulative proof is full`() {
+        assertTrue(com.openpasskey.terminal.data.repository.shouldPersistSettlementReview(true, null))
+        assertTrue(
+            com.openpasskey.terminal.data.repository.shouldPersistSettlementReview(
+                true,
+                SweepProofClassification.ZERO,
+            ),
+        )
+        assertTrue(
+            com.openpasskey.terminal.data.repository.shouldPersistSettlementReview(
+                true,
+                SweepProofClassification.PARTIAL,
+            ),
+        )
+        assertFalse(
+            com.openpasskey.terminal.data.repository.shouldPersistSettlementReview(
+                true,
+                SweepProofClassification.FULL,
+            ),
+        )
+        assertFalse(
+            com.openpasskey.terminal.data.repository.shouldPersistSettlementReview(
+                false,
+                SweepProofClassification.PARTIAL,
+            ),
+        )
     }
 
     private fun verified(log: SettlementReceiptLog, intent: SettlementInvoiceIntent): VerifiedSweep =

@@ -32,6 +32,7 @@ protocol EthereumOperatorRPC: Sendable {
     func blockNumber() async throws -> UInt64
     func canonicalBlockHash(at blockNumber: UInt64) async throws -> Bytes32
     func balance(of address: EthereumAddress) async throws -> UInt256
+    func latestBalance(of address: EthereumAddress) async throws -> UInt256
     func tokenBalance(token: EthereumAddress, account: EthereumAddress) async throws -> UInt256
     func vaultAuthorization(
         vault: EthereumAddress,
@@ -43,6 +44,14 @@ protocol EthereumOperatorRPC: Sendable {
     func pendingNonce(of address: EthereumAddress) async throws -> UInt64
     func sendRawTransaction(_ rawTransaction: Data) async throws -> Bytes32
     func receipt(transactionHash: Bytes32) async throws -> EthereumTransactionReceipt?
+}
+
+extension EthereumOperatorRPC {
+    /// Test and alternate transports may expose only one coherent balance view. The production
+    /// RPC client overrides this with an explicit `latest` read.
+    func latestBalance(of address: EthereumAddress) async throws -> UInt256 {
+        try await balance(of: address)
+    }
 }
 
 public actor OperatorRPCClient: EthereumOperatorRPC {
@@ -84,6 +93,15 @@ public actor OperatorRPCClient: EthereumOperatorRPC {
             try await requiredString(
                 "eth_getBalance",
                 params: [.string(address.hex), .string("pending")]
+            )
+        )
+    }
+
+    func latestBalance(of address: EthereumAddress) async throws -> UInt256 {
+        try decodeUInt256(
+            try await requiredString(
+                "eth_getBalance",
+                params: [.string(address.hex), .string("latest")]
             )
         )
     }

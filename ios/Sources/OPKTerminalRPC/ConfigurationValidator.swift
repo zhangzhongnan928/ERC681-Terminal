@@ -29,6 +29,33 @@ public enum ConfigurationValidationError: Error, Equatable, Sendable {
     case tokenNotWhitelisted(EthereumAddress)
     case tokenDecimalsMismatch(token: EthereumAddress, expected: UInt8, actual: UInt8)
     case invalidDecimals
+    case invalidTokenSymbol(EthereumAddress)
+    case tokenSymbolMismatch(token: EthereumAddress, expected: String, actual: String)
+}
+
+extension ConfigurationValidationError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case let .wrongChain(expected, actual):
+            "The RPC reported chain \(actual), but chain \(expected) is required."
+        case let .noCode(label, address):
+            "The configured \(label) \(address.hex) has no deployed code."
+        case let .factoryImplementationMismatch(expected, actual):
+            "Factory implementation \(actual.hex) does not match \(expected.hex)."
+        case let .vaultFactoryMismatch(expected, actual):
+            "Vault factory \(actual.hex) does not match \(expected.hex)."
+        case let .tokenNotWhitelisted(token):
+            "Token \(token.hex) is not whitelisted by this vault."
+        case let .tokenDecimalsMismatch(token, expected, actual):
+            "Token \(token.hex) reported \(actual) decimals, not \(expected)."
+        case .invalidDecimals:
+            "The token returned invalid decimals metadata."
+        case let .invalidTokenSymbol(token):
+            "Token \(token.hex) returned an invalid symbol."
+        case let .tokenSymbolMismatch(token, expected, actual):
+            "Token \(token.hex) reported symbol \(actual), not \(expected)."
+        }
+    }
 }
 
 public struct ConfigurationValidator: Sendable {
@@ -120,9 +147,27 @@ public struct ConfigurationValidator: Sendable {
                     actual: actualDecimals
                 )
             }
+            let symbolData = try await rpc.call(
+                to: token.address,
+                data: ABI.encodeCall(selector: ABI.symbolSelector),
+                block: .latest
+            )
+            let actualSymbol: String
+            do {
+                actualSymbol = try ABI.decodeDynamicString(symbolData)
+            } catch {
+                throw ConfigurationValidationError.invalidTokenSymbol(token.address)
+            }
+            guard actualSymbol == token.symbol else {
+                throw ConfigurationValidationError.tokenSymbolMismatch(
+                    token: token.address,
+                    expected: token.symbol,
+                    actual: actualSymbol
+                )
+            }
             checks.append(.init(
                 name: "token \(token.symbol)",
-                detail: "whitelisted, \(actualDecimals) decimals"
+                detail: "whitelisted, \(actualDecimals) decimals, symbol verified"
             ))
         }
 
