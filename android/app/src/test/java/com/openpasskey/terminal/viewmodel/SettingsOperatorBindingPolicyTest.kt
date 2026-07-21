@@ -5,10 +5,34 @@ import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
 import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SettingsOperatorBindingPolicyTest {
+    @Test
+    fun invoiceFailureRequiresARefreshThatStartsAfterTheFailure() {
+        assertTrue(
+            shouldRestartActiveReadinessRefresh(
+                ReadinessRefreshTrigger.INVOICE_FAILURE,
+                refreshActive = true,
+            ),
+        )
+        assertFalse(
+            shouldRestartActiveReadinessRefresh(
+                ReadinessRefreshTrigger.NORMAL,
+                refreshActive = true,
+            ),
+        )
+        assertFalse(
+            shouldRestartActiveReadinessRefresh(
+                ReadinessRefreshTrigger.INVOICE_FAILURE,
+                refreshActive = false,
+            ),
+        )
+    }
+
     @Test
     fun fundingQrRequiresReadyWalletBoundToProvisioningQrOperator() {
         assertEquals(

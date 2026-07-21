@@ -16,15 +16,17 @@ final class KeyboardDismissalUITests: XCTestCase {
         app = nil
     }
 
-    func testDecimalPadCanBeDismissedBeforeCreatingPayment() {
-        let amountField = app.textFields["Sale amount"]
-        XCTAssertTrue(amountField.waitForExistence(timeout: 5))
+    func testCheckoutRoutesUnreadyTerminalToSettingsWithoutShowingKeypad() {
+        XCTAssertTrue(app.navigationBars["Checkout"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.otherElements["checkoutReadinessBlocker"].exists)
+        XCTAssertFalse(app.buttons["checkoutKey1"].exists)
 
-        assertKeyboardCanBeDismissed(from: amountField)
+        let setupButton = app.buttons["checkoutReadinessActionButton"]
+        XCTAssertTrue(setupButton.exists)
+        XCTAssertEqual(setupButton.label, "Finish terminal setup")
+        setupButton.tap()
 
-        let createPaymentButton = app.buttons["Create payment QR"]
-        XCTAssertTrue(createPaymentButton.exists)
-        XCTAssertFalse(createPaymentButton.isEnabled)
+        XCTAssertTrue(app.navigationBars["Terminal Setup"].waitForExistence(timeout: 5))
     }
 
     func testFirstRunAllowsOperatorBeforePINAndPINKeyboardCanBeDismissed() {
@@ -43,6 +45,94 @@ final class KeyboardDismissalUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Create local admin PIN"].exists)
     }
 
+    func testReadyCheckoutFixtureSupportsExactKeypadAmountAndAccessibleQRAction() {
+        app.terminate()
+        app.launchEnvironment["OPK_UI_TEST_CHECKOUT_FIXTURE"] = "ready"
+        app.launch()
+
+        XCTAssertTrue(app.navigationBars["Checkout"].waitForExistence(timeout: 5))
+
+        let readyStatus = element(identifier: "checkoutReadyStatus")
+        XCTAssertTrue(readyStatus.waitForExistence(timeout: 5))
+        XCTAssertEqual(readyStatus.label, "Ready")
+
+        let networkStatus = element(identifier: "checkoutNetworkStatus")
+        XCTAssertTrue(networkStatus.exists)
+        XCTAssertEqual(networkStatus.label, "Base Sepolia testnet")
+
+        let qrButton = app.buttons["showPaymentQRButton"]
+        XCTAssertTrue(qrButton.exists)
+        XCTAssertFalse(qrButton.isEnabled)
+
+        let decimalButton = app.buttons["checkoutDecimalKey"]
+        XCTAssertTrue(decimalButton.exists)
+        XCTAssertEqual(decimalButton.label, "Decimal point")
+
+        let backspaceButton = app.buttons["checkoutBackspaceKey"]
+        XCTAssertTrue(backspaceButton.exists)
+        XCTAssertEqual(backspaceButton.label, "Delete last digit")
+
+        let oneButton = app.buttons["checkoutKey1"]
+        XCTAssertTrue(oneButton.exists)
+        XCTAssertTrue(oneButton.isHittable)
+        for _ in 0..<20 {
+            oneButton.tap()
+        }
+
+        let amount = "11111111111111111111"
+        let exactAmount = "\(amount) AUD"
+
+        let amountDisplay = element(identifier: "checkoutAmountDisplay")
+        XCTAssertEqual(amountDisplay.label, "Checkout amount")
+        XCTAssertEqual(amountDisplay.value as? String, exactAmount)
+
+        let exactAmountReview = element(identifier: "checkoutExactAmountReview")
+        XCTAssertTrue(exactAmountReview.exists)
+        XCTAssertEqual(exactAmountReview.label, "Exact payment amount")
+        XCTAssertEqual(exactAmountReview.value as? String, exactAmount)
+
+        XCTAssertTrue(qrButton.isEnabled)
+        XCTAssertEqual(qrButton.label, "Show payment QR for \(exactAmount)")
+
+        let clearButton = app.buttons["checkoutClearButton"]
+        XCTAssertTrue(clearButton.exists)
+        XCTAssertEqual(clearButton.label, "Clear amount")
+    }
+
+    func testCheckoutSetupActionRemainsReachableInLandscapeAtAccessibilityXXXL() {
+        app.terminate()
+        app.launchArguments += [
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryAccessibilityXXXL",
+        ]
+        XCUIDevice.shared.orientation = .landscapeLeft
+        addTeardownBlock {
+            XCUIDevice.shared.orientation = .portrait
+        }
+        app.launch()
+
+        XCTAssertTrue(app.navigationBars["Checkout"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Create operator wallet"].exists)
+        XCTAssertTrue(
+            app.staticTexts[
+                "Create the device-local operator before pairing this terminal."
+            ].exists
+        )
+
+        let setupButton = app.buttons["checkoutReadinessActionButton"]
+        XCTAssertTrue(setupButton.waitForExistence(timeout: 5))
+
+        let blockerScrollView = app.scrollViews.firstMatch
+        XCTAssertTrue(blockerScrollView.exists)
+        for _ in 0..<6 where !setupButton.isHittable {
+            blockerScrollView.swipeUp()
+        }
+
+        XCTAssertTrue(setupButton.isHittable)
+        setupButton.tap()
+        XCTAssertTrue(app.navigationBars["Terminal Setup"].waitForExistence(timeout: 5))
+    }
+
     private func assertKeyboardCanBeDismissed(
         from field: XCUIElement,
         file: StaticString = #filePath,
@@ -59,5 +149,9 @@ final class KeyboardDismissalUITests: XCTestCase {
         dismissButton.tap()
 
         XCTAssertTrue(keyboard.waitForNonExistence(timeout: 3), file: file, line: line)
+    }
+
+    private func element(identifier: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
 }

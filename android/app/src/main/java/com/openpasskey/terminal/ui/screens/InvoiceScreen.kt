@@ -1,16 +1,30 @@
 package com.openpasskey.terminal.ui.screens
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Backspace
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.QrCode
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -19,10 +33,12 @@ import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -31,23 +47,56 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.openpasskey.terminal.chain.PaymentToken
+import com.openpasskey.terminal.viewmodel.CheckoutKey
+import com.openpasskey.terminal.viewmodel.CLEAR_AMOUNT_ACCESSIBILITY_LABEL
 import com.openpasskey.terminal.viewmodel.InvoiceViewModel
+import com.openpasskey.terminal.viewmodel.TerminalSetupStatus
+import com.openpasskey.terminal.viewmodel.applyCheckoutKey
+import com.openpasskey.terminal.viewmodel.accessibilityLabel
+import com.openpasskey.terminal.viewmodel.checkoutActionCopy
+import com.openpasskey.terminal.viewmodel.checkoutAmountDisplay
+import com.openpasskey.terminal.viewmodel.isCheckoutReady
+import com.openpasskey.terminal.viewmodel.isSubmittableCheckoutAmount
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun InvoiceScreen(
     viewModel: InvoiceViewModel,
-    terminalReady: Boolean,
+    terminalStatus: TerminalSetupStatus,
+    terminalNetworkName: String,
+    terminalChainId: Long,
+    terminalStatusMessage: String?,
+    terminalRefreshing: Boolean,
+    terminalConfigurationValidated: Boolean,
     onRefreshTerminalStatus: () -> Unit,
+    onRecoverFromInvoiceFailure: () -> Unit,
+    onOpenSettings: () -> Unit,
     onInvoiceCreated: (String) -> Unit,
 ) {
     val state by viewModel.createState.collectAsState()
-    LaunchedEffect(Unit) { viewModel.refreshConfiguration() }
+    LaunchedEffect(Unit) {
+        viewModel.refreshConfiguration()
+        onRefreshTerminalStatus()
+    }
+    LaunchedEffect(state.readinessFailureSequence) {
+        if (state.readinessFailureSequence > 0) {
+            viewModel.refreshConfiguration()
+            onRecoverFromInvoiceFailure()
+        }
+    }
     LaunchedEffect(state.createdInvoice) {
         state.createdInvoice?.let {
             onInvoiceCreated(it.invoiceId)
@@ -55,65 +104,421 @@ fun InvoiceScreen(
         }
     }
 
-    Scaffold(topBar = { TopAppBar(title = { Text("New ERC-681 Payment") }) }) { padding ->
+    val selectedToken = state.selectedToken
+    val ready = isCheckoutReady(
+        terminalStatus = terminalStatus,
+        configurationValidated = terminalConfigurationValidated,
+        refreshing = terminalRefreshing,
+        readinessInvalidated = state.readinessInvalidated,
+        operatorWalletReady = state.operatorWalletReady,
+        hasSelectedToken = selectedToken != null,
+    )
+    if (!ready) {
+        Scaffold(topBar = { TopAppBar(title = { Text("Checkout") }) }) { padding ->
+            CheckoutBlocker(
+                status = when {
+                    state.readinessInvalidated -> TerminalSetupStatus.ERROR
+                    terminalStatus == TerminalSetupStatus.READY &&
+                        (terminalRefreshing || !terminalConfigurationValidated) ->
+                        TerminalSetupStatus.READY
+                    terminalStatus == TerminalSetupStatus.READY -> TerminalSetupStatus.ERROR
+                    else -> terminalStatus
+                },
+                statusMessage = when {
+                    state.readinessInvalidated -> state.repositoryFailure
+                    terminalStatus == TerminalSetupStatus.READY -> null
+                    else -> terminalStatusMessage
+                },
+                onOpenSettings = onOpenSettings,
+                modifier = Modifier.fillMaxSize().padding(padding).padding(20.dp),
+            )
+        }
+        return
+    }
+    CheckoutReadyScreen(
+        amount = state.amount,
+        token = requireNotNull(selectedToken),
+        tokens = state.tokens,
+        networkName = terminalNetworkName,
+        chainId = terminalChainId,
+        error = state.error,
+        isCreating = state.isCreating,
+        onAmountChanged = viewModel::updateAmount,
+        onTokenSelected = viewModel::selectToken,
+        onCreateInvoice = viewModel::createInvoice,
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun CheckoutReadyScreen(
+    amount: String,
+    token: PaymentToken,
+    tokens: List<PaymentToken>,
+    networkName: String,
+    chainId: Long,
+    error: String?,
+    isCreating: Boolean,
+    onAmountChanged: (String) -> Unit,
+    onTokenSelected: (PaymentToken) -> Unit,
+    onCreateInvoice: () -> Unit,
+) {
+    val displayAmount = checkoutAmountDisplay(amount, token.decimals)
+    val amountValid = isSubmittableCheckoutAmount(amount, token.decimals)
+    Scaffold(
+        topBar = { TopAppBar(title = { Text("Checkout") }) },
+        bottomBar = {
+            CheckoutActionBar(
+                amount = displayAmount,
+                tokenSymbol = token.symbol,
+                isCreating = isCreating,
+                enabled = amountValid && !isCreating,
+                onClick = onCreateInvoice,
+            )
+        },
+    ) { padding ->
         Column(
-            modifier = Modifier.fillMaxSize().padding(padding).padding(24.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text(
-                if (state.amount.isBlank()) "0.00" else state.amount,
-                style = MaterialTheme.typography.displayLarge
+            CheckoutStatusRow(networkName, isTestNetwork = chainId == 84532L)
+            AmountDisplay(
+                amount = displayAmount,
+                tokenSymbol = token.symbol,
+                showFullReviewHint = checkoutActionCopy(
+                    displayAmount,
+                    token.symbol,
+                ).amountIsCondensed,
+                canClear = amount.isNotEmpty() && !isCreating,
+                onClear = { onAmountChanged("") },
             )
-            Spacer(Modifier.height(24.dp))
-            TokenSelector(state.tokens, state.selectedToken, viewModel::selectToken)
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                value = state.amount,
-                onValueChange = viewModel::updateAmount,
-                label = { Text("Amount") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
+            if (tokens.size > 1) TokenSelector(tokens, token, onTokenSelected)
+            error?.let { CheckoutError(it) }
+            CheckoutKeypad(
+                amount = amount,
+                tokenDecimals = token.decimals,
+                enabled = !isCreating,
+                onAmountChanged = onAmountChanged,
+                modifier = Modifier.fillMaxWidth().height(304.dp).padding(bottom = 10.dp),
             )
-            Spacer(Modifier.height(16.dp))
-            Text(
-                "Before displaying a QR, the app rechecks chain and deployment pins, token metadata, " +
-                    "vault authorization, the terminal gas reserve, and an empty receiver balance.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            if (!state.operatorWalletReady || !terminalReady) {
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    "Finish the two-step terminal setup in Settings first. Existing invoices and " +
-                        "History remain available even while new payments are blocked.",
-                    color = MaterialTheme.colorScheme.error
-                )
-                OutlinedButton(onClick = onRefreshTerminalStatus) {
-                    Text("Check setup readiness")
-                }
-            }
-            state.error?.let {
-                Spacer(Modifier.height(12.dp))
-                Text(it, color = MaterialTheme.colorScheme.error)
-            }
-            Spacer(Modifier.height(20.dp))
-            Button(
-                onClick = viewModel::createInvoice,
-                enabled = !state.isCreating && state.operatorWalletReady && terminalReady &&
-                    state.selectedToken != null && state.amount.isNotBlank(),
-                modifier = Modifier.fillMaxWidth().height(56.dp)
+        }
+    }
+}
+
+@Composable
+private fun CheckoutStatusRow(networkName: String, isTestNetwork: Boolean) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            shape = RoundedCornerShape(50),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (state.isCreating) {
-                    CircularProgressIndicator(strokeWidth = 2.dp)
-                    Text("  Validating chain…")
-                } else {
-                    Icon(Icons.Default.QrCode, contentDescription = null)
-                    Text("  Create payment QR")
+                Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                Text("Ready", style = MaterialTheme.typography.labelLarge)
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        Text(
+            networkName.ifBlank { "Configured network" },
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (isTestNetwork) {
+            Surface(
+                color = MaterialTheme.colorScheme.tertiaryContainer,
+                contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                shape = RoundedCornerShape(50),
+            ) {
+                Text(
+                    "TESTNET",
+                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AmountDisplay(
+    amount: String,
+    tokenSymbol: String,
+    showFullReviewHint: Boolean,
+    canClear: Boolean,
+    onClear: () -> Unit,
+) {
+    val amountScrollState = rememberScrollState()
+    LaunchedEffect(amount) {
+        withFrameNanos { }
+        amountScrollState.scrollTo(Int.MAX_VALUE)
+    }
+    val amountSize = when {
+        amount.length <= 9 -> 64.sp
+        amount.length <= 14 -> 52.sp
+        amount.length <= 20 -> 42.sp
+        else -> 32.sp
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 112.dp),
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .testTag("checkout_amount")
+                .clearAndSetSemantics {
+                    contentDescription = "Checkout amount, $amount $tokenSymbol"
+                },
+            horizontalAlignment = Alignment.End,
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(amountScrollState),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                Text(
+                    amount,
+                    textAlign = TextAlign.End,
+                    fontSize = amountSize,
+                    lineHeight = amountSize,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+            }
+            Text(
+                tokenSymbol,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (showFullReviewHint) {
+                Text(
+                    "Swipe horizontally to review the full amount",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        TextButton(
+            onClick = onClear,
+            enabled = canClear,
+            modifier = Modifier.semantics {
+                contentDescription = CLEAR_AMOUNT_ACCESSIBILITY_LABEL
+            }.testTag("checkout_clear"),
+        ) {
+            Text("Clear")
+        }
+    }
+}
+
+@Composable
+private fun CheckoutKeypad(
+    amount: String,
+    tokenDecimals: Int,
+    enabled: Boolean,
+    onAmountChanged: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val rows = listOf(
+        listOf(CheckoutKey.ONE, CheckoutKey.TWO, CheckoutKey.THREE),
+        listOf(CheckoutKey.FOUR, CheckoutKey.FIVE, CheckoutKey.SIX),
+        listOf(CheckoutKey.SEVEN, CheckoutKey.EIGHT, CheckoutKey.NINE),
+        listOf(CheckoutKey.DECIMAL, CheckoutKey.ZERO, CheckoutKey.BACKSPACE),
+    )
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        rows.forEach { keys ->
+            Row(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                keys.forEach { key ->
+                    val next = applyCheckoutKey(amount, key, tokenDecimals)
+                    val keyEnabled = enabled && next != amount
+                    OutlinedButton(
+                        onClick = { onAmountChanged(next) },
+                        enabled = keyEnabled,
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .testTag("checkout_key_${key.name.lowercase()}")
+                            .semantics {
+                                key.accessibilityLabel()?.let { contentDescription = it }
+                            },
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                    ) {
+                        if (key == CheckoutKey.BACKSPACE) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.Backspace,
+                                contentDescription = null,
+                                modifier = Modifier.size(26.dp),
+                            )
+                        } else {
+                            Text(
+                                key.label,
+                                style = MaterialTheme.typography.headlineMedium,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CheckoutActionBar(
+    amount: String,
+    tokenSymbol: String,
+    isCreating: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val actionCopy = checkoutActionCopy(amount, tokenSymbol)
+    Surface(shadowElevation = 4.dp) {
+        Button(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+                .heightIn(min = 56.dp)
+                .testTag("checkout_cta"),
+            shape = RoundedCornerShape(18.dp),
+        ) {
+            Row(
+                modifier = Modifier.clearAndSetSemantics {
+                    contentDescription = actionCopy.accessibilityLabel
+                },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (isCreating) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                    Text("  Validating chain…")
+                } else {
+                    Icon(Icons.Default.QrCode, contentDescription = null)
+                    Text("  ${actionCopy.visibleLabel}")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun CheckoutBlocker(
+    status: TerminalSetupStatus,
+    statusMessage: String?,
+    onOpenSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val copy = checkoutBlockerCopy(status, statusMessage)
+    Box(
+        modifier = modifier
+            .testTag("checkout_blocker_scroll")
+            .verticalScroll(rememberScrollState()),
+        contentAlignment = Alignment.Center,
+    ) {
+        Card(Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalAlignment = Alignment.Start,
+            ) {
+                Icon(
+                    Icons.Default.ErrorOutline,
+                    contentDescription = null,
+                    modifier = Modifier.size(32.dp),
+                    tint = MaterialTheme.colorScheme.error,
+                )
+                Text(copy.title, style = MaterialTheme.typography.headlineSmall)
+                Text(copy.detail, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Button(
+                    onClick = onOpenSettings,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 52.dp)
+                        .testTag("checkout_blocker_action"),
+                ) {
+                    Icon(Icons.Default.Settings, contentDescription = null)
+                    Text("  ${copy.actionLabel}")
+                }
+            }
+        }
+    }
+}
+
+internal data class CheckoutBlockerCopy(
+    val title: String,
+    val detail: String,
+    val actionLabel: String,
+)
+
+internal fun checkoutBlockerCopy(
+    status: TerminalSetupStatus,
+    statusMessage: String? = null,
+): CheckoutBlockerCopy {
+    val (title, detail) = when (status) {
+        TerminalSetupStatus.CREATE_WALLET -> "Create terminal wallet" to
+            "Create the device-local operator wallet before accepting payments."
+        TerminalSetupStatus.SET_ADMIN_PIN -> "Set an admin PIN" to
+            "Protect setup controls with the terminal's local admin PIN."
+        TerminalSetupStatus.SCAN_PORTAL -> "Connect the merchant portal" to
+            "Authorize this terminal, then scan the unified setup QR."
+        TerminalSetupStatus.PROVISIONING -> "Validating terminal setup" to
+            "Wait while the portal configuration is checked on-chain."
+        TerminalSetupStatus.AWAITING_AUTHORIZATION -> "Authorize this terminal" to
+            "Confirm the operator authorization in the merchant portal."
+        TerminalSetupStatus.AWAITING_GAS -> "Fund terminal gas" to
+            "Send at least 0.0001 native currency to the operator funding address."
+        TerminalSetupStatus.READY -> "Refreshing terminal status" to
+            "Checkout will unlock after the fresh on-chain validation completes."
+        TerminalSetupStatus.ERROR -> "Terminal setup needs attention" to
+            (statusMessage ?: "Open Settings to review the terminal status and resolve the issue.")
+    }
+    val actionLabel = when (status) {
+        TerminalSetupStatus.CREATE_WALLET,
+        TerminalSetupStatus.SET_ADMIN_PIN,
+        TerminalSetupStatus.SCAN_PORTAL,
+        -> "Finish terminal setup"
+        else -> "Open Settings"
+    }
+    return CheckoutBlockerCopy(title, detail, actionLabel)
+}
+
+@Composable
+private fun CheckoutError(message: String) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Text(
+            message,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 }
 
@@ -122,28 +527,28 @@ fun InvoiceScreen(
 private fun TokenSelector(
     tokens: List<PaymentToken>,
     selected: PaymentToken?,
-    onSelected: (PaymentToken) -> Unit
+    onSelected: (PaymentToken) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     ExposedDropdownMenuBox(
         expanded = expanded,
         onExpandedChange = { expanded = it },
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth(),
     ) {
         OutlinedTextField(
             value = selected?.let { "${it.symbol} · ${short(it.address)}" } ?: "",
             onValueChange = {},
             readOnly = true,
-            label = { Text("ERC-20 token") },
-            placeholder = { Text(if (tokens.isEmpty()) "Add a token in Settings" else "Select token") },
+            label = { Text("Payment token") },
+            placeholder = { Text("Select token") },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
-            modifier = Modifier.fillMaxWidth().menuAnchor(MenuAnchorType.PrimaryNotEditable)
+            modifier = Modifier.fillMaxWidth().menuAnchor(MenuAnchorType.PrimaryNotEditable),
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             tokens.forEach { token ->
                 DropdownMenuItem(
                     text = { Text("${token.symbol} (${token.decimals}) · ${short(token.address)}") },
-                    onClick = { onSelected(token); expanded = false }
+                    onClick = { onSelected(token); expanded = false },
                 )
             }
         }
