@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.openpasskey.terminal.chain.ChainConfig
+import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.chain.resolvedPaymentProfiles
 import com.openpasskey.terminal.chain.selectedPaymentProfile
@@ -110,19 +111,7 @@ class InvoiceViewModel(
         viewModelScope.launch {
             try {
                 val configuration = repository.selectPaymentProfile(profile.id)
-                val selected = requireNotNull(configuration.selectedPaymentProfile())
-                val refreshed = _createState.value
-                _createState.value = refreshed.copy(
-                    amount = refreshed.amount.takeIf {
-                        isPotentialCheckoutAmount(it, selected.token.decimals)
-                    }.orEmpty(),
-                    profiles = configuration.resolvedPaymentProfiles(),
-                    selectedProfile = selected,
-                    error = null,
-                    repositoryFailure = null,
-                    profileSelectionPending = true,
-                    profileSelectionSequence = refreshed.profileSelectionSequence + 1,
-                )
+                _createState.value = _createState.value.afterProfileSelection(configuration)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -247,6 +236,22 @@ class InvoiceViewModel(
 internal fun CreateInvoiceState.withEditedAmount(value: String): CreateInvoiceState = copy(
     amount = value,
     error = repositoryFailure,
+)
+
+/**
+ * A profile change always changes the sale's currency context, even when the two tokens happen to
+ * use the same decimals. Clear the entered amount so a cashier must deliberately enter it again.
+ */
+internal fun CreateInvoiceState.afterProfileSelection(
+    configuration: TerminalConfigSnapshot,
+): CreateInvoiceState = copy(
+    amount = "",
+    profiles = configuration.resolvedPaymentProfiles(),
+    selectedProfile = requireNotNull(configuration.selectedPaymentProfile()),
+    error = null,
+    repositoryFailure = null,
+    profileSelectionPending = true,
+    profileSelectionSequence = profileSelectionSequence + 1,
 )
 
 internal fun CreateInvoiceState.withRepositoryFailure(message: String): CreateInvoiceState = copy(

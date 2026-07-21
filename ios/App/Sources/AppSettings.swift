@@ -242,6 +242,12 @@ struct AppPaymentProfile: Codable, Equatable, Identifiable {
     }
 }
 
+/// Non-secret metadata retained until the app tells the merchant that a legacy safety policy was
+/// raised to the current compiled network minimum.
+struct AppSettingsMigrationNotice: Codable, Equatable {
+    let adjustedConfirmationProfileIDs: [String]
+}
+
 struct AppSettings: Codable, Equatable {
     private static let schemaVersion = 3
     static let maximumPaymentProfileCount = TerminalPaymentProfileCatalog.maximumProfileCount
@@ -249,11 +255,13 @@ struct AppSettings: Codable, Equatable {
     private(set) var paymentProfiles: [AppPaymentProfile]
     var selectedPaymentProfileID: String?
     private var fallbackProfile: AppPaymentProfile
+    private(set) var migrationNotice: AppSettingsMigrationNotice?
 
     init() {
         paymentProfiles = []
         selectedPaymentProfileID = nil
         fallbackProfile = AppPaymentProfile()
+        migrationNotice = nil
     }
 
     var selectedPaymentProfile: AppPaymentProfile? {
@@ -375,6 +383,9 @@ struct AppSettings: Codable, Equatable {
         } else {
             candidate.fallbackProfile = AppPaymentProfile()
         }
+        candidate.retainMigrationNotice(
+            forProfileIDs: Set(candidate.paymentProfiles.map(\.id))
+        )
         return candidate
     }
 
@@ -422,7 +433,23 @@ struct AppSettings: Codable, Equatable {
         candidate.paymentProfiles.removeAll()
         candidate.selectedPaymentProfileID = nil
         candidate.fallbackProfile.provisionedOperatorAddress = nil
+        candidate.migrationNotice = nil
         return candidate
+    }
+
+    mutating func acknowledgeMigrationNotice() {
+        migrationNotice = nil
+    }
+
+    /// Migration acknowledgement is presentation metadata, not payment-routing configuration.
+    /// AppModel uses this comparison to keep already validated readiness intact when only that
+    /// notice changes.
+    func hasSamePaymentConfiguration(as other: AppSettings) -> Bool {
+        var lhs = self
+        var rhs = other
+        lhs.migrationNotice = nil
+        rhs.migrationNotice = nil
+        return lhs == rhs
     }
 
     func operatorFundingPayload(for operatorAddress: EthereumAddress) -> String? {
@@ -478,6 +505,7 @@ struct AppSettings: Codable, Equatable {
         case selectedPaymentProfileID
         case confirmationBlocks
         case fallbackProfile
+        case migrationNotice
 
         // v1 flat settings retained for migration and downgrade visibility.
         case rpcURL
@@ -494,6 +522,8 @@ struct AppSettings: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let storedSchemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion)
+        let isLegacySchema = (storedSchemaVersion ?? 1) < Self.schemaVersion
         let legacyConfirmationBlocks = try container.decodeIfPresent(
             String.self,
             forKey: .confirmationBlocks
@@ -566,6 +596,26 @@ struct AppSettings: Codable, Equatable {
                 ?? Self.defaultConfirmationBlocks(for: fallbackProfile)
         }
 
+        if isLegacySchema {
+            var adjustedProfileIDs = Set<String>()
+            for index in paymentProfiles.indices {
+                if Self.raiseLegacyConfirmationFloor(for: &paymentProfiles[index]) {
+                    adjustedProfileIDs.insert(paymentProfiles[index].id)
+                }
+            }
+            _ = Self.raiseLegacyConfirmationFloor(for: &fallbackProfile)
+            migrationNotice = adjustedProfileIDs.isEmpty
+                ? nil
+                : AppSettingsMigrationNotice(
+                    adjustedConfirmationProfileIDs: adjustedProfileIDs.sorted()
+                )
+        } else {
+            migrationNotice = try container.decodeIfPresent(
+                AppSettingsMigrationNotice.self,
+                forKey: .migrationNotice
+            )
+        }
+
         let identifiers = paymentProfiles.map(\.id)
         guard paymentProfiles.count <= Self.maximumPaymentProfileCount,
               Set(identifiers).count == identifiers.count
@@ -579,6 +629,13 @@ struct AppSettings: Codable, Equatable {
         if paymentProfiles.isEmpty {
             selectedPaymentProfileID = nil
         } else if selectedPaymentProfileID == nil {
+            guard isLegacySchema else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .selectedPaymentProfileID,
+                    in: container,
+                    debugDescription: "Current terminal payment catalog is missing its selection"
+                )
+            }
             selectedPaymentProfileID = paymentProfiles[0].id
         } else if selectedPaymentProfile == nil {
             throw DecodingError.dataCorruptedError(
@@ -620,6 +677,7 @@ struct AppSettings: Codable, Equatable {
         // catalog-wide compatibility key whenever a profile carries its own value.
         try container.encode(confirmationBlocks, forKey: .confirmationBlocks)
         try container.encode(fallbackProfile, forKey: .fallbackProfile)
+        try container.encodeIfPresent(migrationNotice, forKey: .migrationNotice)
 
         // Keep the selected route visible to older builds while v2 remains forward-migratable.
         let legacy = displayedPaymentProfile
@@ -643,6 +701,30 @@ struct AppSettings: Codable, Equatable {
               let known = TerminalKnownChainProfile.profile(for: chainID)
         else { return "2" }
         return String(known.defaultConfirmationBlocks)
+    }
+
+    private mutating func retainMigrationNotice(forProfileIDs retainedIDs: Set<String>) {
+        guard let migrationNotice else { return }
+        let retained = migrationNotice.adjustedConfirmationProfileIDs
+            .filter(retainedIDs.contains)
+        self.migrationNotice = retained.isEmpty
+            ? nil
+            : AppSettingsMigrationNotice(adjustedConfirmationProfileIDs: retained)
+    }
+
+    /// Returns true only when a previously valid positive legacy value was raised to the floor.
+    /// Zero, malformed, unknown-chain, and current-schema values remain fail-closed.
+    private static func raiseLegacyConfirmationFloor(
+        for profile: inout AppPaymentProfile
+    ) -> Bool {
+        guard let chainID = UInt64(profile.chainID),
+              let known = TerminalKnownChainProfile.profile(for: chainID),
+              let current = UInt64(profile.confirmationBlocks),
+              current > 0,
+              current < known.minimumConfirmationBlocks
+        else { return false }
+        profile.confirmationBlocks = String(known.minimumConfirmationBlocks)
+        return true
     }
 }
 
@@ -674,6 +756,11 @@ enum AppPreferences {
         guard let data = UserDefaults.standard.data(forKey: settingsKey),
               let value = try? JSONDecoder().decode(AppSettings.self, from: data)
         else { return AppSettings() }
+        // Make the normalized v3 value durable immediately. The notice remains pending until the
+        // presentation layer explicitly acknowledges it after informing the merchant.
+        if value.migrationNotice != nil {
+            _ = saveSettings(value)
+        }
         return value
     }
 

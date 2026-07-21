@@ -122,6 +122,39 @@ final class PaymentProfileTests: XCTestCase {
         XCTAssertNil(empty.selected)
     }
 
+    func testRemovingSelectedProfileReselectsFirstRemainingInsertion() throws {
+        // The first ID intentionally sorts after the second. Every host and SDK uses catalog
+        // insertion order rather than independently sorting chain or address identifiers.
+        let first = try makeProfile(
+            chainID: 84_532,
+            vault: "0xffffffffffffffffffffffffffffffffffffffff",
+            token: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            symbol: "AUDM"
+        )
+        let second = try makeProfile(
+            chainID: 84_532,
+            vault: "0x1111111111111111111111111111111111111111",
+            token: "0x2222222222222222222222222222222222222222",
+            symbol: "USDC"
+        )
+        let third = try makeProfile(
+            chainID: 11_155_111,
+            vault: "0x3333333333333333333333333333333333333333",
+            token: "0x4444444444444444444444444444444444444444",
+            symbol: "EURC"
+        )
+        let catalog = try TerminalPaymentProfileCatalog(
+            profiles: [first, second, third],
+            selectedProfileID: third.id
+        )
+
+        let remaining = try catalog.removing(id: third.id)
+
+        XCTAssertEqual(remaining.profiles, [first, second])
+        XCTAssertEqual(remaining.selected, first)
+        XCTAssertEqual(try remaining.removing(id: second.id).selected, first)
+    }
+
     func testCatalogRejectsMissingSelectionAndInvalidDecodedState() throws {
         let first = try makeProfile(
             chainID: 84_532,

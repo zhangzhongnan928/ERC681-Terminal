@@ -57,12 +57,12 @@ import com.openpasskey.terminal.ui.components.AddressScannerDialog
 import com.openpasskey.terminal.ui.components.ProvisioningScannerDialog
 import com.openpasskey.terminal.ui.components.QRCodeView
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
+import com.openpasskey.terminal.provisioning.formatNativeCurrencyAmount
 import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.viewmodel.SettingsState
 import com.openpasskey.terminal.viewmodel.SettingsViewModel
 import com.openpasskey.terminal.viewmodel.TerminalSetupStatus
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
-import java.math.BigDecimal
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -170,12 +170,7 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
             onDismissRequest = { profilePendingRemoval = null },
             title = { Text("Remove payment profile?") },
             text = {
-                Text(
-                    "Remove ${profile.token.symbol} on ${profile.networkName} for vault " +
-                        "${profile.vaultAddress} and token ${profile.token.address} from future " +
-                        "checkouts? Existing invoices, payment monitoring, and settlement history " +
-                        "keep their immutable network, vault, and token snapshots.",
-                )
+                Text(paymentProfileRemovalConfirmationMessage(profile, state.paymentProfiles.size))
             },
             confirmButton = {
                 Button(onClick = {
@@ -272,6 +267,22 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                     )
                 }
             }
+            state.migrationNotice?.let { notice ->
+                item {
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(
+                            Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text("Security update applied", style = MaterialTheme.typography.titleMedium)
+                            Text(notice, style = MaterialTheme.typography.bodySmall)
+                            TextButton(onClick = viewModel::acknowledgeMigrationNotice) {
+                                Text("Acknowledge security update")
+                            }
+                        }
+                    }
+                }
+            }
             state.message?.let { message ->
                 item {
                     Text(
@@ -300,7 +311,7 @@ private fun SetupStatusCard(state: SettingsState) {
         TerminalSetupStatus.AWAITING_AUTHORIZATION -> "Awaiting portal authorization" to
             "Confirm the terminal operator transaction in the merchant portal, then refresh."
         TerminalSetupStatus.AWAITING_GAS -> "Awaiting terminal gas" to
-            "Send at least ${formatNativeBalance(state.minimumOperatorNativeReserveWei, state.nativeCurrencyDecimals, state.nativeCurrencySymbol)} to the funding address below."
+            "Send at least ${formatNativeCurrencyAmount(state.minimumOperatorNativeReserveWei, state.nativeCurrencyDecimals, state.nativeCurrencySymbol)} to the funding address below."
         TerminalSetupStatus.READY -> "Terminal ready" to
             "Configuration, operator authorization, and minimum gas reserve are valid."
         TerminalSetupStatus.ERROR -> "Setup needs attention" to
@@ -394,7 +405,7 @@ private fun OperatorWalletCard(
                         )
                     }
                     Text(
-                        "${state.nativeCurrencySymbol} balance: ${state.operatorBalanceWei?.let { formatNativeBalance(it, state.nativeCurrencyDecimals, state.nativeCurrencySymbol) } ?: "Not checked"}",
+                        "${state.nativeCurrencySymbol} balance: ${state.operatorBalanceWei?.let { formatNativeCurrencyAmount(it, state.nativeCurrencyDecimals, state.nativeCurrencySymbol) } ?: "Not checked"}",
                     )
                     Text(
                         "Vault authorization: ${when (state.operatorAuthorized) {
@@ -689,6 +700,18 @@ private fun PinField(label: String, value: String, onValueChange: (String) -> Un
     )
 }
 
-private fun formatNativeBalance(wei: String, decimals: Int, symbol: String): String = runCatching {
-    BigDecimal(wei).movePointLeft(decimals).stripTrailingZeros().toPlainString() + " " + symbol
-}.getOrDefault("Unknown")
+internal fun paymentProfileRemovalConfirmationMessage(
+    profile: TerminalPaymentProfile,
+    configuredProfileCount: Int,
+): String {
+    val consequence = if (configuredProfileCount == 1) {
+        " Removing this last payment profile disables Checkout and returns the terminal to setup " +
+            "until a portal payment profile is added."
+    } else {
+        ""
+    }
+    return "Remove ${profile.token.symbol} on ${profile.networkName} for vault " +
+        "${profile.vaultAddress} and token ${profile.token.address} from future checkouts?" +
+        consequence + " Existing invoices, payment monitoring, and settlement history keep their " +
+        "immutable network, vault, and token snapshots."
+}

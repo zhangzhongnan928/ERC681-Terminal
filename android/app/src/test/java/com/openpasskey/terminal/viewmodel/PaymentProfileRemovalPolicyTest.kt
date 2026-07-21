@@ -1,5 +1,7 @@
 package com.openpasskey.terminal.viewmodel
 
+import com.openpasskey.terminal.chain.PaymentToken
+import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -14,6 +16,24 @@ import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 
 class PaymentProfileRemovalPolicyTest {
+    @Test
+    fun lastProfileRemovalSuccessExplainsCheckoutIsUnavailableUntilSetup() {
+        val message = paymentProfileRemovalSuccessMessage(profile(), remainingProfileCount = 0)
+
+        assertTrue(message.contains("No payment profiles remain"))
+        assertTrue(message.contains("Checkout is unavailable"))
+        assertTrue(message.contains("add a portal payment profile in setup"))
+        assertTrue(message.contains("Existing invoices and settlements are unchanged"))
+    }
+
+    @Test
+    fun removalWithProfilesRemainingDoesNotClaimCheckoutIsUnavailable() {
+        val message = paymentProfileRemovalSuccessMessage(profile(), remainingProfileCount = 2)
+
+        assertTrue(message.contains("2 payment profile(s) remain"))
+        assertFalse(message.contains("Checkout is unavailable"))
+    }
+
     @Test
     fun removalWaitsUntilInvoicePublicationLeavesLifecycleGate() = runBlocking {
         val gate = TerminalLifecycleGate()
@@ -57,4 +77,20 @@ class PaymentProfileRemovalPolicyTest {
             events,
         )
     }
+
+    private fun profile() = TerminalPaymentProfile(
+        networkName = "Base Sepolia",
+        rpcUrl = "https://sepolia.base.org",
+        chainId = 84_532,
+        factoryAddress = "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
+        receiverImplementationAddress = "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
+        vaultAddress = "0x1111111111111111111111111111111111111111",
+        confirmationBlocks = 2,
+        token = PaymentToken(
+            "0x2222222222222222222222222222222222222222",
+            "AUDM",
+            18,
+        ),
+        protocolVersion = "1.4.1",
+    )
 }

@@ -28,6 +28,7 @@ import com.openpasskey.terminal.settlement.SettlementReceipt
 import com.openpasskey.terminal.settlement.SweepProofClassification
 import com.openpasskey.terminal.settlement.VerifiedSweep
 import com.openpasskey.terminal.settlement.Web3jSettlementChainClient
+import com.openpasskey.terminal.settlement.requireSameSettlementBatchSnapshot
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
 import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
 import com.openpasskey.terminal.wallet.OperatorWalletStore
@@ -245,20 +246,9 @@ class SettlementRepository(
             invoice.invoiceId.lowercase() to previouslyProvenSwept(invoice)
         }
         require(first.hasSettlementSnapshot()) { "Invoice is missing its immutable network snapshot" }
+        requireSameSettlementBatchSnapshot(invoices)
         invoices.forEach { invoice ->
             require(invoice.hasSettlementSnapshot()) { "Invoice ${invoice.invoiceId} has no network snapshot" }
-            require(invoice.chainId == first.chainId && invoice.rpcUrl == first.rpcUrl &&
-                invoice.networkName == first.networkName &&
-                invoice.vaultAddress.equals(first.vaultAddress, true) &&
-                invoice.token.equals(first.token, true) &&
-                invoice.factoryAddress.equals(first.factoryAddress, true) &&
-                invoice.receiverImplementationAddress.equals(
-                    first.receiverImplementationAddress,
-                    true,
-                ) &&
-                invoice.tokenDecimals == first.tokenDecimals &&
-                invoice.tokenSymbol == first.tokenSymbol
-            ) { "Batch invoices must use the same network, vault, and token snapshot" }
             val previouslyProven = previouslyProvenByInvoice.getValue(invoice.invoiceId.lowercase())
             requireSettlementObservation(invoice, previouslyProven)
             require(!EvmAddress.parse(invoice.receiver).isZero) { "Invoice receiver must not be zero" }
@@ -682,7 +672,8 @@ class SettlementRepository(
                 invoice.vaultAddress.equals(prepared.vaultAddress, true) &&
                 invoice.token.equals(prepared.tokenAddress, true) &&
                 invoice.tokenSymbol == prepared.tokenSymbol &&
-                invoice.tokenDecimals == prepared.tokenDecimals
+                invoice.tokenDecimals == prepared.tokenDecimals &&
+                invoice.confirmationBlocks == prepared.requiredConfirmations
             ) { "Historical invoice snapshot changed after settlement review" }
             requirePinnedHistoricalInvoiceSnapshot(invoice)
         }

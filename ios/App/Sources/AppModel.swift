@@ -28,6 +28,7 @@ final class AppModel: ObservableObject {
     @Published var settings: AppSettings {
         didSet {
             AppPreferences.saveSettings(settings)
+            guard !settings.hasSamePaymentConfiguration(as: oldValue) else { return }
             validatedConfigurationFingerprint = nil
             validationMessage = "On-chain validation required"
             settlementCoordinator = nil
@@ -130,9 +131,28 @@ final class AppModel: ObservableObject {
 
     var canAccessAdmin: Bool { !adminPINConfigured || adminUnlocked }
 
+    var pendingSettingsMigrationMessage: String? {
+        settings.migrationNotice.map(Self.migrationNoticeMessage)
+    }
+
+    func acknowledgeSettingsMigrationNotice() {
+        guard settings.migrationNotice != nil else { return }
+        var updated = settings
+        updated.acknowledgeMigrationNotice()
+        settings = updated
+    }
+
     var operatorPairingPayload: String? {
         guard let operatorAddress else { return nil }
         return try? TerminalOperatorPairingPayload.encode(address: operatorAddress)
+    }
+
+    private static func migrationNoticeMessage(
+        _ notice: AppSettingsMigrationNotice
+    ) -> String {
+        let count = notice.adjustedConfirmationProfileIDs.count
+        return "Safety update: confirmation depth was raised to the compiled network minimum "
+            + "for \(count) legacy payment profile\(count == 1 ? "" : "s")."
     }
 
     var operatorFundingPayload: String? {
@@ -578,7 +598,7 @@ final class AppModel: ObservableObject {
             // compromised endpoint could otherwise report zero for a funded operator address.
             // Check every network enabled by this app build, not only currently saved profiles:
             // an admin may have removed the last profile for a chain that still holds operator gas.
-            let resetConfigurations = try TerminalKnownChainProfile.all.map { trustedProfile in
+            let resetTargets = try TerminalKnownChainProfile.all.map { trustedProfile in
                 let operational = operationalConfigurations.first {
                     $0.chainID == trustedProfile.chainID
                 }
@@ -592,7 +612,7 @@ final class AppModel: ObservableObject {
                     symbol: "RESET",
                     decimals: 18
                 )
-                return try TerminalConfiguration(
+                let configuration = try TerminalConfiguration(
                     chainID: trustedProfile.chainID,
                     rpcEndpoints: [trustedProfile.rpcEndpoint],
                     protocolVersion: trustedProfile.protocolVersion,
@@ -602,42 +622,71 @@ final class AppModel: ObservableObject {
                         ?? .init(requiredBlocks: trustedProfile.defaultConfirmationBlocks),
                     create2TestVector: trustedProfile.create2TestVector
                 )
+                return (
+                    configuration: configuration,
+                    network: OperatorResetNetworkContext(trustedProfile)
+                )
             }
-            let readResetBalances: @Sendable () async throws -> [OperatorNativeBalanceSnapshot]
+            let readResetBalances: @Sendable () async throws -> [OperatorResetNetworkBalance]
             if let operatorResetBalanceReader {
                 readResetBalances = {
-                    var snapshots = [OperatorNativeBalanceSnapshot]()
-                    for configuration in resetConfigurations {
-                        snapshots.append(
-                            try await operatorResetBalanceReader(configuration, operatorAddress)
-                        )
+                    var balances = [OperatorResetNetworkBalance]()
+                    for target in resetTargets {
+                        do {
+                            let snapshot = try await operatorResetBalanceReader(
+                                target.configuration,
+                                operatorAddress
+                            )
+                            balances.append(OperatorResetNetworkBalance(
+                                network: target.network,
+                                snapshot: snapshot
+                            ))
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch {
+                            throw OperatorResetSafety.networkReadFailure(
+                                error,
+                                network: target.network
+                            )
+                        }
                     }
-                    return snapshots
+                    return balances
                 }
             } else {
-                let coordinators = try resetConfigurations.map { configuration in
+                let coordinators = try resetTargets.map { target in
                     (
-                        configuration,
+                        target,
                         try coordinator(
-                            configuration: configuration,
+                            configuration: target.configuration,
                             operatorAddress: operatorAddress
                         )
                     )
                 }
                 readResetBalances = {
-                    var snapshots = [OperatorNativeBalanceSnapshot]()
-                    for (configuration, resetCoordinator) in coordinators {
-                        snapshots.append(
-                            try await resetCoordinator.resetSafetyBalances(
-                                expectedChainID: configuration.chainID
+                    var balances = [OperatorResetNetworkBalance]()
+                    for (target, resetCoordinator) in coordinators {
+                        do {
+                            let snapshot = try await resetCoordinator.resetSafetyBalances(
+                                expectedChainID: target.configuration.chainID
                             )
-                        )
+                            balances.append(OperatorResetNetworkBalance(
+                                network: target.network,
+                                snapshot: snapshot
+                            ))
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch {
+                            throw OperatorResetSafety.networkReadFailure(
+                                error,
+                                network: target.network
+                            )
+                        }
                     }
-                    return snapshots
+                    return balances
                 }
             }
-            for snapshot in try await readResetBalances() {
-                try OperatorResetSafety.requireEmptyNativeBalance(snapshot)
+            for balance in try await readResetBalances() {
+                try OperatorResetSafety.requireEmptyNativeBalance(balance)
             }
             let sessionGate = adminSessionGate
             try await operatorWalletLifecycle.reset(
@@ -645,8 +694,8 @@ final class AppModel: ObservableObject {
                 beforeDeletion: {
                     // Re-read after device authentication so a pending withdrawal cannot make a
                     // funded key look empty during the destructive confirmation window.
-                    for snapshot in try await readResetBalances() {
-                        try OperatorResetSafety.requireEmptyNativeBalance(snapshot)
+                    for balance in try await readResetBalances() {
+                        try OperatorResetSafety.requireEmptyNativeBalance(balance)
                     }
                 },
                 deletionAuthorization: { deletion in
@@ -703,6 +752,9 @@ final class AppModel: ObservableObject {
         defer { endExclusiveOperation() }
         do {
             guard invoices.count <= 20 else { throw AppSettlementError.invalidSelection }
+            guard settlementBatchSnapshotsMatch(invoices) else {
+                throw AppSettlementError.mixedSnapshots
+            }
 
             let activeIDs = try activeSettlementInvoiceIDs()
             guard invoices.allSatisfy({ !activeIDs.contains($0.invoiceID) }) else {

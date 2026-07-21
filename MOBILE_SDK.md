@@ -1,6 +1,6 @@
 # OPK ERC-681 mobile terminal and SDK
 
-This mobile build accepts one payment rail: an ERC-20 `transfer` requested by an ERC-681 QR code. A terminal may store multiple EVM payment profiles, where each profile binds one known network, vault, and token; a cashier selects exactly one profile per invoice. The Android and iOS apps create invoices, render the payment QR, and observe token balances. Their cameras can import individual contract and token addresses in Settings or scan the separate strict `opk-terminal:provision` setup payload; payment QR payloads are rejected and never imported or acted on. The reusable payment SDKs remain keyless and read-only. Each native app also has an isolated, device-local operator module that can submit only a constrained `ClearingVault.sweepSessions` transaction after payment confirmation.
+This mobile build accepts one payment rail: an ERC-20 `transfer` requested by an ERC-681 QR code. A terminal may store up to 32 EVM payment profiles, where each profile binds one known network, vault, and token; the Android app, iOS app, Kotlin catalog, and Swift catalog enforce the same cap. A cashier selects exactly one profile per invoice. The Android and iOS apps create invoices, render the payment QR, and observe token balances. Their cameras can import individual contract and token addresses in Settings or scan the separate strict `opk-terminal:provision` setup payload; payment QR payloads are rejected and never imported or acted on. The reusable payment SDKs remain keyless and read-only. Each native app also has an isolated, device-local operator module that can submit only a constrained `ClearingVault.sweepSessions` transaction after payment confirmation.
 
 ## Safety boundary
 
@@ -89,8 +89,10 @@ The reusable SDKs never sweep the receiver. A native app may pass their data-onl
 invoice namespace. The reusable SDK does not require that namespace to have a private key. The
 shipped Android and iOS apps apply the stricter application policy described above: they always
 pass the device operator EOA public address for new invoices and fail invoice creation unless that
-wallet exists, is authorized by the selected profile's vault, and has at least `100000000000000` wei of
-native gas balance. These checks run again when preparing a settlement.
+wallet exists, is authorized by the selected profile's vault, and meets the selected network's
+compiled minimum native-gas reserve. Base Sepolia's current policy is `100000000000000` wei, or
+`0.0001 ETH`; another enabled EVM network may use a different native currency, decimals, and
+reserve. These checks run again when preparing a settlement.
 
 ## Known EVM networks
 
@@ -119,9 +121,9 @@ Creating the operator wallet establishes the terminal identity used for new invo
 make the EOA a vault operator. For each payment profile, the merchant must grant the displayed
 address with that vault's administrative `grantOperator` flow (the vault owner itself is also
 accepted), then scan its operator-bound provisioning QR. Repeated scans add or update profiles; they
-do not erase unrelated profiles. Transfer at least `0.0001 ETH` on every selected network to that
-same EOA address for gas. Until the selected profile passes all checks, the app does not create its
-invoice or customer QR.
+do not erase unrelated profiles. Fund that same EOA with at least the compiled native-gas reserve
+shown for each selected network (`0.0001 ETH` on Base Sepolia). Until the selected profile passes
+all checks, the app does not create its invoice or customer QR.
 The app shows the entire address, offers Copy, and displays this address-only funding QR:
 
 ```text
@@ -380,10 +382,11 @@ Only create or export a handoff after the terminal has a paid/overpaid observati
    confirm `grantOperator(address)` on its vault and scan that vault/token's operator-bound
    provisioning QR back on the terminal. The terminal derives and validates every deployment and
    token field before atomically adding or updating that profile.
-3. Send at least `0.0001 ETH` on each used network to the operator address for gas
-   only. Do not send customer payment tokens to it. The Settings UI displays the exact address,
-   chain, funding QR, balance, authorization state, and readiness result. Authorization and the
-   minimum balance are required before each new invoice and checked again before a sweep.
+3. Send at least the selected network's compiled native-gas reserve to the operator address for gas
+   only (`0.0001 ETH` on Base Sepolia). Do not send customer payment tokens to it. The Settings UI
+   displays the exact address, chain, funding QR, balance, authorization state, and readiness
+   result. Authorization and the per-network minimum balance are required before each new invoice
+   and checked again before a sweep.
 
 Existing invoice records preserve the invoice ID and receiver derived from their historical
 namespace; iOS also preserves that namespace per invoice. The app does not expose or reuse a global
@@ -394,7 +397,8 @@ invoice namespace.
 ### Settlement transaction lifecycle
 
 - Group only paid or overpaid invoices, or previously swept invoices with separately confirmed
-  positive late value, with the same chain, vault, and token; batches are capped.
+  positive late value, with the same immutable chain, RPC, deployment, vault, token metadata, and
+  confirmation policy; batches are capped.
 - Encode `sweepSessions(bytes32[],uint256[],address)` locally using each invoice's original expected
   raw amount. Reject empty, duplicate, mixed, zero, or corrupted inputs.
 - Check the historical invoice profile's chain, contract links, token whitelist, operator authorization, confirmed

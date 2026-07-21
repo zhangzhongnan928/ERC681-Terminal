@@ -35,7 +35,8 @@ Each successful scan atomically adds or updates the profile identified by `(chai
 and selects it; it does not delete other configured profiles. The merchant can therefore scan the
 portal setup QR for each desired vault/token combination. A sale selects exactly one stored profile,
 and an invoice never requests multiple tokens. Re-scanning the same identity refreshes its
-chain-derived metadata without creating a duplicate.
+chain-derived metadata without creating a duplicate. The iOS and Android apps and their reusable
+Swift and Kotlin catalogs all enforce a maximum of 32 profiles per terminal.
 
 ## Supported deployment
 
@@ -107,4 +108,5 @@ replacement operator on every historical vault before it can recover later payme
 native gas balance should be kept on the terminal EOA. Before an otherwise allowed reset, withdraw
 all native gas: the app uses the immutable shipped RPC endpoint to require both latest and pending
 balances to be exactly zero twice, immediately rechecking before local key deletion. RPC failure
-cancels reset. A late transfer to the retired, previously shared address can still be unrecoverable.
+cancels reset, and reset diagnostics identify the network name and chain ID that is funded or could
+not be reached. A late transfer to the retired, previously shared address can still be unrecoverable.

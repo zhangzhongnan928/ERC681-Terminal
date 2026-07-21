@@ -18,6 +18,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.math.BigInteger
@@ -25,6 +26,44 @@ import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 
 class InvoiceProfileSelectionPolicyTest {
+    @Test
+    fun staleUiProfileIdIsRejectedBeforeAmountInterpretationOrQrPublication() {
+        val profileA = profile(
+            networkName = "Base Sepolia",
+            rpcUrl = "https://sepolia.base.org",
+            chainId = 84_532,
+            factory = "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
+            implementation = "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
+            vault = "0x1111111111111111111111111111111111111111",
+            token = "0x2222222222222222222222222222222222222222",
+            symbol = "AUDM",
+            decimals = 18,
+            confirmations = 2,
+        )
+        val profileB = profile(
+            networkName = "Base Sepolia",
+            rpcUrl = "https://sepolia.base.org",
+            chainId = 84_532,
+            factory = profileA.factoryAddress,
+            implementation = profileA.receiverImplementationAddress,
+            vault = "0x3333333333333333333333333333333333333333",
+            token = "0x4444444444444444444444444444444444444444",
+            symbol = "USDC",
+            decimals = 6,
+            confirmations = 2,
+        )
+        val selectedA = snapshot(profileA, listOf(profileA, profileB))
+
+        assertEquals(profileA, requireSelectedPaymentProfile(selectedA, profileA.id))
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            requireSelectedPaymentProfile(selectedA, profileB.id)
+        }
+        assertEquals(
+            "Selected payment profile changed; review the currency and try again",
+            error.message,
+        )
+    }
+
     @Test
     fun publishedInvoicePersistsCompleteSelectedProfileBAndIgnoresLaterSelection() {
         val profileA = profile(

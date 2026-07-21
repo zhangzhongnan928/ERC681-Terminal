@@ -35,19 +35,13 @@ import com.openpasskey.terminal.data.model.Invoice
 import com.openpasskey.terminal.data.model.InvoiceStatus
 import com.openpasskey.terminal.data.model.SettlementTransaction
 import com.openpasskey.terminal.data.repository.PreparedSettlement
+import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import com.openpasskey.terminal.settlement.SettlementAbi
+import com.openpasskey.terminal.settlement.settlementBatchKey
 import com.openpasskey.terminal.ui.components.DeviceAuthentication
 import com.openpasskey.terminal.viewmodel.SettlementViewModel
 import java.math.BigDecimal
 import java.math.BigInteger
-import com.openpasskey.terminal.provisioning.KnownChainPolicy
-
-private data class SettlementGroupKey(
-    val chainId: Long,
-    val rpcUrl: String,
-    val vault: String,
-    val token: String
-)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -55,7 +49,7 @@ fun SettlementScreen(viewModel: SettlementViewModel) {
     val state by viewModel.state.collectAsState()
     val activity = LocalContext.current as? FragmentActivity
     val groups = state.readyInvoices
-        .groupBy { SettlementGroupKey(it.chainId, it.rpcUrl, it.vaultAddress.lowercase(), it.token.lowercase()) }
+        .groupBy(Invoice::settlementBatchKey)
         .values
         .flatMap { it.chunked(SettlementAbi.MAX_BATCH_SIZE) }
 

@@ -99,10 +99,13 @@ The operator wallet must exist before the app can present a new payment QR. Its 
 is the terminal identity supplied as `terminalIdentifier` for every new invoice. Vault
 authorization and native-token gas funding are checked separately before settlement; they are not
 inputs to invoice or receiver derivation. Readiness is refreshed for the selected profile whenever
-the merchant switches currency/network. The same EOA is authorized per vault and funded per chain.
+the merchant switches currency/network. The same EOA is authorized per vault and funded per chain
+to that network's compiled minimum reserve (`0.0001 ETH` on Base Sepolia; future enabled networks
+may use a different native currency, decimals, and reserve).
 Destructive reset checks native balances on every network supported by the app, including a network
-whose last local profile was removed. The full operator address remains available in Settings with
-copy and address-only QR controls.
+whose last local profile was removed. Funded and unreachable-network reset failures name the
+network and chain ID. The full operator address remains available in Settings with copy and
+address-only QR controls.
 
 Upgraded installations preserve each existing invoice's original terminal identifier, invoice ID,
 configuration snapshot, and derived receiver. Those historical records are not rewritten, and any

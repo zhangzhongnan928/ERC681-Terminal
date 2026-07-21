@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
+import com.openpasskey.terminal.provisioning.minimumOperatorNativeReserveDisplay
 import com.openpasskey.terminal.viewmodel.CheckoutKey
 import com.openpasskey.terminal.viewmodel.CLEAR_AMOUNT_ACCESSIBILITY_LABEL
 import com.openpasskey.terminal.viewmodel.InvoiceViewModel
@@ -529,8 +530,8 @@ internal fun checkoutBlockerCopy(
             if (network == null) {
                 "Send the required native gas reserve to the operator funding address."
             } else {
-                "Send at least ${network.minimumOperatorNativeReserve} wei " +
-                    "(${network.nativeCurrencySymbol}) to the operator funding address."
+                "Send at least ${network.minimumOperatorNativeReserveDisplay()} " +
+                    "to the operator funding address."
             }
         TerminalSetupStatus.READY -> "Refreshing terminal status" to
             "Checkout will unlock after the fresh on-chain validation completes."

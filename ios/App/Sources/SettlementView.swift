@@ -161,9 +161,7 @@ struct SettlementView: View {
                 confirmedCumulative: cumulative
             )
         }
-        return Dictionary(grouping: eligible) {
-            "\($0.chainID)|\($0.rpcURL)|\($0.vault.lowercased())|\($0.tokenAddress.lowercased())"
-        }
+        return groupedSettlementInvoices(eligible)
         .map { key, values in
             InvoiceSettlementGroup(
                 id: key,
@@ -172,7 +170,6 @@ struct SettlementView: View {
                 invoices: values
             )
         }
-        .sorted { $0.id < $1.id }
     }
 
     private var preparedBinding: Binding<Bool> {
@@ -293,7 +290,7 @@ private struct SettlementConfirmationView: View {
 }
 
 private struct InvoiceSettlementGroup: Identifiable {
-    let id: String
+    let id: InvoiceSettlementGroupKey
     let symbol: String
     let chainID: Int64
     let invoices: [StoredInvoice]

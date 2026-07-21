@@ -147,6 +147,19 @@ struct SettingsView: View {
                     Text("Validating on chain…")
                 }
             }
+            if let message = model.pendingSettingsMigrationMessage {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Safety policy updated", systemImage: "checkmark.shield")
+                        .font(.footnote.weight(.semibold))
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button("Acknowledge safety update") {
+                        model.acknowledgeSettingsMigrationNotice()
+                    }
+                    .font(.footnote.weight(.semibold))
+                }
+            }
             if let message = model.provisioningMessage {
                 Text(message)
                     .font(.footnote)

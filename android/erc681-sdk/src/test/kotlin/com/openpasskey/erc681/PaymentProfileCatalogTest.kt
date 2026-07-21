@@ -40,16 +40,21 @@ class PaymentProfileCatalogTest {
     }
 
     @Test
-    fun `removal preserves other profiles and reselects deterministically`() {
-        val aud = profile(84532, "11", "21", "AUD")
-        val usd = profile(8453, "12", "22", "USDC")
-        val catalog = PaymentProfileCatalog(listOf(aud, usd), usd.id)
+    fun `removal of selected profile reselects first remaining insertion`() {
+        // The first ID intentionally sorts after the second ID. Selection is insertion-based,
+        // never an address-sort rule owned by one host platform.
+        val aud = profile(84532, "ff", "ee", "AUD")
+        val usd = profile(8453, "11", "22", "USDC")
+        val eur = profile(11155111, "33", "44", "EURC")
+        val catalog = PaymentProfileCatalog(listOf(aud, usd, eur), eur.id)
 
-        val remaining = catalog.removing(usd.id)
-        val empty = remaining.removing(aud.id)
+        val remaining = catalog.removing(eur.id)
+        val stillSelected = remaining.removing(usd.id)
+        val empty = stillSelected.removing(aud.id)
 
-        assertEquals(listOf(aud), remaining.profiles)
+        assertEquals(listOf(aud, usd), remaining.profiles)
         assertEquals(aud, remaining.selected)
+        assertEquals(aud, stillSelected.selected)
         assertTrue(empty.profiles.isEmpty())
         assertEquals(null, empty.selected)
         assertFailsWith<IllegalArgumentException> { catalog.removing("missing") }

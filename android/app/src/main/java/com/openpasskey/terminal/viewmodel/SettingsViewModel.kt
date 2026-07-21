@@ -9,12 +9,15 @@ import com.openpasskey.erc681.ReadOnlyRpcClient
 import com.openpasskey.terminal.admin.AdminPinStore
 import com.openpasskey.terminal.admin.AdminPinVerification
 import com.openpasskey.terminal.chain.ChainConfig
+import com.openpasskey.terminal.chain.ChainConfigMigrationNotice
 import com.openpasskey.terminal.chain.PaymentToken
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.chain.resolvedPaymentProfiles
 import com.openpasskey.terminal.chain.hasCompleteProvisioning
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
+import com.openpasskey.terminal.provisioning.KnownChainProfile
+import com.openpasskey.terminal.provisioning.minimumOperatorNativeReserveDisplay
 import com.openpasskey.terminal.provisioning.TerminalProvisioner
 import com.openpasskey.terminal.provisioning.TerminalProvisioningPayloadCodec
 import com.openpasskey.terminal.settlement.SettlementChainClient
@@ -90,6 +93,7 @@ data class SettingsState(
     val adminRetryAfterSeconds: Long = 0,
     val refreshingOperator: Boolean = false,
     val message: String? = null,
+    val migrationNotice: String? = null,
     val isError: Boolean = false,
 )
 
@@ -171,11 +175,29 @@ class SettingsViewModel(
     private var walletCreationAuthorizationEpoch: Long? = null
     private var validatedConfiguration: TerminalConfigSnapshot? = null
     private val refreshCompletionCallbacks = mutableListOf<(Boolean) -> Unit>()
+    private var migrationNoticeMessage = run {
+        // snapshot() performs any v2 -> v3 migration before the notice is queried.
+        chainConfig.snapshot()
+        chainConfig.pendingMigrationNotice()?.let(::chainConfigMigrationNoticeMessage)
+    }
     private val _state = MutableStateFlow(load())
     val state: StateFlow<SettingsState> = _state.asStateFlow()
 
     init {
         refreshOperatorStatus()
+    }
+
+    fun acknowledgeMigrationNotice() {
+        if (migrationNoticeMessage == null) return
+        if (!chainConfig.acknowledgeMigrationNotice()) {
+            _state.value = _state.value.copy(
+                message = "Unable to save acknowledgement. The security update will remain visible.",
+                isError = true,
+            )
+            return
+        }
+        migrationNoticeMessage = null
+        _state.value = _state.value.copy(migrationNotice = null)
     }
 
     private fun load(
@@ -247,6 +269,7 @@ class SettingsViewModel(
             } else {
                 null
             },
+            migrationNotice = migrationNoticeMessage,
             isError = isError || wallet.availability == OperatorWalletAvailability.UNAVAILABLE ||
                 (config.provisioned && !operatorBindingMatches),
         )
@@ -528,10 +551,7 @@ class SettingsViewModel(
                 }
                 adminSession.lock()
                 val remaining = chainConfig.snapshot().resolvedPaymentProfiles().size
-                _state.value = load(
-                    "Removed ${removing.token.symbol} on ${removing.networkName}. " +
-                        "$remaining payment profile(s) remain. Existing invoices and settlements are unchanged.",
-                )
+                _state.value = load(paymentProfileRemovalSuccessMessage(removing, remaining))
                 if (remaining > 0) refreshOperatorStatus()
             } catch (error: Exception) {
                 _state.value = load(
@@ -665,9 +685,7 @@ class SettingsViewModel(
                         TerminalSetupStatus.AWAITING_AUTHORIZATION ->
                             "Authorize this operator address from the merchant portal."
                         TerminalSetupStatus.AWAITING_GAS ->
-                            "Authorization confirmed. Fund the operator with at least " +
-                                "${networkPolicy.minimumOperatorNativeReserve} wei " +
-                                "(${networkPolicy.nativeCurrencySymbol})."
+                            awaitingGasReadinessMessage(networkPolicy)
                         TerminalSetupStatus.READY -> "Terminal is ready to create payments."
                         else -> null
                     },
@@ -779,6 +797,32 @@ class SettingsViewModel(
     private data class OperatorChainStatus(val balance: BigInteger, val authorized: Boolean)
 
 }
+
+internal fun paymentProfileRemovalSuccessMessage(
+    removed: TerminalPaymentProfile,
+    remainingProfileCount: Int,
+): String {
+    require(remainingProfileCount >= 0) { "Remaining profile count cannot be negative" }
+    val prefix = "Removed ${removed.token.symbol} on ${removed.networkName}. "
+    return if (remainingProfileCount == 0) {
+        prefix + "No payment profiles remain. Checkout is unavailable; add a portal payment " +
+            "profile in setup before accepting payments. Existing invoices and settlements are unchanged."
+    } else {
+        prefix + "$remainingProfileCount payment profile(s) remain. " +
+            "Existing invoices and settlements are unchanged."
+    }
+}
+
+internal fun chainConfigMigrationNoticeMessage(notice: ChainConfigMigrationNotice): String {
+    val count = notice.adjustedConfirmationProfileIds.size
+    val subject = if (count == 1) "1 existing payment profile" else "$count existing payment profiles"
+    return "Confirmation requirements for $subject were increased to the network minimum during " +
+        "this update. Terminal setup was preserved; review readiness before accepting payments."
+}
+
+internal fun awaitingGasReadinessMessage(networkPolicy: KnownChainProfile): String =
+    "Authorization confirmed. Fund the operator with at least " +
+        "${networkPolicy.minimumOperatorNativeReserveDisplay()}."
 
 internal suspend fun removePaymentProfileExclusively(
     lifecycleGate: TerminalLifecycleGate,

@@ -57,6 +57,11 @@ data class TerminalConfigSnapshot(
     val selectedProfileId: String? = null,
 )
 
+/** Observable, non-secret metadata for a safety-preserving storage migration. */
+data class ChainConfigMigrationNotice(
+    val adjustedConfirmationProfileIds: Set<String>,
+)
+
 /** Non-secret, atomically stored catalog of chain/vault/token payment profiles. */
 class ChainConfig(context: Context) {
     companion object {
@@ -65,6 +70,8 @@ class ChainConfig(context: Context) {
         private const val KEY_PROVISIONED_V3 = "is_provisioned_v3"
         private const val KEY_CONFIG_JSON_V2 = "provisioned_config_v2"
         private const val KEY_PROVISIONED_V2 = "is_provisioned_v2"
+        private const val KEY_FINALITY_MIGRATION_PROFILE_IDS_V3 =
+            "finality_migration_profile_ids_v3"
 
         // Legacy per-field keys are read only to preserve the merchant's confirmation preference.
         private const val KEY_NETWORK_NAME = "network_name"
@@ -112,8 +119,18 @@ class ChainConfig(context: Context) {
 
     @Synchronized
     fun snapshot(): TerminalConfigSnapshot {
-        storedSnapshot(KEY_PROVISIONED_V3, KEY_CONFIG_JSON_V3)?.let { return it }
-        storedSnapshot(KEY_PROVISIONED_V2, KEY_CONFIG_JSON_V2)?.let { return it }
+        // Once v3 exists it is authoritative. A malformed v3 value must fail closed rather than
+        // falling back to stale v2 data that may describe a different checkout route.
+        if (prefs.getBoolean(KEY_PROVISIONED_V3, false)) {
+            return storedSnapshot(KEY_CONFIG_JSON_V3) ?: unprovisionedSnapshot()
+        }
+        if (prefs.getBoolean(KEY_PROVISIONED_V2, false)) {
+            return migrateV2Snapshot() ?: unprovisionedSnapshot()
+        }
+        return unprovisionedSnapshot()
+    }
+
+    private fun unprovisionedSnapshot(): TerminalConfigSnapshot {
         val legacyChainId = prefs.getLong(KEY_CHAIN_ID, DEFAULT_CHAIN_ID)
         val legacyRpcUrl = prefs.getString(KEY_RPC_URL, DEFAULT_RPC_URL) ?: DEFAULT_RPC_URL
         return TerminalConfigSnapshot(
@@ -133,6 +150,19 @@ class ChainConfig(context: Context) {
             provisioned = false,
         )
     }
+
+    /** Remains pending until the presentation layer acknowledges it after informing the merchant. */
+    fun pendingMigrationNotice(): ChainConfigMigrationNotice? {
+        val profileIds = prefs.getStringSet(KEY_FINALITY_MIGRATION_PROFILE_IDS_V3, null)
+            ?.toSet()
+            .orEmpty()
+        return profileIds.takeIf { it.isNotEmpty() }
+            ?.let(::ChainConfigMigrationNotice)
+    }
+
+    fun acknowledgeMigrationNotice(): Boolean = prefs.edit()
+        .remove(KEY_FINALITY_MIGRATION_PROFILE_IDS_V3)
+        .commit()
 
     /** The sole production catalog write path, with snapshot compare-and-set semantics. */
     @Synchronized
@@ -160,7 +190,13 @@ class ChainConfig(context: Context) {
     fun removeProfile(profileId: String): Boolean {
         val current = snapshot()
         val updated = current.removingPaymentProfile(profileId) ?: return clearProvisioning()
-        return persist(updated.canonicalCatalog())
+        val retainedNoticeProfileIds = pendingMigrationNotice()
+            ?.adjustedConfirmationProfileIds
+            ?.intersect(updated.resolvedPaymentProfiles().mapTo(mutableSetOf()) { it.id })
+        return persist(
+            updated.canonicalCatalog(),
+            adjustedConfirmationProfileIds = retainedNoticeProfileIds,
+        )
     }
 
     /** Admin-only reset of configuration; invoice history is intentionally untouched. */
@@ -170,16 +206,35 @@ class ChainConfig(context: Context) {
         .remove(KEY_PROVISIONED_V3)
         .remove(KEY_CONFIG_JSON_V2)
         .remove(KEY_PROVISIONED_V2)
+        .remove(KEY_FINALITY_MIGRATION_PROFILE_IDS_V3)
         .commit()
 
     fun isConfigured(): Boolean = snapshot().let { it.provisioned && it.hasCompleteProvisioning() }
 
-    private fun storedSnapshot(provisionedKey: String, jsonKey: String): TerminalConfigSnapshot? {
-        if (!prefs.getBoolean(provisionedKey, false)) return null
+    private fun storedSnapshot(jsonKey: String): TerminalConfigSnapshot? {
         val json = prefs.getString(jsonKey, null) ?: return null
         val stored = decodeSnapshot(json) ?: return null
+        // v3 is catalog-native. Never reinterpret an empty/corrupt catalog as its flattened
+        // downgrade facade, which exists only so older app versions can inspect the selection.
+        if (stored.paymentProfiles.isEmpty() || stored.selectedProfileId == null) return null
         if (!stored.provisioned || !stored.hasCompleteProvisioning()) return null
         return stored.catalogNormalized()
+    }
+
+    /**
+     * v2 accepted one confirmation on this chain. Raise only historically valid positive values
+     * to the current compiled floor, then immediately persist the canonical v3 catalog. Invalid
+     * addresses, duplicate routes, unknown chains, and other malformed data still fail closed.
+     */
+    private fun migrateV2Snapshot(): TerminalConfigSnapshot? {
+        val json = prefs.getString(KEY_CONFIG_JSON_V2, null) ?: return null
+        val stored = decodeSnapshot(json) ?: return null
+        if (!stored.provisioned) return null
+        val migration = stored.raisingLegacyConfirmationFloors() ?: return null
+        if (!migration.snapshot.hasCompleteProvisioning()) return null
+        val canonical = migration.snapshot.canonicalCatalog()
+        if (!persist(canonical, migration.adjustedProfileIds)) return null
+        return canonical
     }
 
     private fun decodeSnapshot(json: String): TerminalConfigSnapshot? = runCatching {
@@ -197,12 +252,25 @@ class ChainConfig(context: Context) {
         stored.copy(paymentProfiles = profiles, selectedProfileId = selected)
     }.getOrNull()
 
-    private fun persist(snapshot: TerminalConfigSnapshot): Boolean {
+    private fun persist(
+        snapshot: TerminalConfigSnapshot,
+        adjustedConfirmationProfileIds: Set<String>? = null,
+    ): Boolean {
         val editor = prefs.edit()
             .putString(KEY_CONFIG_JSON_V3, gson.toJson(snapshot))
             .putBoolean(KEY_PROVISIONED_V3, true)
             .remove(KEY_CONFIG_JSON_V2)
             .remove(KEY_PROVISIONED_V2)
+        if (adjustedConfirmationProfileIds != null) {
+            if (adjustedConfirmationProfileIds.isEmpty()) {
+                editor.remove(KEY_FINALITY_MIGRATION_PROFILE_IDS_V3)
+            } else {
+                editor.putStringSet(
+                    KEY_FINALITY_MIGRATION_PROFILE_IDS_V3,
+                    adjustedConfirmationProfileIds,
+                )
+            }
+        }
         LEGACY_MUTABLE_KEYS.forEach(editor::remove)
         return editor.commit()
     }
@@ -294,9 +362,42 @@ fun TerminalConfigSnapshot.removingPaymentProfile(profileId: String): TerminalCo
     if (remaining.isEmpty()) return null
     val nextId = selectedProfileId
         ?.takeIf { selected -> remaining.any { it.id == selected } }
-        ?: remaining.minBy { it.id }.id
+        ?: remaining.first().id
     return copy(paymentProfiles = remaining).selectingProfile(nextId)
 }
+
+private data class LegacyFinalityMigration(
+    val snapshot: TerminalConfigSnapshot,
+    val adjustedProfileIds: Set<String>,
+)
+
+private fun TerminalConfigSnapshot.raisingLegacyConfirmationFloors(): LegacyFinalityMigration? =
+    runCatching {
+        val profiles = resolvedPaymentProfiles()
+        require(profiles.isNotEmpty())
+        val adjustedIds = mutableSetOf<String>()
+        val adjustedProfiles = profiles.map { profile ->
+            // Zero/negative and >64 were never valid legacy preferences and remain corruption.
+            require(profile.confirmationBlocks in 1..64)
+            val floor = KnownChainPolicy.requireProfile(profile.chainId).minimumConfirmationBlocks
+            if (profile.confirmationBlocks < floor) {
+                adjustedIds += profile.id
+                profile.copy(confirmationBlocks = floor)
+            } else {
+                profile
+            }
+        }
+        val requestedSelection = selectedProfileId
+            ?.let { id -> adjustedProfiles.firstOrNull { it.id == id }?.id }
+            ?: selectedPaymentProfile()?.id
+        val selected = requireNotNull(
+            requestedSelection?.let { id -> adjustedProfiles.firstOrNull { it.id == id } },
+        )
+        LegacyFinalityMigration(
+            snapshot = copy(paymentProfiles = adjustedProfiles).selectingProfile(selected.id),
+            adjustedProfileIds = adjustedIds,
+        )
+    }.getOrNull()
 
 private fun TerminalConfigSnapshot.catalogNormalized(): TerminalConfigSnapshot {
     if (!provisioned) return this
@@ -328,6 +429,10 @@ internal fun TerminalConfigSnapshot.hasCompleteProvisioning(): Boolean = runCatc
     require(profiles.isNotEmpty())
     require(profiles.size <= ChainConfig.MAX_PAYMENT_PROFILES)
     require(profiles.map { it.id }.distinct().size == profiles.size)
+    if (paymentProfiles.isNotEmpty()) {
+        require(selectedProfileId != null)
+        require(profiles.any { it.id == selectedProfileId })
+    }
     profiles.forEach { it.requireComplete() }
     val selected = requireNotNull(selectedPaymentProfile())
     require(networkName == selected.networkName)

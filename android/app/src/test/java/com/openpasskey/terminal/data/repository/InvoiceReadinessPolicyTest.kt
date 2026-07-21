@@ -25,7 +25,7 @@ class InvoiceReadinessPolicyTest {
         assertThrows(IllegalStateException::class.java) {
             requireTerminalReadiness(config(), wallet(), ready().copy(authorized = false))
         }
-        assertThrows(IllegalStateException::class.java) {
+        val lowGas = assertThrows(IllegalStateException::class.java) {
             requireTerminalReadiness(
                 config(),
                 wallet(),
@@ -35,6 +35,8 @@ class InvoiceReadinessPolicyTest {
                 ),
             )
         }
+        org.junit.Assert.assertTrue(lowGas.message?.contains("0.0001 ETH") == true)
+        org.junit.Assert.assertFalse(lowGas.message?.contains("wei") == true)
     }
 
     @Test

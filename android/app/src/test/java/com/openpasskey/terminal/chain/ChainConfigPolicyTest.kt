@@ -116,22 +116,26 @@ class ChainConfigPolicyTest {
     }
 
     @Test
-    fun removalPreservesOtherProfilesAndDeterministicallyReSelects() {
+    fun removalPreservesOtherProfilesAndReselectsFirstInsertion() {
         val first = requireNotNull(config().selectedPaymentProfile())
         val second = first.copy(
-            vaultAddress = "0x2222222222222222222222222222222222222222",
-            token = PaymentToken("0x3333333333333333333333333333333333333333", "USDC", 6),
+            vaultAddress = "0x1111111111111111111111111111111111111111",
+            token = PaymentToken("0x2222222222222222222222222222222222222222", "USDC", 6),
         )
-        val catalog = config().upsertingProfile(
-            second,
-            requireNotNull(config().provisionedOperatorAddress),
+        val third = first.copy(
+            vaultAddress = "0x3333333333333333333333333333333333333333",
+            token = PaymentToken("0x4444444444444444444444444444444444444444", "EURC", 6),
         )
+        val operator = requireNotNull(config().provisionedOperatorAddress)
+        val catalog = config()
+            .upsertingProfile(second, operator)
+            .upsertingProfile(third, operator)
 
-        val remaining = requireNotNull(catalog.removingPaymentProfile(second.id))
+        val remaining = requireNotNull(catalog.removingPaymentProfile(third.id))
 
-        assertEquals(listOf(first), remaining.resolvedPaymentProfiles())
+        assertEquals(listOf(first, second), remaining.resolvedPaymentProfiles())
         assertEquals(first.id, remaining.selectedProfileId)
-        assertEquals(null, remaining.removingPaymentProfile(first.id))
+        assertEquals(second.id, remaining.removingPaymentProfile(first.id)?.selectedProfileId)
     }
 
     private fun config() = TerminalConfigSnapshot(

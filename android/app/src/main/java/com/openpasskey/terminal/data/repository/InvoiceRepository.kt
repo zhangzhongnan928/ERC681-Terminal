@@ -15,6 +15,7 @@ import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.chain.selectedPaymentProfile
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
+import com.openpasskey.terminal.provisioning.minimumOperatorNativeReserveDisplay
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.settlement.SettlementChainClient
 import com.openpasskey.terminal.settlement.Web3jSettlementChainClient
@@ -68,12 +69,7 @@ class InvoiceRepository(
             lifecycleGate.withExclusiveMutation {
             val settings = chainConfig.snapshot()
             require(settings.provisioned) { "Provision this terminal from the merchant portal first" }
-            val selectedProfile = requireNotNull(settings.selectedPaymentProfile()) {
-                "Select a configured payment profile"
-            }
-            require(selectedProfile.id == profileId) {
-                "Selected payment profile changed; review the currency and try again"
-            }
+            val selectedProfile = requireSelectedPaymentProfile(settings, profileId)
             val token = selectedProfile.token
             val profile = KnownChainPolicy.requireProfile(settings.chainId)
             profile.requireValidCreate2Fixture()
@@ -428,6 +424,20 @@ internal data class InvoiceReadiness(
     val nativeBalance: BigInteger,
 )
 
+/** Final UI-to-repository guard before a sale amount is interpreted and a QR is published. */
+internal fun requireSelectedPaymentProfile(
+    settings: TerminalConfigSnapshot,
+    requestedProfileId: String,
+): TerminalPaymentProfile {
+    val selectedProfile = requireNotNull(settings.selectedPaymentProfile()) {
+        "Select a configured payment profile"
+    }
+    require(selectedProfile.id == requestedProfileId) {
+        "Selected payment profile changed; review the currency and try again"
+    }
+    return selectedProfile
+}
+
 internal fun requireTerminalReadiness(
     settings: TerminalConfigSnapshot,
     wallet: OperatorWalletSnapshot,
@@ -443,8 +453,8 @@ internal fun requireTerminalReadiness(
     }
     val networkPolicy = KnownChainPolicy.requireProfile(settings.chainId)
     check(readiness.nativeBalance >= networkPolicy.minimumOperatorNativeReserve) {
-        "Fund the terminal operator with at least ${networkPolicy.minimumOperatorNativeReserve} " +
-            "wei (${networkPolicy.nativeCurrencySymbol}) before creating a payment QR"
+        "Fund the terminal operator with at least " +
+            "${networkPolicy.minimumOperatorNativeReserveDisplay()} before creating a payment QR"
     }
 }
 

@@ -137,7 +137,7 @@ class TerminalLifecycleGateTest {
             TerminalLifecycleGate(),
             OperatorResetGuard { false },
             OperatorNativeBalanceReader {
-                OperatorNativeBalances(BigInteger.ONE, BigInteger.ONE)
+                balances(BigInteger.ONE, BigInteger.ONE)
             },
             { cleared = true; true },
             { deleted = true },
@@ -173,8 +173,8 @@ class TerminalLifecycleGateTest {
             OperatorResetGuard { false },
             OperatorNativeBalanceReader {
                 reads += 1
-                if (reads == 1) OperatorNativeBalances(BigInteger.ZERO, BigInteger.ZERO)
-                else OperatorNativeBalances(BigInteger.ONE, BigInteger.ZERO)
+                if (reads == 1) balances(BigInteger.ZERO, BigInteger.ZERO)
+                else balances(BigInteger.ONE, BigInteger.ZERO)
             },
             { cleared = true; true },
             { deleted = true },
@@ -192,7 +192,7 @@ class TerminalLifecycleGateTest {
     fun pendingZeroDoesNotHideCanonicalFundsDuringReset() {
         assertThrows(IllegalStateException::class.java) {
             requireOperatorNativeBalancesEmpty(
-                OperatorNativeBalances(latest = BigInteger.ONE, pending = BigInteger.ZERO),
+                balances(latest = BigInteger.ONE, pending = BigInteger.ZERO),
             )
         }
     }
@@ -235,7 +235,7 @@ class TerminalLifecycleGateTest {
             },
         )
 
-        assertEquals(OperatorNativeBalances(BigInteger.ZERO, BigInteger.ZERO), reader.read(OPERATOR))
+        assertEquals(balances(BigInteger.ZERO, BigInteger.ZERO), reader.read(OPERATOR))
         assertEquals(
             KnownChainPolicy.enabledProfiles().map { it.rpcUrl }.toSet(),
             openedUrls.toSet(),
@@ -298,13 +298,40 @@ class TerminalLifecycleGateTest {
             },
         )
 
-        assertEquals(OperatorNativeBalances(BigInteger.valueOf(2), BigInteger.valueOf(3)), reader.read(OPERATOR))
+        assertEquals(
+            knownProfiles.map { known ->
+                OperatorNativeBalances(
+                    networkName = known.networkName,
+                    chainId = known.chainId,
+                    nativeCurrencySymbol = known.nativeCurrencySymbol,
+                    latest = BigInteger.valueOf(known.chainId % 10),
+                    pending = BigInteger.valueOf((known.chainId % 10) + 1),
+                )
+            },
+            reader.read(OPERATOR),
+        )
         assertEquals(knownProfiles.map { it.rpcUrl }.toSet(), opened.toSet())
     }
 
     private fun emptyBalanceReader() = OperatorNativeBalanceReader {
-        OperatorNativeBalances(BigInteger.ZERO, BigInteger.ZERO)
+        balances(BigInteger.ZERO, BigInteger.ZERO)
     }
+
+    private fun balances(
+        latest: BigInteger,
+        pending: BigInteger,
+        networkName: String = "Base Sepolia",
+        chainId: Long = 84532,
+        nativeCurrencySymbol: String = "ETH",
+    ) = listOf(
+        OperatorNativeBalances(
+            networkName = networkName,
+            chainId = chainId,
+            nativeCurrencySymbol = nativeCurrencySymbol,
+            latest = latest,
+            pending = pending,
+        ),
+    )
 
     private companion object {
         const val OPERATOR = "0x1111111111111111111111111111111111111111"

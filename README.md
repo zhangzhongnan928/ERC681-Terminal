@@ -4,9 +4,10 @@ ERC-20 payment terminal apps and reusable SDKs for Android and iOS. The apps dis
 ERC-681 payment QR codes, can scan QR codes to import configuration addresses, and can settle
 confirmed payments through a tightly constrained device-local operator wallet.
 
-A terminal can keep multiple payment profiles. Each profile binds one known EVM network, merchant
-vault, and ERC-20 token. The cashier chooses exactly one profile for a sale—for example AUDM on one
-vault, AUDD on another, or USDC on a third—and the resulting invoice requests only that token.
+A terminal can keep up to 32 payment profiles. Each profile binds one known EVM network, merchant
+vault, and ERC-20 token. The same cap is enforced by both native apps and both reusable SDK
+catalogs. The cashier chooses exactly one profile for a sale—for example AUDM on one vault, AUDD on
+another, or USDC on a third—and the resulting invoice requests only that token.
 
 The terminal creates a unique invoice, derives its receiver locally with CREATE2, presents a
 canonical ERC-681 QR code, and observes the receiver's ERC-20 balance through read-only JSON-RPC.
