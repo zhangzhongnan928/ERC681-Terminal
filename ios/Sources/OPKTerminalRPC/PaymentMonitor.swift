@@ -8,6 +8,68 @@ public enum PaymentMonitorError: Error, Equatable, Sendable {
     case requestChainMismatch(expected: UInt64, request: UInt64)
 }
 
+/// Classifies only failures for which repeating a read-only payment observation can recover
+/// without changing any local configuration or trust decision. Strict proof/decoding failures,
+/// cancellation, authentication failures, and network mismatches intentionally remain terminal.
+public enum PaymentMonitorRetryPolicy {
+    public static func shouldRetry(_ error: any Error) -> Bool {
+        if error is CancellationError {
+            return false
+        }
+        if error is RPCRequestDeadlineError {
+            return true
+        }
+        if let monitorError = error as? PaymentMonitorError {
+            guard case .canonicalBlockChanged = monitorError else { return false }
+            return true
+        }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut,
+                 .cannotFindHost,
+                 .cannotConnectToHost,
+                 .networkConnectionLost,
+                 .dnsLookupFailed,
+                 .notConnectedToInternet,
+                 .resourceUnavailable,
+                 .internationalRoamingOff,
+                 .callIsActive,
+                 .dataNotAllowed:
+                return true
+            case .cancelled:
+                return false
+            default:
+                return false
+            }
+        }
+        if let rpcError = error as? JSONRPCError {
+            switch rpcError {
+            case let .invalidHTTPStatus(status):
+                return status == 408
+                    || status == 425
+                    || status == 429
+                    || (500...599).contains(status)
+            case let .server(serverError):
+                // -32005 is the widely used Ethereum provider "limit exceeded" error;
+                // -32016 is used by some public providers for an over-rate-limit response.
+                return serverError.code == -32_005 || serverError.code == -32_016
+            case .remoteResponseDecodeFailure:
+                // Invalid/truncated JSON can be a transient gateway body. It never becomes
+                // payment evidence; a syntactically valid but semantically malformed proof is
+                // classified separately and remains terminal.
+                return true
+            case .malformedResponse, .mismatchedID, .batchLimitExceeded:
+                return false
+            }
+        }
+        // RPCDecodingError remains terminal: an invalid quantity, address/data word, or proof
+        // shape is not availability evidence and can indicate an incompatible endpoint or local
+        // programming error. Syntactically valid response-body decoding failures are normalized
+        // to terminal malformedResponse at the production JSON-RPC boundary.
+        return false
+    }
+}
+
 /// One immutable invoice read within a shared payment-state sample. Settlement validation uses
 /// this form so every selected invoice is bound to the same chain/head anchor and canonical
 /// block identity instead of sampling a moving head once per invoice.
@@ -142,6 +204,8 @@ public struct ReceiverFreshnessValidator: Sendable {
 }
 
 public struct PaymentMonitor: Sendable {
+    public static let defaultPollIntervalNanoseconds: UInt64 = 5_000_000_000
+
     private let rpc: any EthereumReadRPC
     public let confirmationPolicy: ConfirmationPolicy
     public let pollIntervalNanoseconds: UInt64
@@ -149,7 +213,7 @@ public struct PaymentMonitor: Sendable {
     public init(
         rpc: any EthereumReadRPC,
         confirmationPolicy: ConfirmationPolicy,
-        pollIntervalNanoseconds: UInt64 = 5_000_000_000
+        pollIntervalNanoseconds: UInt64 = PaymentMonitor.defaultPollIntervalNanoseconds
     ) {
         self.rpc = rpc
         self.confirmationPolicy = confirmationPolicy
@@ -484,10 +548,28 @@ public struct PaymentMonitor: Sendable {
                 var thresholdCursor = startingThresholdCursor
                 do {
                     while !Task.isCancelled {
-                        let observation = try await monitor.sample(
-                            request,
-                            previousThresholdCursor: thresholdCursor
-                        )
+                        let observation: PaymentObservation
+                        do {
+                            // This is an indefinite, cadence-owning stream. Never inherit one
+                            // caller-installed absolute background deadline across all samples:
+                            // once expired it could otherwise make every retry fail immediately.
+                            observation = try await RPCRequestDeadline.$current.withValue(nil) {
+                                try await monitor.sample(
+                                    request,
+                                    previousThresholdCursor: thresholdCursor
+                                )
+                            }
+                        } catch {
+                            guard PaymentMonitorRetryPolicy.shouldRetry(error) else {
+                                throw error
+                            }
+                            // Preserve the last verified cursor and retry at the normal polling
+                            // cadence. A transient sample never becomes payment evidence.
+                            try await Task.sleep(
+                                nanoseconds: monitor.pollIntervalNanoseconds
+                            )
+                            continue
+                        }
                         thresholdCursor = observation.thresholdCursor
                         continuation.yield(observation)
                         switch observation.status {

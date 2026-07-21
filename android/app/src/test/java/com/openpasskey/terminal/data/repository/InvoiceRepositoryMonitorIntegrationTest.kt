@@ -33,11 +33,15 @@ import java.util.concurrent.atomic.AtomicReference
 
 class InvoiceRepositoryMonitorIntegrationTest {
     @Test
-    fun `transient transport failure is retried and next observation is persisted`() = runBlocking {
+    fun `malformed RPC quantity is retried and next observation is persisted`() = runBlocking {
         val requestCount = AtomicInteger()
         rpcServer { requestBody ->
             if (requestCount.incrementAndGet() == 1) {
-                "not-json"
+                successfulObservationResponse(
+                    requestBody = requestBody,
+                    remoteChainId = CHAIN_ID,
+                    chainIdResult = "0x00",
+                )
             } else {
                 successfulObservationResponse(requestBody, remoteChainId = CHAIN_ID)
             }
@@ -144,14 +148,18 @@ class InvoiceRepositoryMonitorIntegrationTest {
         erc681Uri = "ethereum:$RECEIVER@$CHAIN_ID/transfer?address=$TOKEN&uint256=$EXPECTED_AMOUNT",
     )
 
-    private fun successfulObservationResponse(requestBody: String, remoteChainId: Long): String {
+    private fun successfulObservationResponse(
+        requestBody: String,
+        remoteChainId: Long,
+        chainIdResult: String = "0x${remoteChainId.toString(16)}",
+    ): String {
         val root = JsonParser.parseString(requestBody)
         val requests = if (root.isJsonArray) root.asJsonArray.toList() else listOf(root)
         val responses = requests.map { element ->
             val request = element.asJsonObject
             val method = request.get("method").asString
             val result = when (method) {
-                "eth_chainId" -> "0x${remoteChainId.toString(16)}"
+                "eth_chainId" -> chainIdResult
                 "eth_getBlockByNumber" -> blockResult()
                 "eth_call" -> "0x${EXPECTED_AMOUNT.toBigInteger().toString(16).padStart(64, '0')}"
                 else -> error("Unexpected RPC method: $method")

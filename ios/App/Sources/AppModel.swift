@@ -23,6 +23,13 @@ protocol OperatorWalletLifecycleManaging: Sendable {
 
 extension KeychainOperatorWallet: OperatorWalletLifecycleManaging {}
 
+typealias PaymentObservationSampling = @Sendable (
+    _ request: PaymentRequest,
+    _ configuration: TerminalConfiguration,
+    _ paymentCursor: PaymentConfirmationCursor?,
+    _ sweepableCursors: [PaymentConfirmationCursor]
+) async throws -> PaymentObservation
+
 enum AdminPINConfigurationState: Equatable {
     case configured
     case notConfigured
@@ -95,6 +102,8 @@ final class AppModel: ObservableObject {
     private let foregroundInvoiceReconciliationGate = ForegroundInvoiceReconciliationGate()
     private let backgroundRPCWorkGate: BackgroundRPCWorkGate
     private let backgroundRPCUnitDeadline: Duration
+    private let paymentObservationSampler: PaymentObservationSampling
+    private let paymentMonitorPollIntervalNanoseconds: UInt64
     private let validationNow: @Sendable () -> Date
     private let configurationValidationTTL: TimeInterval
     private let preparedSettlementValidationTTL: TimeInterval
@@ -129,10 +138,14 @@ final class AppModel: ObservableObject {
         configurationValidationTTL: TimeInterval = 5 * 60,
         preparedSettlementValidationTTL: TimeInterval = 60,
         interactiveBackgroundDrainTimeout: Duration = .seconds(5),
-        backgroundRPCUnitDeadline: Duration = .seconds(5)
+        backgroundRPCUnitDeadline: Duration = .seconds(5),
+        paymentObservationSampler: PaymentObservationSampling? = nil,
+        paymentMonitorPollIntervalNanoseconds: UInt64 =
+            PaymentMonitor.defaultPollIntervalNanoseconds
     ) {
         precondition(interactiveBackgroundDrainTimeout > .zero)
         precondition(backgroundRPCUnitDeadline > .zero)
+        precondition(paymentMonitorPollIntervalNanoseconds > 0)
         self.container = container
         self.operatorWallet = operatorWallet
         self.operatorWalletLifecycle = operatorWalletLifecycle ?? operatorWallet
@@ -150,6 +163,22 @@ final class AppModel: ObservableObject {
             maximumInteractiveDrainWait: interactiveBackgroundDrainTimeout
         )
         self.backgroundRPCUnitDeadline = backgroundRPCUnitDeadline
+        self.paymentObservationSampler = paymentObservationSampler
+            ?? { request, configuration, paymentCursor, sweepableCursors in
+                let rpc = try EthereumRPCClientPool.shared.client(
+                    for: configuration.rpcEndpoints[0]
+                )
+                return try await PaymentMonitor(
+                    rpc: rpc,
+                    confirmationPolicy: configuration.confirmationPolicy
+                ).sample(
+                    request,
+                    previousThresholdCursor: paymentCursor,
+                    additionalCursors: sweepableCursors,
+                    expectedChainID: configuration.chainID
+                )
+            }
+        self.paymentMonitorPollIntervalNanoseconds = paymentMonitorPollIntervalNanoseconds
         let settingsLoadResult = AppPreferences.loadSettingsResult()
         settings = settingsLoadResult.settings
         settingsRecoveryRequired = settingsLoadResult.recoveryRequired
@@ -1979,15 +2008,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func startMonitoring(_ request: PaymentRequest, configuration: TerminalConfiguration) {
+    func startMonitoring(_ request: PaymentRequest, configuration: TerminalConfiguration) {
         monitoringTask?.cancel()
         monitoringTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let rpc = try EthereumRPCClientPool.shared.client(
-                    for: configuration.rpcEndpoints[0]
-                )
-                let monitor = PaymentMonitor(rpc: rpc, confirmationPolicy: configuration.confirmationPolicy)
                 while !Task.isCancelled {
                     let cursors = try self.confirmationCursors(
                         for: request.invoiceID.hex
@@ -1998,23 +2023,23 @@ final class AppModel: ObservableObject {
                         observation = try await RPCRequestDeadline.withDeadline(
                             after: self.backgroundRPCUnitDeadline
                         ) {
-                            try await monitor.sample(
+                            try await self.paymentObservationSampler(
                                 request,
-                                previousThresholdCursor: cursors.payment,
-                                additionalCursors: cursors.sweepable.map { [$0] } ?? [],
-                                expectedChainID: configuration.chainID
+                                configuration,
+                                cursors.payment,
+                                cursors.sweepable.map { [$0] } ?? []
                             )
                         }
-                    } catch is RPCRequestDeadlineError {
-                        self.backgroundRPCWorkGate.release(token)
-                        try await Task.sleep(nanoseconds: monitor.pollIntervalNanoseconds)
-                        continue
-                    } catch let error as URLError where error.code == .timedOut {
-                        self.backgroundRPCWorkGate.release(token)
-                        try await Task.sleep(nanoseconds: monitor.pollIntervalNanoseconds)
-                        continue
                     } catch {
                         self.backgroundRPCWorkGate.release(token)
+                        if PaymentMonitorRetryPolicy.shouldRetry(error) {
+                            // Leave activeObservation and the persisted confirmation cursor at
+                            // their last verified values. A transient read is not evidence.
+                            try await Task.sleep(
+                                nanoseconds: self.paymentMonitorPollIntervalNanoseconds
+                            )
+                            continue
+                        }
                         throw error
                     }
                     self.backgroundRPCWorkGate.release(token)
@@ -2028,15 +2053,27 @@ final class AppModel: ObservableObject {
                         break
                     }
                     try await Task.sleep(
-                        nanoseconds: monitor.pollIntervalNanoseconds
+                        nanoseconds: self.paymentMonitorPollIntervalNanoseconds
                     )
                 }
             } catch is CancellationError {
+                return
+            } catch let error as URLError where error.code == .cancelled {
+                // URLSession reports task cancellation through URLError rather than
+                // CancellationError on some paths. This is intentional shutdown, not a sale
+                // failure to surface to the cashier.
                 return
             } catch {
                 self.errorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// Internal lifecycle seam used by deterministic app tests and future orderly shutdown paths.
+    /// Capturing the task first ensures a later monitor replacement cannot change what is awaited.
+    func waitForMonitoringToFinish() async {
+        let task = monitoringTask
+        await task?.value
     }
 
     private func acquireBackgroundRPCWork() async throws -> UUID {

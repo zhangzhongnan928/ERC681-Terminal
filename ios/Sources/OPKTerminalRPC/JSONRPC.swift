@@ -225,6 +225,9 @@ struct RPCServerError: Error, Hashable, Sendable, Codable {
 
 enum JSONRPCError: Error, Equatable, Sendable {
     case invalidHTTPStatus(Int)
+    /// The remote body was not syntactically valid JSON and may have been truncated or replaced
+    /// by a transient gateway response. Semantic JSON-RPC/proof violations use malformedResponse.
+    case remoteResponseDecodeFailure
     case malformedResponse
     case mismatchedID
     case batchLimitExceeded(maximum: Int)
@@ -255,7 +258,7 @@ private enum StrictJSONRPCResponseID {
         do {
             value = try JSONSerialization.jsonObject(with: data)
         } catch {
-            throw JSONRPCError.malformedResponse
+            throw JSONRPCError.remoteResponseDecodeFailure
         }
         guard let object = value as? [String: Any] else {
             throw JSONRPCError.malformedResponse
@@ -268,7 +271,7 @@ private enum StrictJSONRPCResponseID {
         do {
             value = try JSONSerialization.jsonObject(with: data)
         } catch {
-            throw JSONRPCError.malformedResponse
+            throw JSONRPCError.remoteResponseDecodeFailure
         }
         guard let objects = value as? [[String: Any]] else {
             throw JSONRPCError.malformedResponse
@@ -338,7 +341,15 @@ actor JSONRPCClient {
             throw JSONRPCError.invalidHTTPStatus(response.statusCode)
         }
         let strictID = try StrictJSONRPCResponseID.single(in: response.body)
-        let decoded = try decoder.decode(JSONRPCResponse<Result>.self, from: response.body)
+        let decoded: JSONRPCResponse<Result>
+        do {
+            decoded = try decoder.decode(JSONRPCResponse<Result>.self, from: response.body)
+        } catch {
+            // JSONSerialization already proved the body is syntactically valid JSON while
+            // extracting its strict ID. A typed decoding failure is therefore a semantic
+            // JSON-RPC/result-shape violation, not transient wire corruption.
+            throw JSONRPCError.malformedResponse
+        }
         guard decoded.jsonrpc == "2.0" else { throw JSONRPCError.malformedResponse }
         guard strictID == id, decoded.id == strictID else { throw JSONRPCError.mismatchedID }
         if let error = decoded.error { throw JSONRPCError.server(error) }
@@ -386,7 +397,12 @@ actor JSONRPCClient {
             throw JSONRPCError.invalidHTTPStatus(response.statusCode)
         }
         let strictIDs = try StrictJSONRPCResponseID.batch(in: response.body)
-        let decoded = try decoder.decode([JSONRPCBatchResponse].self, from: response.body)
+        let decoded: [JSONRPCBatchResponse]
+        do {
+            decoded = try decoder.decode([JSONRPCBatchResponse].self, from: response.body)
+        } catch {
+            throw JSONRPCError.malformedResponse
+        }
         guard decoded.count == expectedIDs.count,
               strictIDs.count == decoded.count
         else { throw JSONRPCError.malformedResponse }

@@ -369,6 +369,91 @@ private actor BatchedPaymentRPC: EthereumBatchReadRPC {
     }
 }
 
+private enum PaymentStreamFailure: Equatable, Sendable {
+    case http(Int)
+    case network(URLError.Code)
+    case canonicalReplacement
+    case wrongChain
+    case inheritedDeadline
+}
+
+/// Fails exactly the first payment observation, then serves a stable fixed-head proof. Terminal
+/// scenarios are also one-shot deliberately: if the stream retries them by mistake, the test
+/// receives a paid observation instead of the expected error.
+private actor RetryingPaymentRPC: EthereumBatchReadRPC {
+    private let failure: PaymentStreamFailure
+    private let token: EthereumAddress
+    private var observationAttempt = 0
+
+    init(failure: PaymentStreamFailure, token: EthereumAddress) {
+        self.failure = failure
+        self.token = token
+    }
+
+    func batch(_ requests: [EthereumReadBatchRequest]) async throws -> [EthereumReadBatchResult] {
+        if requests.contains(.latestBlockIdentity) {
+            observationAttempt += 1
+            if failure == .inheritedDeadline, RPCRequestDeadline.current != nil {
+                if observationAttempt == 1 {
+                    throw RPCRequestDeadlineError.expired
+                }
+                // Fail terminally on a second inherited attempt so a regression fails quickly
+                // instead of leaving the test in the exact infinite retry loop it guards.
+                throw RPCDecodingError.invalidData("stream inherited an expired deadline")
+            }
+            if observationAttempt == 1 {
+                switch failure {
+                case let .http(status):
+                    throw JSONRPCError.invalidHTTPStatus(status)
+                case let .network(code):
+                    throw URLError(code)
+                case .canonicalReplacement, .wrongChain, .inheritedDeadline:
+                    break
+                }
+            }
+        }
+
+        return try requests.map { request in
+            switch request {
+            case .chainID:
+                let chainID: UInt64 = failure == .wrongChain && observationAttempt == 1
+                    ? 1
+                    : 84_532
+                return .quantity(chainID)
+            case .blockNumber:
+                return .quantity(100)
+            case .latestBlockIdentity:
+                return .blockIdentity(number: 100, hash: fixtureBlockHash(100))
+            case let .canonicalBlockHash(block):
+                let fork: UInt64 = failure == .canonicalReplacement
+                    && observationAttempt == 1 ? 1 : 0
+                return .blockHash(fixtureBlockHash(block, fork: fork))
+            case let .call(address, data, block):
+                guard address == token,
+                      Data(data.prefix(4)) == ABI.balanceOfSelector,
+                      block == .number(100)
+                else { throw URLError(.badServerResponse) }
+                return .data(ABI.word(UInt256(1_000)))
+            case .code:
+                throw URLError(.badServerResponse)
+            }
+        }
+    }
+
+    func attempts() -> Int { observationAttempt }
+    func chainID() async throws -> UInt64 { 84_532 }
+    func blockNumber() async throws -> UInt64 { 100 }
+    func canonicalBlockHash(at blockNumber: UInt64) async throws -> Bytes32 {
+        fixtureBlockHash(blockNumber)
+    }
+    func code(at address: EthereumAddress, block: RPCBlockTag) async throws -> Data {
+        throw URLError(.unsupportedURL)
+    }
+    func call(to address: EthereumAddress, data: Data, block: RPCBlockTag) async throws -> Data {
+        throw URLError(.unsupportedURL)
+    }
+}
+
 private func fixtureBlockHash(_ block: UInt64, fork: UInt64 = 0) -> Bytes32 {
     let prefix = String(repeating: "0", count: 32)
     let forkHex = String(format: "%016llx", fork)
@@ -609,6 +694,180 @@ final class ValidationAndMonitorTests: XCTestCase {
         XCTAssertEqual(batches[0], [.chainID, .latestBlockIdentity])
         let directBlockHashReads = await rpc.directBlockHashReads
         XCTAssertEqual(directBlockHashReads, 0)
+    }
+
+    func testObservationStreamRetriesAvailabilityFailuresAndCanonicalReplacement() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 1)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+        let failures: [PaymentStreamFailure] = [
+            .http(429),
+            .http(503),
+            .network(.networkConnectionLost),
+            .canonicalReplacement,
+        ]
+
+        for failure in failures {
+            let rpc = RetryingPaymentRPC(failure: failure, token: tokenAddress)
+            let monitor = PaymentMonitor(
+                rpc: rpc,
+                confirmationPolicy: configuration.confirmationPolicy,
+                pollIntervalNanoseconds: 1_000_000
+            )
+            var iterator = monitor.observations(for: request).makeAsyncIterator()
+
+            let observation = try await iterator.next()
+
+            XCTAssertEqual(observation?.status, .paid(received: UInt256(1_000)))
+            let attempts = await rpc.attempts()
+            XCTAssertEqual(attempts, 2, "Expected one retry for \(failure)")
+        }
+    }
+
+    func testObservationStreamKeepsWrongChainAndHTTP400Terminal() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 1)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+
+        let wrongChainRPC = RetryingPaymentRPC(
+            failure: .wrongChain,
+            token: tokenAddress
+        )
+        var wrongChainIterator = PaymentMonitor(
+            rpc: wrongChainRPC,
+            confirmationPolicy: configuration.confirmationPolicy,
+            pollIntervalNanoseconds: 1_000_000
+        ).observations(for: request).makeAsyncIterator()
+        do {
+            _ = try await wrongChainIterator.next()
+            XCTFail("Expected wrong-chain failure to terminate monitoring")
+        } catch let PaymentMonitorError.wrongChain(expected, actual) {
+            XCTAssertEqual(expected, configuration.chainID)
+            XCTAssertEqual(actual, 1)
+        }
+        let wrongChainAttempts = await wrongChainRPC.attempts()
+        XCTAssertEqual(wrongChainAttempts, 1)
+
+        let badRequestRPC = RetryingPaymentRPC(failure: .http(400), token: tokenAddress)
+        var badRequestIterator = PaymentMonitor(
+            rpc: badRequestRPC,
+            confirmationPolicy: configuration.confirmationPolicy,
+            pollIntervalNanoseconds: 1_000_000
+        ).observations(for: request).makeAsyncIterator()
+        do {
+            _ = try await badRequestIterator.next()
+            XCTFail("Expected HTTP 400 to terminate monitoring")
+        } catch let JSONRPCError.invalidHTTPStatus(status) {
+            XCTAssertEqual(status, 400)
+        }
+        let badRequestAttempts = await badRequestRPC.attempts()
+        XCTAssertEqual(badRequestAttempts, 1)
+    }
+
+    func testObservationStreamClearsInheritedExpiredAbsoluteDeadline() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 1)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+        let rpc = RetryingPaymentRPC(
+            failure: .inheritedDeadline,
+            token: tokenAddress
+        )
+        let monitor = PaymentMonitor(
+            rpc: rpc,
+            confirmationPolicy: configuration.confirmationPolicy,
+            pollIntervalNanoseconds: 1_000_000
+        )
+
+        let observation = try await RPCRequestDeadline.withDeadline(
+            after: .milliseconds(1)
+        ) {
+            try await Task.sleep(for: .milliseconds(5))
+            var iterator = monitor.observations(for: request).makeAsyncIterator()
+            return try await iterator.next()
+        }
+
+        XCTAssertEqual(observation?.status, .paid(received: UInt256(1_000)))
+        let attempts = await rpc.attempts()
+        XCTAssertEqual(attempts, 1)
+    }
+
+    func testPaymentMonitorRetryPolicyIsNarrowAndDefaultsToFiveSeconds() throws {
+        let rpc = FixtureRPC(
+            chainID: 84_532,
+            factory: factory,
+            implementation: implementation,
+            vault: vault,
+            token: tokenAddress
+        )
+        XCTAssertEqual(
+            PaymentMonitor(
+                rpc: rpc,
+                confirmationPolicy: .init(requiredBlocks: 1)
+            ).pollIntervalNanoseconds,
+            5_000_000_000
+        )
+
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(RPCRequestDeadlineError.expired))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(
+            PaymentMonitorError.canonicalBlockChanged(blockNumber: 100)
+        ))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(URLError(.notConnectedToInternet)))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.invalidHTTPStatus(408)))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.invalidHTTPStatus(425)))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.invalidHTTPStatus(429)))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.invalidHTTPStatus(500)))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.server(
+            RPCServerError(code: -32_005, message: "limit exceeded")
+        )))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.server(
+            RPCServerError(code: -32_016, message: "over rate limit")
+        )))
+
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(CancellationError()))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(URLError(.cancelled)))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(
+            PaymentMonitorError.wrongChain(expected: 84_532, actual: 1)
+        ))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(
+            PaymentMonitorError.requestChainMismatch(expected: 1, request: 84_532)
+        ))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(
+            PaymentMonitorError.mixedRequestChains
+        ))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.invalidHTTPStatus(400)))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.invalidHTTPStatus(401)))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(
+            JSONRPCError.remoteResponseDecodeFailure
+        ))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.malformedResponse))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.mismatchedID))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(
+            JSONRPCError.batchLimitExceeded(maximum: 10)
+        ))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(
+            RPCDecodingError.invalidData("invalid balance")
+        ))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.server(
+            RPCServerError(code: -32_000, message: "execution reverted")
+        )))
     }
 
     func testReceiverFreshnessUsesAnchoredFixedBlockAndRejectsReorg() async throws {

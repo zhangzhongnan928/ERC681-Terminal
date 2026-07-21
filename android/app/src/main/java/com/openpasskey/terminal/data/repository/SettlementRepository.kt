@@ -547,9 +547,10 @@ class SettlementRepository internal constructor(
     }
 
     /**
-     * Advances one durable recovery state with exactly one transport call. The shared OkHttp
-     * callTimeout is shorter than the coordinator's five-second lease, so an in-flight scheduled
-     * recovery cannot hold cashier work behind several sequential RPC stalls.
+     * Advances one durable recovery state without polling. Most states require one transport
+     * call; a receipt that appears final in the bounded snapshot requires one ordered head read
+     * before terminalization. Each call retains the shared OkHttp deadline, and background work
+     * uses a separate coordinator queue so it cannot hold the cashier's interactive queue.
      */
     private suspend fun recoverOneBackgroundStep(id: String): SettlementTransaction {
         var transaction = requireNotNull(settlementDao.getById(id)) {
@@ -617,6 +618,32 @@ class SettlementRepository internal constructor(
                             receiptBlock = null,
                             error = "Receipt block is missing or orphaned; waiting for canonical " +
                                 "inclusion",
+                            updatedAt = nowSeconds(),
+                        )
+                        settlementDao.update(transaction)
+                        return transaction
+                    }
+                    // A JSON-RPC batch is not an atomic snapshot. The head response in the batch
+                    // can be produced before the receipt and canonical-hash reads by a different
+                    // backend. Re-read the head after those identity checks and require finality
+                    // to still hold before performing an irreversible terminal transition.
+                    val finalHeadResult = try {
+                        Result.success(client.blockNumber())
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        Result.failure(error)
+                    }
+                    val finalHead = finalHeadResult.getOrNull()
+                    if (finalHead == null || finalHead < target) {
+                        transaction = transaction.copy(
+                            status = SettlementTransactionStatus.CONFIRMING,
+                            receiptBlock = receipt.blockNumber,
+                            error = finalHeadResult.exceptionOrNull()?.let { error ->
+                                "Unable to recheck final confirmation depth: " +
+                                    (error.message ?: "RPC read failed")
+                            } ?: "Confirmation depth changed during finality verification; " +
+                                "waiting for the canonical head to reach block $target",
                             updatedAt = nowSeconds(),
                         )
                         settlementDao.update(transaction)

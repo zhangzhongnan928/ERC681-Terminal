@@ -528,7 +528,93 @@ class ReadOnlyRpcClientTest {
         val malformedClient = ReadOnlyRpcClient.forTest(config) { body ->
             success(JsonParser.parseString(body).asJsonObject, "0x00")
         }
-        assertFailsWith<IllegalArgumentException> { malformedClient.chainId() }
+        assertFailsWith<RpcException> { malformedClient.chainId() }
+    }
+
+    @Test
+    fun `malformed RPC error fields fail as transport errors`() {
+        val malformedErrors = listOf(
+            """{"code":"-32000","message":"reverted"}""",
+            """{"code":-32000.5,"message":"reverted"}""",
+            """{"code":2147483648,"message":"reverted"}""",
+            """{"message":"reverted"}""",
+            """{"code":-32000}""",
+            """{"code":-32000,"message":7}""",
+        )
+
+        malformedErrors.forEach { malformedError ->
+            val client = ReadOnlyRpcClient.forTest(config) { body ->
+                val request = JsonParser.parseString(body).asJsonObject
+                """{"jsonrpc":"2.0","id":${request.get("id").asLong},"error":$malformedError}"""
+            }
+
+            val error = assertFailsWith<RpcException>(malformedError) { client.chainId() }
+            assertTrue(error !is RpcResponseException)
+        }
+    }
+
+    @Test
+    fun `local argument preconditions remain argument errors`() {
+        val client = ReadOnlyRpcClient.forTest(config) {
+            error("RPC transport must not be reached for an invalid local argument")
+        }
+
+        assertFailsWith<IllegalArgumentException> { client.blockHash(-1) }
+    }
+
+    @Test
+    fun `validation maps unavailable canonical heads to RPC failures`() {
+        val unavailableAnchor = ReadOnlyRpcClient.forTest(config) { body ->
+            val requests = JsonParser.parseString(body).asJsonArray
+            JsonArray().apply {
+                requests.forEach { element ->
+                    val request = element.asJsonObject
+                    add(
+                        if (request.get("method").asString == "eth_chainId") {
+                            rpcSuccess(request, "0x14a34")
+                        } else {
+                            rpcNullSuccess(request)
+                        },
+                    )
+                }
+            }.toString()
+        }
+        assertFailsWith<RpcException> {
+            unavailableAnchor.validateWithEvidence(token, 18, "AUD")
+        }
+
+        var wave = 0
+        val unavailableClosingHead = ReadOnlyRpcClient.forTest(config) { body ->
+            wave += 1
+            val root = JsonParser.parseString(body)
+            when (wave) {
+                1 -> JsonArray().apply {
+                    root.asJsonArray.forEach { element ->
+                        val request = element.asJsonObject
+                        add(
+                            if (request.get("method").asString == "eth_chainId") {
+                                rpcSuccess(request, "0x14a34")
+                            } else {
+                                rpcSuccess(request, blockResult(100, BLOCK_HASH))
+                            },
+                        )
+                    }
+                }.toString()
+                2 -> JsonArray().apply {
+                    root.asJsonArray.forEach { element ->
+                        val request = element.asJsonObject
+                        add(rpcSuccess(request, checkoutStateResult(request)))
+                    }
+                }.toString()
+                3 -> rpcNullSuccess(root.asJsonObject).toString()
+                else -> error("Unexpected validation wave")
+            }
+        }
+
+        assertFailsWith<RpcException> {
+            unavailableClosingHead.validateWithEvidence(token, 18, "AUD")
+        }
+        assertEquals(3, wave)
     }
 
     @Test
@@ -885,6 +971,12 @@ class ReadOnlyRpcClientTest {
 
     private fun rpcSuccess(request: JsonObject, result: JsonObject) =
         JsonParser.parseString(success(request, result))
+
+    private fun rpcNullSuccess(request: JsonObject) = JsonObject().apply {
+        addProperty("jsonrpc", "2.0")
+        add("id", request.get("id"))
+        add("result", com.google.gson.JsonNull.INSTANCE)
+    }
 
     private fun checkoutStateResult(request: JsonObject): String =
         when (request.get("method").asString) {

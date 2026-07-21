@@ -137,6 +137,142 @@ final class ProvisioningAppTests: XCTestCase {
         XCTAssertTrue(model.terminalReadiness.isReady)
     }
 
+    @MainActor
+    func testActiveMonitorPreservesLastVerifiedObservationAcrossTransientFailure() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        AppPreferences.saveSettings(AppSettings())
+        let container = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let invoice = try storedInvoice()
+        container.mainContext.insert(invoice)
+        try container.mainContext.save()
+        let request = try invoice.paymentRequest()
+        let configuration = try invoice.configurationSnapshot()
+        let verified = observation(
+            invoiceID: request.invoiceID,
+            balance: UInt256(400),
+            block: 100
+        )
+        let probe = TransientPaymentObservationProbe(verified: verified)
+        let model = AppModel(
+            container: container,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.monitor-tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(
+                address: request.terminalIdentifier.address
+            ),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            paymentObservationSampler: { _, _, _, _ in
+                try await probe.sample()
+            },
+            paymentMonitorPollIntervalNanoseconds: 1_000_000
+        )
+
+        model.startMonitoring(request, configuration: configuration)
+        for _ in 0..<1_000 {
+            if await probe.calls >= 3 { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        let calls = await probe.calls
+        XCTAssertEqual(calls, 3, "The transient failure should enter a retry attempt")
+        XCTAssertEqual(model.activeObservation, verified)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(invoice.observedBlock, 100)
+        XCTAssertEqual(invoice.observedBalance, "400")
+
+        model.closeActiveSale()
+    }
+
+    @MainActor
+    func testActiveMonitorKeepsWrongChainTerminalAndCancellationSilent() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        AppPreferences.saveSettings(AppSettings())
+
+        let wrongChainInvoice = try storedInvoice()
+        let wrongChainContainer = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        wrongChainContainer.mainContext.insert(wrongChainInvoice)
+        try wrongChainContainer.mainContext.save()
+        let wrongChainRequest = try wrongChainInvoice.paymentRequest()
+        let wrongChainProbe = TerminalPaymentObservationProbe(failure: .wrongChain)
+        let wrongChainModel = AppModel(
+            container: wrongChainContainer,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.monitor-tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(
+                address: wrongChainRequest.terminalIdentifier.address
+            ),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            paymentObservationSampler: { _, _, _, _ in
+                try await wrongChainProbe.sample()
+            },
+            paymentMonitorPollIntervalNanoseconds: 1_000_000
+        )
+
+        wrongChainModel.startMonitoring(
+            wrongChainRequest,
+            configuration: try wrongChainInvoice.configurationSnapshot()
+        )
+        await wrongChainModel.waitForMonitoringToFinish()
+
+        let wrongChainCalls = await wrongChainProbe.calls
+        XCTAssertEqual(wrongChainCalls, 1)
+        XCTAssertNil(wrongChainModel.activeObservation)
+        XCTAssertTrue(wrongChainModel.errorMessage?.contains("Wrong network") == true)
+        wrongChainModel.closeActiveSale()
+
+        let cancelledInvoice = try storedInvoice()
+        let cancelledContainer = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        cancelledContainer.mainContext.insert(cancelledInvoice)
+        try cancelledContainer.mainContext.save()
+        let cancelledRequest = try cancelledInvoice.paymentRequest()
+        let cancelledProbe = TerminalPaymentObservationProbe(failure: .cancelled)
+        let cancelledModel = AppModel(
+            container: cancelledContainer,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.monitor-tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(
+                address: cancelledRequest.terminalIdentifier.address
+            ),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            paymentObservationSampler: { _, _, _, _ in
+                try await cancelledProbe.sample()
+            },
+            paymentMonitorPollIntervalNanoseconds: 1_000_000
+        )
+
+        cancelledModel.startMonitoring(
+            cancelledRequest,
+            configuration: try cancelledInvoice.configurationSnapshot()
+        )
+        await cancelledModel.waitForMonitoringToFinish()
+
+        let cancelledCalls = await cancelledProbe.calls
+        XCTAssertEqual(cancelledCalls, 1)
+        XCTAssertNil(cancelledModel.activeObservation)
+        XCTAssertNil(cancelledModel.errorMessage)
+        cancelledModel.closeActiveSale()
+    }
+
     func testCheckoutAmountInputPreservesConfiguredTokenPrecision() {
         var amount = CheckoutAmountInput.cleared
         amount = CheckoutAmountInput.appending(digit: 1, to: amount, maximumFractionDigits: 6)
@@ -3146,6 +3282,54 @@ private actor BlockingOperatorWalletLifecycle: OperatorWalletLifecycleManaging {
         deletionReleased = true
         releaseContinuation?.resume()
         releaseContinuation = nil
+    }
+}
+
+private actor TransientPaymentObservationProbe {
+    private let verified: PaymentObservation
+    private(set) var calls = 0
+
+    init(verified: PaymentObservation) {
+        self.verified = verified
+    }
+
+    func sample() async throws -> PaymentObservation {
+        calls += 1
+        switch calls {
+        case 1:
+            return verified
+        case 2:
+            throw URLError(.networkConnectionLost)
+        default:
+            // Keep the retry attempt open so the test can prove the transient failure did not
+            // erase or replace the last verified observation. App cancellation interrupts sleep.
+            try await Task.sleep(for: .seconds(60))
+            return verified
+        }
+    }
+}
+
+private enum TerminalPaymentObservationFailure: Sendable {
+    case wrongChain
+    case cancelled
+}
+
+private actor TerminalPaymentObservationProbe {
+    private let failure: TerminalPaymentObservationFailure
+    private(set) var calls = 0
+
+    init(failure: TerminalPaymentObservationFailure) {
+        self.failure = failure
+    }
+
+    func sample() async throws -> PaymentObservation {
+        calls += 1
+        switch failure {
+        case .wrongChain:
+            throw PaymentMonitorError.wrongChain(expected: 84_532, actual: 1)
+        case .cancelled:
+            throw URLError(.cancelled)
+        }
     }
 }
 

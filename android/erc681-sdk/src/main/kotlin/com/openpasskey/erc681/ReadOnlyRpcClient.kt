@@ -125,9 +125,8 @@ class ReadOnlyRpcClient private constructor(
                 "RPC chain ID $remoteChainId does not match payment chain ID $expectedChainId",
             )
         }
-        val anchoredHead = requireNotNull(decodeCanonicalBlockIdentity(anchor[1])) {
-            "Latest canonical block is unavailable"
-        }
+        val anchoredHead = decodeCanonicalBlockIdentity(anchor[1])
+            ?: throw RpcException("Latest canonical block is unavailable")
         val head = anchoredHead.number
 
         val cursorToRead = savedCursorBlock?.takeIf { it < head }
@@ -157,14 +156,12 @@ class ReadOnlyRpcClient private constructor(
             null
         }
 
-        val finalHeadHash = requireNotNull(
-            decodeCanonicalBlockHash(
-                rpcResult("eth_getBlockByNumber", blockByNumberParams(head)),
-                head,
-            ),
-        ) {
-            "Canonical block $head became unavailable after validating confirmation cursors"
-        }
+        val finalHeadHash = decodeCanonicalBlockHash(
+            rpcResult("eth_getBlockByNumber", blockByNumberParams(head)),
+            head,
+        ) ?: throw RpcException(
+            "Canonical block $head became unavailable after validating confirmation cursors",
+        )
         if (!finalHeadHash.equals(anchoredHead.hash, ignoreCase = true)) {
             throw RpcException("Canonical block $head changed while sampling payment balance")
         }
@@ -240,9 +237,8 @@ class ReadOnlyRpcClient private constructor(
                 "RPC chain ID $remoteChainId does not match configured chain ID ${config.chainId}",
             )
         }
-        val anchoredHead = requireNotNull(decodeCanonicalBlockIdentity(anchor[1])) {
-            "Latest canonical block is unavailable"
-        }
+        val anchoredHead = decodeCanonicalBlockIdentity(anchor[1])
+            ?: throw RpcException("Latest canonical block is unavailable")
         val blockTag = quantityHex(anchoredHead.number)
 
         // Wave 2: 15 independent reads. Strict physical batches remain <=10 and only the two
@@ -287,15 +283,15 @@ class ReadOnlyRpcClient private constructor(
 
         // Wave 3: an unchanged head hash also proves every earlier saved ancestor used by this
         // checkout proof remained on the same canonical chain while state was sampled.
-        val finalHeadHash = requireNotNull(
-            decodeCanonicalBlockHash(
-                rpcResult(
-                    "eth_getBlockByNumber",
-                    blockByNumberParams(anchoredHead.number),
-                ),
-                anchoredHead.number,
+        val finalHeadHash = decodeCanonicalBlockHash(
+            rpcResult(
+                "eth_getBlockByNumber",
+                blockByNumberParams(anchoredHead.number),
             ),
-        ) { "Canonical block ${anchoredHead.number} became unavailable during checkout validation" }
+            anchoredHead.number,
+        ) ?: throw RpcException(
+            "Canonical block ${anchoredHead.number} became unavailable during checkout validation",
+        )
         if (!finalHeadHash.equals(anchoredHead.hash, ignoreCase = true)) {
             throw RpcException(
                 "Canonical block ${anchoredHead.number} changed during checkout validation",
@@ -493,9 +489,8 @@ class ReadOnlyRpcClient private constructor(
                 "RPC chain ID $remoteChainId does not match configured chain ID ${config.chainId}",
             )
         }
-        val anchoredHead = requireNotNull(decodeCanonicalBlockIdentity(anchor[1])) {
-            "Latest canonical block is unavailable"
-        }
+        val anchoredHead = decodeCanonicalBlockIdentity(anchor[1])
+            ?: throw RpcException("Latest canonical block is unavailable")
 
         // Wave 2: all nine validation reads use the exact anchored height. Vault runtime bytes
         // retained in the evidence therefore come from this same strict batch and proof block.
@@ -512,15 +507,15 @@ class ReadOnlyRpcClient private constructor(
 
         // Wave 3: close the canonical bracket at the same height; advancing `latest` is harmless,
         // but a changed or unavailable anchored hash invalidates every Wave-2 result.
-        val finalHeadHash = requireNotNull(
-            decodeCanonicalBlockHash(
-                rpcResult(
-                    "eth_getBlockByNumber",
-                    blockByNumberParams(anchoredHead.number),
-                ),
-                anchoredHead.number,
+        val finalHeadHash = decodeCanonicalBlockHash(
+            rpcResult(
+                "eth_getBlockByNumber",
+                blockByNumberParams(anchoredHead.number),
             ),
-        ) { "Canonical block ${anchoredHead.number} became unavailable during network validation" }
+            anchoredHead.number,
+        ) ?: throw RpcException(
+            "Canonical block ${anchoredHead.number} became unavailable during network validation",
+        )
         if (!finalHeadHash.equals(anchoredHead.hash, ignoreCase = true)) {
             throw RpcException(
                 "Canonical block ${anchoredHead.number} changed during network validation",
@@ -782,12 +777,11 @@ class ReadOnlyRpcClient private constructor(
             }
             if (error != null) {
                 if (!error.isJsonObject) throw RpcException("JSON-RPC error is not an object")
+                val (code, message) = decodeRpcError(error.asJsonObject)
                 if (id in toleratedErrorIds) {
                     resultsById[id] = com.google.gson.JsonNull.INSTANCE
                     return@forEach
                 }
-                val code = error.asJsonObject.get("code")?.asInt ?: 0
-                val message = error.asJsonObject.get("message")?.asString ?: "Unknown RPC error"
                 throw RpcResponseException(code, message)
             }
             val result = response.get("result")
@@ -877,8 +871,29 @@ class ReadOnlyRpcClient private constructor(
         private fun quantityHex(value: Long): String = "0x" + value.toString(16)
 
         private fun parseQuantity(value: String, label: String): BigInteger {
-            require(QUANTITY_PATTERN.matches(value)) { "$label returned a malformed hex quantity" }
+            if (!QUANTITY_PATTERN.matches(value)) {
+                throw RpcException("$label returned a malformed hex quantity")
+            }
             return BigInteger(value.substring(2), 16)
+        }
+
+        private fun decodeRpcError(error: JsonObject): Pair<Int, String> {
+            val codePrimitive = error.get("code")
+                ?.takeIf { it.isJsonPrimitive }
+                ?.asJsonPrimitive
+                ?.takeIf { it.isNumber }
+                ?: throw RpcException("JSON-RPC error has an invalid code")
+            val code = codePrimitive.asString
+                .takeIf(RPC_ERROR_CODE_PATTERN::matches)
+                ?.toIntOrNull()
+                ?: throw RpcException("JSON-RPC error has an invalid code")
+            val message = error.get("message")
+                ?.takeIf { it.isJsonPrimitive }
+                ?.asJsonPrimitive
+                ?.takeIf { it.isString }
+                ?.asString
+                ?: throw RpcException("JSON-RPC error has an invalid message")
+            return code to message
         }
 
         private fun BigInteger.toSupportedLong(label: String): Long {
@@ -963,6 +978,7 @@ class ReadOnlyRpcClient private constructor(
         private val QUANTITY_PATTERN = Regex("^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$")
         private val BLOCK_HASH_PATTERN = Regex("^0x[0-9a-fA-F]{64}$")
         private val RESPONSE_ID_PATTERN = Regex("^(0|[1-9][0-9]*)$")
+        private val RPC_ERROR_CODE_PATTERN = Regex("^-?(0|[1-9][0-9]*)$")
         private const val MAX_SYMBOL_UTF8_BYTES = 32
         private const val MAX_BATCH_SIZE = 10
         private const val NETWORK_VALIDATION_CALL_COUNT = 9

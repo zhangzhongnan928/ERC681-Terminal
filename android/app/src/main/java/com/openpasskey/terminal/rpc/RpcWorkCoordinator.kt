@@ -68,9 +68,10 @@ class RpcWorkCoordinator(
             if (interactive) {
                 null
             } else {
-                // Settlement units are also constrained to one shorter-deadline OkHttp call;
-                // legacy read-only samples use a total socket budget below this deadline. The
-                // separate mutex means non-cancellable legacy I/O still cannot hold cashier work.
+                // Settlement units use shorter-deadline OkHttp calls and may perform one ordered
+                // final-head recheck after a bounded receipt snapshot. Legacy read-only samples
+                // use a total socket budget below this deadline. The separate mutex means
+                // non-cancellable legacy I/O still cannot hold cashier work.
                 withTimeoutOrNull(backgroundOperationTimeoutMillis) { block() }
             }
         }

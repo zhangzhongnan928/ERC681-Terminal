@@ -88,6 +88,43 @@ final class JSONRPCClientTests: XCTestCase {
         }
     }
 
+    func testRemoteWireCorruptionIsRetryableButSemanticMalformedResponseIsTerminal() async throws {
+        let transport = QueueTransport([
+            #"{"jsonrpc":"2.0","id":1,"result":"0x14a34""#,
+        ])
+        let client = try JSONRPCEthereumClient(
+            endpoint: URL(string: "https://rpc.example")!,
+            transport: transport
+        )
+
+        do {
+            _ = try await client.chainID()
+            XCTFail("Expected the invalid remote JSON to fail")
+        } catch let error as JSONRPCError {
+            XCTAssertEqual(error, .remoteResponseDecodeFailure)
+            XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(error))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let semanticTransport = QueueTransport([
+            #"{"jsonrpc":"2.0","id":1,"result":42}"#,
+        ])
+        let semanticClient = try JSONRPCEthereumClient(
+            endpoint: URL(string: "https://rpc.example")!,
+            transport: semanticTransport
+        )
+        do {
+            _ = try await semanticClient.chainID()
+            XCTFail("Expected the invalid JSON-RPC result shape to fail")
+        } catch let error as JSONRPCError {
+            XCTAssertEqual(error, .malformedResponse)
+            XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(error))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     func testStrictQuantityDecoder() throws {
         XCTAssertEqual(try JSONRPCEthereumClient.decodeQuantity("0x0"), 0)
         XCTAssertEqual(try JSONRPCEthereumClient.decodeQuantity("0xff"), 255)
