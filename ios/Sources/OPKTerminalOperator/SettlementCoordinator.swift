@@ -1,6 +1,15 @@
 import Foundation
 import OPKTerminalCore
 
+private struct LiveSigningState: Sendable {
+    let chainID: UInt64
+    let authorization: VaultAuthorization
+    let tokenBalances: [UInt256]
+    let gasEstimate: UInt64
+    let gasBalance: UInt256
+    let pendingNonce: UInt64
+}
+
 public actor SettlementCoordinator {
     /// Conservative extra balance reserved for the OP Stack L1 data charge, which is not
     /// represented by `gasLimit * maxFeePerGas`.
@@ -37,19 +46,23 @@ public actor SettlementCoordinator {
         expectedChainID: UInt64,
         vault: EthereumAddress
     ) async throws -> OperatorChainStatus {
-        let actualChainID = try await rpc.chainID()
+        async let chainID = rpc.chainID()
+        async let balance = rpc.balance(of: operatorAddress)
+        async let authorization = rpc.vaultAuthorization(
+            vault: vault,
+            operatorAddress: operatorAddress
+        )
+        let (actualChainID, resolvedBalance, resolvedAuthorization) = try await (
+            chainID,
+            balance,
+            authorization
+        )
         guard actualChainID == expectedChainID else {
             throw SettlementOperatorError.chainMismatch(
                 expected: expectedChainID,
                 actual: actualChainID
             )
         }
-        async let balance = rpc.balance(of: operatorAddress)
-        async let authorization = rpc.vaultAuthorization(
-            vault: vault,
-            operatorAddress: operatorAddress
-        )
-        let (resolvedBalance, resolvedAuthorization) = try await (balance, authorization)
         return OperatorChainStatus(
             chainID: actualChainID,
             balance: resolvedBalance,
@@ -79,33 +92,52 @@ public actor SettlementCoordinator {
     /// Performs authorization, simulation, gas estimation, fee selection, and balance checks.
     /// It never accesses the private key or prompts for authentication.
     public func prepare(_ intent: SettlementIntent) async throws -> PreparedSettlement {
-        let actualChainID = try await rpc.chainID()
+        let calldata = SettlementABI.encodeSweepSessions(intent)
+        async let chainID = rpc.chainID()
+        async let authorizationRead = rpc.vaultAuthorization(
+            vault: intent.vault,
+            operatorAddress: operatorAddress
+        )
+        async let balancesRead = liveTokenBalances(for: intent)
+        async let simulation: Void = rpc.simulate(
+            from: operatorAddress,
+            to: intent.vault,
+            data: calldata
+        )
+        async let gasEstimate = rpc.estimateGas(
+            from: operatorAddress,
+            to: intent.vault,
+            data: calldata
+        )
+        async let quote = rpc.feeQuote()
+        async let balance = rpc.balance(of: operatorAddress)
+        let (
+            actualChainID,
+            authorization,
+            observedTokenBalances,
+            _,
+            estimate,
+            resolvedQuote,
+            resolvedBalance
+        ) = try await (
+            chainID,
+            authorizationRead,
+            balancesRead,
+            simulation,
+            gasEstimate,
+            quote,
+            balance
+        )
         guard actualChainID == intent.chainID else {
             throw SettlementOperatorError.chainMismatch(
                 expected: intent.chainID,
                 actual: actualChainID
             )
         }
-        let authorization = try await rpc.vaultAuthorization(
-            vault: intent.vault,
-            operatorAddress: operatorAddress
-        )
         guard authorization.isAuthorized else {
             throw SettlementOperatorError.operatorNotAuthorized
         }
-
-        let calldata = SettlementABI.encodeSweepSessions(intent)
-        let observedTokenBalances = try await liveTokenBalances(for: intent)
-        try await rpc.simulate(from: operatorAddress, to: intent.vault, data: calldata)
-        let estimate = try await rpc.estimateGas(
-            from: operatorAddress,
-            to: intent.vault,
-            data: calldata
-        )
         let gasLimit = try paddedGasLimit(estimate)
-        async let quote = rpc.feeQuote()
-        async let balance = rpc.balance(of: operatorAddress)
-        let (resolvedQuote, resolvedBalance) = try await (quote, balance)
         let executionCost = try product(gasLimit, resolvedQuote.maxFeePerGas)
         let (maximumGasCost, overflow) = executionCost.addingReportingOverflow(
             Self.defaultL1DataFeeReserve
@@ -135,14 +167,16 @@ public actor SettlementCoordinator {
     public func sign(
         _ prepared: PreparedSettlement,
         authenticationReason: String,
-        postAuthenticationValidation: @escaping @Sendable () async throws -> Void = {}
+        postAuthenticationValidation: @escaping @Sendable () async throws -> Void = {},
+        postAuthenticationFinalValidation: @escaping @Sendable () throws -> Void = {}
     ) async throws -> SignedSettlement {
         await nonceGate.acquire()
         do {
             let signed = try await signWhileHoldingNonceGate(
                 prepared,
                 authenticationReason: authenticationReason,
-                postAuthenticationValidation: postAuthenticationValidation
+                postAuthenticationValidation: postAuthenticationValidation,
+                postAuthenticationFinalValidation: postAuthenticationFinalValidation
             )
             await nonceGate.release()
             return signed
@@ -410,7 +444,8 @@ public actor SettlementCoordinator {
     private func signWhileHoldingNonceGate(
         _ prepared: PreparedSettlement,
         authenticationReason: String,
-        postAuthenticationValidation: @escaping @Sendable () async throws -> Void
+        postAuthenticationValidation: @escaping @Sendable () async throws -> Void,
+        postAuthenticationFinalValidation: @escaping @Sendable () throws -> Void
     ) async throws -> SignedSettlement {
         guard prepared.operatorAddress == operatorAddress,
               prepared.calldata == SettlementABI.encodeSweepSessions(prepared.intent),
@@ -420,35 +455,10 @@ public actor SettlementCoordinator {
               prepared.observedTokenBalances.count == prepared.intent.sessions.count,
               prepared.observedTokenBalances.allSatisfy({ !$0.isZero })
         else { throw SettlementOperatorError.tamperedPreparation }
-        let actualChainID = try await rpc.chainID()
-        guard actualChainID == prepared.intent.chainID else {
-            throw SettlementOperatorError.chainMismatch(
-                expected: prepared.intent.chainID,
-                actual: actualChainID
-            )
-        }
-        let authorization = try await rpc.vaultAuthorization(
-            vault: prepared.intent.vault,
-            operatorAddress: operatorAddress
-        )
-        guard authorization.isAuthorized else {
-            throw SettlementOperatorError.operatorNotAuthorized
-        }
-        try await assertPreparedBalancesStillCurrent(prepared)
-        try await rpc.simulate(
-            from: operatorAddress,
-            to: prepared.intent.vault,
-            data: prepared.calldata
-        )
-        let balance = try await rpc.balance(of: operatorAddress)
-        guard balance >= prepared.maximumGasCost else {
-            throw SettlementOperatorError.insufficientGasBalance(
-                required: prepared.maximumGasCost,
-                available: balance
-            )
-        }
+        let initialState = try await liveSigningState(for: prepared)
+        try validateSigningState(initialState, against: prepared)
 
-        let remoteNonce = try await rpc.pendingNonce(of: operatorAddress)
+        let remoteNonce = initialState.pendingNonce
         let nonce = max(remoteNonce, nextLocalNonceByChain[prepared.intent.chainID] ?? remoteNonce)
         let transaction = EIP1559Transaction(
             chainID: prepared.intent.chainID,
@@ -466,11 +476,16 @@ public actor SettlementCoordinator {
             digest: transaction.signingDigest,
             reason: authenticationReason,
             postAuthenticationValidation: { [self] in
-                // The authentication prompt is an unbounded suspension point. Bind the
-                // signature to the exact live balances again after authentication, then let
-                // the app revalidate its persisted balance and canonical-cursor snapshots.
-                try await assertPreparedBalancesStillCurrent(prepared)
-                try await postAuthenticationValidation()
+                // The authentication prompt is an unbounded suspension point. Recheck every
+                // mutable signing prerequisite while the app concurrently revalidates its exact
+                // persisted balance/canonical-cursor proof. No private-key operation occurs until
+                // both fail-closed paths complete.
+                try await validateAfterAuthentication(
+                    prepared,
+                    expectedNonce: nonce,
+                    confirmationProof: postAuthenticationValidation,
+                    finalValidation: postAuthenticationFinalValidation
+                )
             }
         )
         let rawTransaction = transaction.serialized(with: signature)
@@ -514,15 +529,19 @@ public actor SettlementCoordinator {
     }
 
     private func liveTokenBalances(for intent: SettlementIntent) async throws -> [UInt256] {
-        var balances = [UInt256]()
-        balances.reserveCapacity(intent.sessions.count)
-        for session in intent.sessions {
-            let balance = try await rpc.tokenBalance(
-                token: intent.token,
-                account: session.receiver
-            )
+        let sessions = intent.sessions
+        let balances = try await rpc.tokenBalances(
+            token: intent.token,
+            accounts: sessions.map(\.receiver)
+        )
+        guard balances.count == sessions.count else {
+            throw SettlementOperatorError.malformedRPCResponse
+        }
+        for (session, balance) in zip(sessions, balances) {
             guard !balance.isZero else {
-                throw SettlementOperatorError.receiverHasNoSweepableBalance(session.invoiceID)
+                throw SettlementOperatorError.receiverHasNoSweepableBalance(
+                    session.invoiceID
+                )
             }
             if session.priorConfirmedSweptAmount < session.expectedAmount {
                 let (requiredBalance, underflow) = session.expectedAmount
@@ -538,15 +557,112 @@ public actor SettlementCoordinator {
                     )
                 }
             }
-            balances.append(balance)
         }
         return balances
+    }
+
+    private func liveSigningState(
+        for prepared: PreparedSettlement
+    ) async throws -> LiveSigningState {
+        async let chainID = rpc.chainID()
+        async let authorization = rpc.vaultAuthorization(
+            vault: prepared.intent.vault,
+            operatorAddress: operatorAddress
+        )
+        async let balances = liveTokenBalances(for: prepared.intent)
+        async let simulation: Void = rpc.simulate(
+            from: operatorAddress,
+            to: prepared.intent.vault,
+            data: prepared.calldata
+        )
+        async let gasEstimate = rpc.estimateGas(
+            from: operatorAddress,
+            to: prepared.intent.vault,
+            data: prepared.calldata
+        )
+        async let gasBalance = rpc.balance(of: operatorAddress)
+        async let pendingNonce = rpc.pendingNonce(of: operatorAddress)
+        let resolved = try await (
+            chainID,
+            authorization,
+            balances,
+            simulation,
+            gasEstimate,
+            gasBalance,
+            pendingNonce
+        )
+        return LiveSigningState(
+            chainID: resolved.0,
+            authorization: resolved.1,
+            tokenBalances: resolved.2,
+            gasEstimate: resolved.4,
+            gasBalance: resolved.5,
+            pendingNonce: resolved.6
+        )
+    }
+
+    private func validateAfterAuthentication(
+        _ prepared: PreparedSettlement,
+        expectedNonce: UInt64,
+        confirmationProof: @escaping @Sendable () async throws -> Void,
+        finalValidation: @escaping @Sendable () throws -> Void
+    ) async throws {
+        async let state = liveSigningState(for: prepared)
+        async let persistedProof: Void = confirmationProof()
+        let (freshState, _) = try await (state, persistedProof)
+        try validateSigningState(freshState, against: prepared)
+        let freshNonce = max(
+            freshState.pendingNonce,
+            nextLocalNonceByChain[prepared.intent.chainID] ?? freshState.pendingNonce
+        )
+        guard freshNonce == expectedNonce else {
+            throw SettlementOperatorError.tamperedPreparation
+        }
+        // This synchronous check is deliberately last: it runs after both the live signing
+        // prerequisites and the caller's canonical confirmation proof, immediately before the
+        // signer is allowed to touch private-key material.
+        try finalValidation()
+    }
+
+    private func validateSigningState(
+        _ state: LiveSigningState,
+        against prepared: PreparedSettlement
+    ) throws {
+        guard state.chainID == prepared.intent.chainID else {
+            throw SettlementOperatorError.chainMismatch(
+                expected: prepared.intent.chainID,
+                actual: state.chainID
+            )
+        }
+        guard state.authorization.isAuthorized else {
+            throw SettlementOperatorError.operatorNotAuthorized
+        }
+        try assertPreparedBalances(state.tokenBalances, stillMatch: prepared)
+        guard state.gasEstimate <= prepared.gasLimit else {
+            throw SettlementOperatorError.tamperedPreparation
+        }
+        guard state.gasBalance >= prepared.maximumGasCost else {
+            throw SettlementOperatorError.insufficientGasBalance(
+                required: prepared.maximumGasCost,
+                available: state.gasBalance
+            )
+        }
     }
 
     private func assertPreparedBalancesStillCurrent(
         _ prepared: PreparedSettlement
     ) async throws {
         let currentBalances = try await liveTokenBalances(for: prepared.intent)
+        try assertPreparedBalances(currentBalances, stillMatch: prepared)
+    }
+
+    private func assertPreparedBalances(
+        _ currentBalances: [UInt256],
+        stillMatch prepared: PreparedSettlement
+    ) throws {
+        guard currentBalances.count == prepared.observedTokenBalances.count else {
+            throw SettlementOperatorError.tamperedPreparation
+        }
         for (index, current) in currentBalances.enumerated()
             where current != prepared.observedTokenBalances[index] {
             throw SettlementOperatorError.receiverBalanceChanged(

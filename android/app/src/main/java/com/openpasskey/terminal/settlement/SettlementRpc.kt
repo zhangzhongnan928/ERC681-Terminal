@@ -1,15 +1,31 @@
 package com.openpasskey.terminal.settlement
 
+import com.google.gson.JsonArray
+import com.google.gson.JsonElement
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.terminal.data.model.SettlementFeeMode
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.web3j.protocol.Web3j
 import org.web3j.protocol.core.DefaultBlockParameter
 import org.web3j.protocol.core.DefaultBlockParameterName
 import org.web3j.protocol.core.methods.request.Transaction
 import org.web3j.protocol.http.HttpService
 import org.web3j.utils.Numeric
+import java.io.ByteArrayOutputStream
 import java.io.Closeable
+import java.io.InputStream
 import java.math.BigInteger
+import java.nio.charset.StandardCharsets
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 data class SettlementFeeQuote(
     val mode: SettlementFeeMode,
@@ -97,6 +113,39 @@ data class SettlementReceipt(
     val logs: List<SettlementReceiptLog>
 )
 
+/** One transport-bounded recovery read for an already observed receipt block. */
+data class SettlementRecoverySnapshot(
+    val receipt: SettlementReceipt?,
+    val canonicalReceiptBlockHash: String?,
+    val latestBlockNumber: Long,
+)
+
+data class SettlementReceiverSafetyRead(
+    val tokenAddress: String,
+    val receiverAddress: String,
+    val canonicalBlockNumber: Long,
+)
+
+data class SettlementPreflightRequest(
+    val operatorAddress: String,
+    val vaultAddress: String,
+    val callData: String,
+    val receivers: List<SettlementReceiverSafetyRead>,
+)
+
+data class SettlementPreflightSnapshot(
+    val chainId: Long,
+    val ownerAddress: String?,
+    val operatorListed: Boolean,
+    val canonicalBlockHashes: List<String?>,
+    val canonicalBlockHashesAfter: List<String?>,
+    val receiverBalances: List<BigInteger>,
+    val nonce: BigInteger,
+    val gasLimit: BigInteger?,
+    val feeQuote: SettlementFeeQuote,
+    val nativeBalance: BigInteger,
+)
+
 class SettlementRpcException(message: String, val rpcCode: Int? = null) : RuntimeException(message)
 
 interface SettlementChainClient : Closeable {
@@ -117,10 +166,62 @@ interface SettlementChainClient : Closeable {
     fun blockNumber(): Long
     /** Canonical block hash for an exact height, or null when that height is unavailable. */
     fun canonicalBlockHash(blockNumber: Long): String?
+    fun settlementRecoverySnapshot(
+        txHash: String,
+        expectedReceiptBlock: Long,
+    ): SettlementRecoverySnapshot
+
+    fun canonicalBlockHashes(blockNumbers: List<Long>): List<String?> =
+        blockNumbers.map(::canonicalBlockHash)
+
+    /**
+     * Bounded live safety snapshot. Production sends the independent reads as one JSON-RPC batch;
+     * the optional estimate is the only dependent second round trip because it requires the nonce.
+     */
+    fun settlementPreflight(
+        request: SettlementPreflightRequest,
+        includeGasEstimate: Boolean,
+    ): SettlementPreflightSnapshot {
+        val hashes = request.receivers.map { canonicalBlockHash(it.canonicalBlockNumber) }
+        val remoteChain = chainId()
+        val listed = isOperator(request.vaultAddress, request.operatorAddress)
+        // owner() is a compatibility fallback for vaults that authorize their owner without
+        // listing it as an operator. A listed operator must not be rejected merely because an
+        // optional owner() implementation is absent or temporarily unavailable.
+        val owner = if (listed) null else owner(request.vaultAddress)
+        val balances = request.receivers.map { tokenBalance(it.tokenAddress, it.receiverAddress) }
+        simulate(request.operatorAddress, request.vaultAddress, request.callData)
+        val nonce = pendingNonce(request.operatorAddress)
+        val gasLimit = if (includeGasEstimate) {
+            estimateGas(
+                request.operatorAddress,
+                request.vaultAddress,
+                request.callData,
+                nonce,
+            )
+        } else {
+            null
+        }
+        val hashesAfter = request.receivers.map { canonicalBlockHash(it.canonicalBlockNumber) }
+        return SettlementPreflightSnapshot(
+            chainId = remoteChain,
+            ownerAddress = owner,
+            operatorListed = listed,
+            canonicalBlockHashes = hashes,
+            canonicalBlockHashesAfter = hashesAfter,
+            receiverBalances = balances,
+            nonce = nonce,
+            gasLimit = gasLimit,
+            feeQuote = feeQuote(),
+            nativeBalance = nativeBalance(request.operatorAddress),
+        )
+    }
 }
 
 class Web3jSettlementChainClient(rpcUrl: String) : SettlementChainClient {
-    private val web3j = Web3j.build(HttpService(rpcUrl))
+    private val endpoint = SharedRpcConnections.get(rpcUrl)
+    private val web3j = endpoint.web3j
+    private val batch = endpoint.batch
 
     override fun chainId(): Long {
         val response = web3j.ethChainId().send()
@@ -287,11 +388,63 @@ class Web3jSettlementChainClient(rpcUrl: String) : SettlementChainClient {
             false,
         ).send()
         response.throwIfError("eth_getBlockByNumber")
-        return response.block?.hash
+        val block = response.block ?: return null
+        val returnedNumber = block.number
+            ?: throw SettlementRpcException("eth_getBlockByNumber result has no block number")
+        if (returnedNumber != BigInteger.valueOf(blockNumber)) {
+            throw SettlementRpcException(
+                "eth_getBlockByNumber returned block $returnedNumber for requested block $blockNumber",
+            )
+        }
+        val hash = block.hash
+            ?: throw SettlementRpcException("eth_getBlockByNumber result has no block hash")
+        if (!BLOCK_HASH_PATTERN.matches(hash)) {
+            throw SettlementRpcException("eth_getBlockByNumber returned a malformed block hash")
+        }
+        return hash.lowercase()
     }
 
+    override fun canonicalBlockHashes(blockNumbers: List<Long>): List<String?> {
+        require(blockNumbers.size <= MAX_BATCH_RECEIVERS) {
+            "Canonical hash batch supports at most $MAX_BATCH_RECEIVERS blocks"
+        }
+        if (blockNumbers.isEmpty()) return emptyList()
+        val results = batch.executeChunked(blockNumbers.map { blockNumber ->
+            require(blockNumber >= 0) { "Block number cannot be negative" }
+            SettlementRpcCall(
+                "eth_getBlockByNumber",
+                JsonArray().apply {
+                    add(quantityHex(blockNumber))
+                    add(false)
+                },
+            )
+        })
+        return results.mapIndexed { index, result ->
+            decodeBlockHash(result, blockNumbers[index])
+        }
+    }
+
+    override fun settlementRecoverySnapshot(
+        txHash: String,
+        expectedReceiptBlock: Long,
+    ): SettlementRecoverySnapshot = executeSettlementRecoverySnapshot(
+        batch = batch,
+        txHash = txHash,
+        expectedReceiptBlock = expectedReceiptBlock,
+    )
+
+    override fun settlementPreflight(
+        request: SettlementPreflightRequest,
+        includeGasEstimate: Boolean,
+    ): SettlementPreflightSnapshot = executeSettlementPreflight(
+        batch = batch,
+        request = request,
+        includeGasEstimate = includeGasEstimate,
+    )
+
     override fun close() {
-        web3j.shutdown()
+        // The process-scoped Web3j/OkHttp transport is intentionally shared across short-lived
+        // client leases so DNS, TLS, and HTTP/2 connections survive between terminal actions.
     }
 
     private fun org.web3j.protocol.core.Response<*>.throwIfError(operation: String) {
@@ -302,7 +455,552 @@ class Web3jSettlementChainClient(rpcUrl: String) : SettlementChainClient {
             )
         }
     }
+
+    private companion object {
+        const val MAX_BATCH_RECEIVERS = SettlementAbi.MAX_BATCH_SIZE
+    }
 }
+
+/** Reads receipt identity, its canonical block hash, and the current head in one HTTP batch. */
+internal fun executeSettlementRecoverySnapshot(
+    batch: StrictSettlementRpcBatchClient,
+    txHash: String,
+    expectedReceiptBlock: Long,
+): SettlementRecoverySnapshot {
+    require(TRANSACTION_HASH_PATTERN.matches(txHash)) { "Transaction hash is malformed" }
+    require(expectedReceiptBlock >= 0) { "Receipt block cannot be negative" }
+    val results = batch.execute(
+        listOf(
+            SettlementRpcCall(
+                "eth_getTransactionReceipt",
+                JsonArray().apply { add(txHash) },
+            ),
+            settlementBlockHashCall(expectedReceiptBlock),
+            SettlementRpcCall("eth_blockNumber", JsonArray()),
+        ),
+    )
+    return SettlementRecoverySnapshot(
+        receipt = decodeSettlementReceipt(results[0]),
+        canonicalReceiptBlockHash = decodeBlockHash(results[1], expectedReceiptBlock),
+        latestBlockNumber = parseQuantity(
+            resultString(results[2]),
+            "eth_blockNumber",
+        ).toLongExactCompat("block number"),
+    )
+}
+
+/**
+ * Three ordered network waves preserve the canonical cursor bracket while remaining constant at
+ * the protocol maximum: cursor-before, mutable reads, then cursor-after plus dependent reads.
+ */
+internal fun executeSettlementPreflight(
+    batch: StrictSettlementRpcBatchClient,
+    request: SettlementPreflightRequest,
+    includeGasEstimate: Boolean,
+): SettlementPreflightSnapshot {
+    require(request.receivers.isNotEmpty()) { "Settlement safety batch must not be empty" }
+    require(request.receivers.size <= SettlementAbi.MAX_BATCH_SIZE) {
+        "Settlement safety batch supports at most ${SettlementAbi.MAX_BATCH_SIZE} receivers"
+    }
+    val operator = EvmAddress.parse(request.operatorAddress).value
+    val vault = EvmAddress.parse(request.vaultAddress).value
+
+    // Wave 1: establish every saved canonical cursor before any balance is sampled.
+    val requestedCursorBlocks = request.receivers.map { it.canonicalBlockNumber }
+    val uniqueCursorBlocks = requestedCursorBlocks.distinct()
+    val hashCalls = uniqueCursorBlocks.map(::settlementBlockHashCall)
+    val hashesByBlock = batch.executeChunked(hashCalls).mapIndexed { index, result ->
+        val block = uniqueCursorBlocks[index]
+        block to decodeBlockHash(result, block)
+    }.toMap()
+    val hashes = requestedCursorBlocks.map(hashesByBlock::getValue)
+
+    // Wave 2: all mutually independent mutable reads. At 20 invoices this is 27 calls split into
+    // three concurrent strict batches; invoice count therefore does not add latency waves.
+    val primaryCalls = buildList {
+        add(SettlementRpcCall("eth_chainId", JsonArray()))
+        add(settlementEthCall(vault, SettlementAbi.encodeIsOperator(operator), RPC_LATEST_BLOCK, operator))
+        request.receivers.forEach { receiver ->
+            add(
+                settlementEthCall(
+                    EvmAddress.parse(receiver.tokenAddress).value,
+                    SettlementAbi.encodeBalanceOf(receiver.receiverAddress),
+                    RPC_PENDING_BLOCK,
+                ),
+            )
+        }
+        add(settlementEthCall(vault, request.callData, RPC_PENDING_BLOCK, operator))
+        add(
+            SettlementRpcCall(
+                "eth_getTransactionCount",
+                JsonArray().apply {
+                    add(operator)
+                    add(RPC_PENDING_BLOCK)
+                },
+            ),
+        )
+        add(SettlementRpcCall("eth_gasPrice", JsonArray()))
+        add(
+            SettlementRpcCall(
+                "eth_getBlockByNumber",
+                JsonArray().apply {
+                    add(RPC_LATEST_BLOCK)
+                    add(false)
+                },
+            ),
+        )
+        add(
+            SettlementRpcCall(
+                "eth_getBalance",
+                JsonArray().apply {
+                    add(operator)
+                    add(RPC_PENDING_BLOCK)
+                },
+            ),
+        )
+    }
+    val primary = batch.executeChunked(primaryCalls)
+    var primaryIndex = 0
+    val chain = parseQuantity(resultString(primary[primaryIndex++]), "eth_chainId")
+        .toLongExactCompat("chain ID")
+    val listed = SettlementAbi.decodeIsOperator(resultString(primary[primaryIndex++]))
+    val balances = request.receivers.map {
+        SettlementAbi.decodeUint256Word(resultString(primary[primaryIndex++]))
+    }
+    resultString(primary[primaryIndex++]) // A reverted simulation is represented as an RPC error.
+    val nonce = parseQuantity(resultString(primary[primaryIndex++]), "eth_getTransactionCount")
+    val gasPrice = parseQuantity(resultString(primary[primaryIndex++]), "eth_gasPrice")
+    val feeBlock = primary[primaryIndex++].takeIf { it.isJsonObject }?.asJsonObject
+        ?: throw SettlementRpcException("eth_getBlockByNumber returned no latest block")
+    val baseFee = feeBlock.get("baseFeePerGas")
+        ?.takeUnless { it.isJsonNull }
+        ?.let { element -> parseQuantity(resultString(element), "baseFeePerGas") }
+    val nativeBalance = parseQuantity(resultString(primary[primaryIndex]), "eth_getBalance")
+
+    // Wave 3: close the cursor bracket. owner() is fetched only for an unlisted operator, and gas
+    // estimation is included only when the prior <=60-second estimate cannot be reused.
+    val finalCalls = buildList {
+        addAll(hashCalls)
+        if (!listed) add(settlementEthCall(vault, SettlementAbi.encodeOwner(), RPC_LATEST_BLOCK))
+        if (includeGasEstimate) {
+            add(
+                SettlementRpcCall(
+                    "eth_estimateGas",
+                    JsonArray().apply {
+                        add(JsonObject().apply {
+                            addProperty("from", operator)
+                            addProperty("to", vault)
+                            addProperty("data", request.callData)
+                            addProperty("nonce", quantityHex(nonce))
+                        })
+                    },
+                ),
+            )
+        }
+    }
+    val final = batch.executeChunked(finalCalls)
+    var finalIndex = 0
+    val hashesAfterByBlock = uniqueCursorBlocks.associateWith { block ->
+        decodeBlockHash(final[finalIndex++], block)
+    }
+    val hashesAfter = requestedCursorBlocks.map(hashesAfterByBlock::getValue)
+    val owner = if (listed) null else {
+        SettlementAbi.decodeOwner(resultString(final[finalIndex++]))
+    }
+    val gasLimit = if (includeGasEstimate) {
+        val estimate = parseQuantity(resultString(final[finalIndex]), "eth_estimateGas")
+        require(estimate.signum() == 1) { "eth_estimateGas returned zero" }
+        estimate.multiply(BigInteger.valueOf(125)).divide(BigInteger.valueOf(100))
+            .add(BigInteger.valueOf(15_000))
+    } else null
+
+    return SettlementPreflightSnapshot(
+        chainId = chain,
+        ownerAddress = owner,
+        operatorListed = listed,
+        canonicalBlockHashes = hashes,
+        canonicalBlockHashesAfter = hashesAfter,
+        receiverBalances = balances,
+        nonce = nonce,
+        gasLimit = gasLimit,
+        feeQuote = SettlementFeePolicy.quote(baseFee, gasPrice),
+        nativeBalance = nativeBalance,
+    )
+}
+
+private fun settlementBlockHashCall(blockNumber: Long): SettlementRpcCall {
+    require(blockNumber >= 0) { "Block number cannot be negative" }
+    return SettlementRpcCall(
+        "eth_getBlockByNumber",
+        JsonArray().apply {
+            add(quantityHex(blockNumber))
+            add(false)
+        },
+    )
+}
+
+private fun settlementEthCall(
+    to: String,
+    data: String,
+    blockTag: String,
+    from: String? = null,
+): SettlementRpcCall = SettlementRpcCall(
+    "eth_call",
+    JsonArray().apply {
+        add(JsonObject().apply {
+            from?.let { addProperty("from", it) }
+            addProperty("to", to)
+            addProperty("data", data)
+        })
+        add(blockTag)
+    },
+)
+
+private const val RPC_LATEST_BLOCK = "latest"
+private const val RPC_PENDING_BLOCK = "pending"
+
+internal data class SettlementRpcCall(val method: String, val params: JsonArray)
+
+internal class StrictSettlementRpcBatchClient private constructor(
+    private val executeBody: (String) -> String,
+) {
+    constructor(rpcUrl: String, httpClient: OkHttpClient) : this(
+        executeBody = { requestBody ->
+            val request = Request.Builder()
+                .url(rpcUrl)
+                .post(requestBody.toRequestBody(JSON_MEDIA_TYPE))
+                .header("Accept", "application/json")
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                val body = response.body
+                    ?: throw SettlementRpcException("RPC HTTP response body is empty")
+                val responseText = body.byteStream().use(::readLimitedUtf8)
+                if (!response.isSuccessful) {
+                    throw SettlementRpcException("RPC HTTP request failed with status ${response.code}")
+                }
+                if (responseText.isEmpty()) {
+                    throw SettlementRpcException("RPC HTTP response body is empty")
+                }
+                responseText
+            }
+        },
+    )
+
+    fun execute(calls: List<SettlementRpcCall>): List<JsonElement> {
+        require(calls.isNotEmpty()) { "Settlement JSON-RPC batch must not be empty" }
+        require(calls.size <= MAX_BATCH_ITEMS) {
+            "Settlement JSON-RPC batch must contain at most $MAX_BATCH_ITEMS requests"
+        }
+        val requests = calls.map { call ->
+            val id = requestIds.incrementAndGet()
+            id to JsonObject().apply {
+                addProperty("jsonrpc", "2.0")
+                addProperty("id", id)
+                addProperty("method", call.method)
+                add("params", call.params)
+            }
+        }
+        val requestBody = JsonArray().apply { requests.forEach { add(it.second) } }.toString()
+        val responseRoot = try {
+            JsonParser.parseString(executeBody(requestBody))
+        } catch (error: SettlementRpcException) {
+            throw error
+        } catch (error: Exception) {
+            throw SettlementRpcException("JSON-RPC batch response is not valid JSON")
+        }
+        if (!responseRoot.isJsonArray) {
+            throw SettlementRpcException("JSON-RPC batch response is not an array")
+        }
+        val responses = responseRoot.asJsonArray
+        if (responses.size() != requests.size) {
+            throw SettlementRpcException("JSON-RPC response count does not match request count")
+        }
+        val expectedIds = requests.mapTo(linkedSetOf()) { it.first }
+        val resultsById = linkedMapOf<Long, JsonElement>()
+        responses.forEach { element ->
+            if (!element.isJsonObject) {
+                throw SettlementRpcException("JSON-RPC batch response contains a non-object")
+            }
+            val response = element.asJsonObject
+            val version = response.get("jsonrpc")
+                ?.takeIf { it.isJsonPrimitive }
+                ?.asJsonPrimitive
+                ?.takeIf { it.isString }
+                ?.asString
+            if (version != "2.0") {
+                throw SettlementRpcException("JSON-RPC response has an invalid version")
+            }
+            val idElement = response.get("id")?.takeIf {
+                it.isJsonPrimitive && it.asJsonPrimitive.isNumber
+            } ?: throw SettlementRpcException("JSON-RPC response has an invalid ID")
+            val idText = idElement.asString
+            if (!STRICT_NUMERIC_ID_PATTERN.matches(idText)) {
+                throw SettlementRpcException("JSON-RPC response has an invalid ID")
+            }
+            val id = idText.toLongOrNull()
+                ?: throw SettlementRpcException("JSON-RPC response has an invalid ID")
+            if (id !in expectedIds) {
+                throw SettlementRpcException("JSON-RPC response ID does not match any request")
+            }
+            if (resultsById.containsKey(id)) {
+                throw SettlementRpcException("JSON-RPC response contains a duplicate ID")
+            }
+            val rpcError = response.get("error")?.takeUnless { it.isJsonNull }
+            if (rpcError != null) {
+                if (!rpcError.isJsonObject) {
+                    throw SettlementRpcException("JSON-RPC error is not an object")
+                }
+                val code = rpcError.asJsonObject.get("code")?.asInt
+                val message = rpcError.asJsonObject.get("message")?.asString
+                    ?: "Unknown RPC error"
+                throw SettlementRpcException("JSON-RPC error ${code ?: 0}: $message", code)
+            }
+            resultsById[id] = response.get("result")
+                ?: throw SettlementRpcException("JSON-RPC response is missing result")
+        }
+        return requests.map { (id, _) ->
+            resultsById[id]
+                ?: throw SettlementRpcException("JSON-RPC batch response is missing request ID $id")
+        }
+    }
+
+    /** Executes max-10 batches concurrently through a bounded process-wide pool, preserving order. */
+    fun executeChunked(calls: List<SettlementRpcCall>): List<JsonElement> {
+        require(calls.isNotEmpty()) { "Settlement JSON-RPC call set must not be empty" }
+        val chunks = calls.chunked(MAX_BATCH_ITEMS)
+        if (chunks.size == 1) return execute(chunks.single())
+        val futures = chunks.map { chunk ->
+            CompletableFuture.supplyAsync({ execute(chunk) }, BATCH_EXECUTOR)
+        }
+        return try {
+            futures.flatMap(CompletableFuture<List<JsonElement>>::get)
+        } catch (error: ExecutionException) {
+            futures.forEach { it.cancel(true) }
+            val cause = error.cause
+            if (cause is SettlementRpcException) throw cause
+            throw SettlementRpcException(cause?.message ?: "Settlement JSON-RPC batch failed")
+        } catch (error: InterruptedException) {
+            futures.forEach { it.cancel(true) }
+            Thread.currentThread().interrupt()
+            throw SettlementRpcException("Settlement JSON-RPC batch was interrupted")
+        }
+    }
+
+    companion object {
+        private val requestIds = AtomicLong()
+        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+        internal const val MAX_BATCH_ITEMS = 10
+        private const val MAX_RESPONSE_BYTES = 1024 * 1024
+        private val STRICT_NUMERIC_ID_PATTERN = Regex("^(0|[1-9][0-9]*)$")
+        private val BATCH_EXECUTOR = Executors.newFixedThreadPool(5) { runnable ->
+            Thread(runnable, "opk-rpc-batch").apply { isDaemon = true }
+        }
+
+        @JvmSynthetic
+        internal fun forTest(execute: (String) -> String): StrictSettlementRpcBatchClient =
+            StrictSettlementRpcBatchClient(execute)
+
+        private fun readLimitedUtf8(input: InputStream): String {
+            val output = ByteArrayOutputStream()
+            val buffer = ByteArray(8 * 1024)
+            var total = 0
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                total += count
+                if (total > MAX_RESPONSE_BYTES) {
+                    throw SettlementRpcException("RPC HTTP response exceeds size limit")
+                }
+                output.write(buffer, 0, count)
+            }
+            return String(output.toByteArray(), StandardCharsets.UTF_8)
+        }
+    }
+}
+
+private data class SharedRpcEndpoint(
+    val web3j: Web3j,
+    val batch: StrictSettlementRpcBatchClient,
+)
+
+private object SharedRpcConnections {
+    private val clients = java.util.concurrent.ConcurrentHashMap<String, SharedRpcEndpoint>()
+
+    fun get(rpcUrl: String): SharedRpcEndpoint = clients.computeIfAbsent(rpcUrl) {
+        val httpClient = HttpService.getOkHttpClientBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            // Hard-cap every synchronous RPC used by both interactive and background settlement.
+            // Each scheduled recovery unit is exactly one call/batch, leaving one second beneath
+            // the coordinator's five-second cashier-priority lease.
+            .callTimeout(SETTLEMENT_RPC_CALL_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+            .build()
+        SharedRpcEndpoint(
+            web3j = Web3j.build(HttpService(it, httpClient)),
+            batch = StrictSettlementRpcBatchClient(it, httpClient),
+        )
+    }
+}
+
+private const val SETTLEMENT_RPC_CALL_TIMEOUT_MILLIS = 4_000L
+
+private fun quantityHex(value: Long): String {
+    require(value >= 0) { "RPC quantity cannot be negative" }
+    return "0x" + value.toString(16)
+}
+
+private fun quantityHex(value: BigInteger): String {
+    require(value.signum() >= 0) { "RPC quantity cannot be negative" }
+    return "0x" + value.toString(16)
+}
+
+private fun parseQuantity(value: String, operation: String): BigInteger {
+    if (!RPC_QUANTITY_PATTERN.matches(value)) {
+        throw SettlementRpcException("$operation returned a malformed hex quantity")
+    }
+    return BigInteger(value.substring(2), 16)
+}
+
+private fun resultString(result: JsonElement): String {
+    if (!result.isJsonPrimitive || !result.asJsonPrimitive.isString) {
+        throw SettlementRpcException("JSON-RPC result must be a string")
+    }
+    return result.asString
+}
+
+private fun decodeBlockHash(result: JsonElement, expectedBlockNumber: Long): String? {
+    if (result.isJsonNull) return null
+    if (!result.isJsonObject) {
+        throw SettlementRpcException("eth_getBlockByNumber result must be an object or null")
+    }
+    val block = result.asJsonObject
+    val number = block.get("number")?.let(::resultString)?.let {
+        parseQuantity(it, "eth_getBlockByNumber block number")
+    } ?: throw SettlementRpcException("eth_getBlockByNumber result has no block number")
+    if (number != BigInteger.valueOf(expectedBlockNumber)) {
+        throw SettlementRpcException(
+            "eth_getBlockByNumber returned block $number for requested block $expectedBlockNumber",
+        )
+    }
+    val hash = block.get("hash")?.let(::resultString)
+        ?: throw SettlementRpcException("eth_getBlockByNumber result has no block hash")
+    if (!BLOCK_HASH_PATTERN.matches(hash)) {
+        throw SettlementRpcException("eth_getBlockByNumber returned a malformed block hash")
+    }
+    return hash.lowercase()
+}
+
+private fun decodeSettlementReceipt(result: JsonElement): SettlementReceipt? {
+    if (result.isJsonNull) return null
+    if (!result.isJsonObject) {
+        throw SettlementRpcException("eth_getTransactionReceipt result must be an object or null")
+    }
+    val receipt = result.asJsonObject
+    fun requiredString(name: String): String = receipt.get(name)?.let(::resultString)
+        ?: throw SettlementRpcException("Receipt has no $name")
+
+    val status = parseQuantity(requiredString("status"), "receipt status")
+    if (status != BigInteger.ZERO && status != BigInteger.ONE) {
+        throw SettlementRpcException("Receipt has invalid execution status $status")
+    }
+    val blockNumber = parseQuantity(
+        requiredString("blockNumber"),
+        "receipt block number",
+    ).toLongExactCompat("receipt block number")
+    val blockHash = requiredString("blockHash").also { hash ->
+        if (!BLOCK_HASH_PATTERN.matches(hash)) {
+            throw SettlementRpcException("Receipt has malformed block hash")
+        }
+    }.lowercase()
+    val transactionHash = requiredString("transactionHash").also { hash ->
+        if (!TRANSACTION_HASH_PATTERN.matches(hash)) {
+            throw SettlementRpcException("Receipt has malformed transaction hash")
+        }
+    }.lowercase()
+    val logsElement = receipt.get("logs")
+        ?: throw SettlementRpcException("Receipt has no logs")
+    if (!logsElement.isJsonArray) throw SettlementRpcException("Receipt logs must be an array")
+    val logs = logsElement.asJsonArray.map { element ->
+        if (!element.isJsonObject) throw SettlementRpcException("Receipt log must be an object")
+        val log = element.asJsonObject
+        fun logString(name: String): String = log.get(name)?.let(::resultString)
+            ?: throw SettlementRpcException("Receipt log has no $name")
+        val address = try {
+            EvmAddress.parse(logString("address")).value
+        } catch (_: IllegalArgumentException) {
+            throw SettlementRpcException("Receipt log has malformed address")
+        }
+        val topicsElement = log.get("topics")
+            ?: throw SettlementRpcException("Receipt log has no topics")
+        if (!topicsElement.isJsonArray) {
+            throw SettlementRpcException("Receipt log topics must be an array")
+        }
+        val topics = topicsElement.asJsonArray.map { topicElement ->
+            resultString(topicElement).also { topic ->
+                if (!BLOCK_HASH_PATTERN.matches(topic)) {
+                    throw SettlementRpcException("Receipt log has malformed topic")
+                }
+            }.lowercase()
+        }
+        val data = logString("data").also { value ->
+            if (!LOG_DATA_PATTERN.matches(value)) {
+                throw SettlementRpcException("Receipt log has malformed data")
+            }
+        }.lowercase()
+        val logTransactionHash = log.get("transactionHash")
+            ?.takeUnless(JsonElement::isJsonNull)
+            ?.let(::resultString)
+            ?.also { hash ->
+                if (!TRANSACTION_HASH_PATTERN.matches(hash)) {
+                    throw SettlementRpcException("Receipt log has malformed transaction hash")
+                }
+            }
+            ?.lowercase()
+            ?: transactionHash
+        val logBlockHash = log.get("blockHash")
+            ?.takeUnless(JsonElement::isJsonNull)
+            ?.let(::resultString)
+            ?.also { hash ->
+                if (!BLOCK_HASH_PATTERN.matches(hash)) {
+                    throw SettlementRpcException("Receipt log has malformed block hash")
+                }
+            }
+            ?.lowercase()
+            ?: blockHash
+        val logIndex = log.get("logIndex")
+            ?.takeUnless(JsonElement::isJsonNull)
+            ?.let(::resultString)
+            ?.let { parseQuantity(it, "receipt log index").toLongExactCompat("receipt log index") }
+        val removedElement = log.get("removed")
+        val removed = when {
+            removedElement == null || removedElement.isJsonNull -> false
+            removedElement.isJsonPrimitive && removedElement.asJsonPrimitive.isBoolean ->
+                removedElement.asBoolean
+            else -> throw SettlementRpcException("Receipt log removed flag must be boolean")
+        }
+        SettlementReceiptLog(
+            address = address,
+            topics = topics,
+            data = data,
+            transactionHash = logTransactionHash,
+            blockHash = logBlockHash,
+            logIndex = logIndex,
+            removed = removed,
+        )
+    }
+    return SettlementReceipt(
+        successful = status == BigInteger.ONE,
+        blockNumber = blockNumber,
+        blockHash = blockHash,
+        transactionHash = transactionHash,
+        logs = logs,
+    )
+}
+
+private val RPC_QUANTITY_PATTERN = Regex("^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$")
+private val BLOCK_HASH_PATTERN = Regex("^0x[0-9a-fA-F]{64}$")
+private val TRANSACTION_HASH_PATTERN = Regex("^0x[0-9a-fA-F]{64}$")
+private val LOG_DATA_PATTERN = Regex("^0x(?:[0-9a-fA-F]{2})*$")
 
 private fun BigInteger.toLongExactCompat(label: String): Long {
     require(signum() >= 0 && bitLength() <= 63) { "$label exceeds signed 64-bit storage" }

@@ -87,6 +87,288 @@ private actor FixtureRPC: EthereumReadRPC {
     }
 }
 
+private actor ConcurrentValidationRPC: EthereumReadRPC {
+    let factory: EthereumAddress
+    let implementation: EthereumAddress
+    let vault: EthereumAddress
+    let token: EthereumAddress
+    private(set) var requestCount = 0
+    private(set) var maximumInFlight = 0
+    private var inFlight = 0
+
+    init(
+        factory: EthereumAddress,
+        implementation: EthereumAddress,
+        vault: EthereumAddress,
+        token: EthereumAddress
+    ) {
+        self.factory = factory
+        self.implementation = implementation
+        self.vault = vault
+        self.token = token
+    }
+
+    func chainID() async throws -> UInt64 { await delayed(84_532) }
+    func blockNumber() async throws -> UInt64 { await delayed(100) }
+    func canonicalBlockHash(at blockNumber: UInt64) async throws -> Bytes32 {
+        await delayed(fixtureBlockHash(blockNumber))
+    }
+    func code(at address: EthereumAddress, block: RPCBlockTag) async throws -> Data {
+        await delayed(Data([0x60, 0x01]))
+    }
+    func call(to address: EthereumAddress, data: Data, block: RPCBlockTag) async throws -> Data {
+        let selector = Data(data.prefix(4))
+        let result: Data
+        if address == factory && selector == ABI.implementationSelector {
+            result = ABI.word(implementation)
+        } else if address == vault && selector == ABI.factorySelector {
+            result = ABI.word(factory)
+        } else if address == vault && selector == ABI.isPaymentTokenSelector {
+            result = ABI.word(UInt64(1))
+        } else if address == token && selector == ABI.decimalsSelector {
+            result = ABI.word(UInt64(18))
+        } else if address == token && selector == ABI.symbolSelector {
+            result = abiDynamicString("AUD")
+        } else {
+            throw URLError(.badServerResponse)
+        }
+        return await delayed(result)
+    }
+
+    private func delayed<T: Sendable>(_ value: T) async -> T {
+        requestCount += 1
+        inFlight += 1
+        maximumInFlight = max(maximumInFlight, inFlight)
+        try? await Task.sleep(for: .milliseconds(20))
+        inFlight -= 1
+        return value
+    }
+}
+
+private actor BatchedValidationRPC: EthereumBatchReadRPC {
+    let factory: EthereumAddress
+    let implementation: EthereumAddress
+    let vault: EthereumAddress
+    let token: EthereumAddress
+    private(set) var batchSizes = [Int]()
+    private(set) var proofBlocks = [RPCBlockTag]()
+    private var canonicalHeadReads = 0
+    let replaceFinalHeadHash: Bool
+
+    init(
+        factory: EthereumAddress,
+        implementation: EthereumAddress,
+        vault: EthereumAddress,
+        token: EthereumAddress,
+        replaceFinalHeadHash: Bool = false
+    ) {
+        self.factory = factory
+        self.implementation = implementation
+        self.vault = vault
+        self.token = token
+        self.replaceFinalHeadHash = replaceFinalHeadHash
+    }
+
+    func batch(_ requests: [EthereumReadBatchRequest]) async throws -> [EthereumReadBatchResult] {
+        batchSizes.append(requests.count)
+        return try requests.map { request -> EthereumReadBatchResult in
+            switch request {
+            case .chainID:
+                return .quantity(84_532)
+            case .blockNumber:
+                return .quantity(123)
+            case .latestBlockIdentity:
+                return .blockIdentity(number: 123, hash: fixtureBlockHash(123))
+            case let .canonicalBlockHash(block):
+                canonicalHeadReads += 1
+                return .blockHash(fixtureBlockHash(
+                    block,
+                    fork: replaceFinalHeadHash ? 1 : 0
+                ))
+            case let .code(_, block):
+                proofBlocks.append(block)
+                return .data(Data([0x60, 0x01]))
+            case let .call(address, data, block):
+                proofBlocks.append(block)
+                let selector = Data(data.prefix(4))
+                if address == factory && selector == ABI.implementationSelector {
+                    return .data(ABI.word(implementation))
+                }
+                if address == vault && selector == ABI.factorySelector {
+                    return .data(ABI.word(factory))
+                }
+                if address == vault && selector == ABI.isPaymentTokenSelector {
+                    return .data(ABI.word(UInt64(1)))
+                }
+                if address == token && selector == ABI.decimalsSelector {
+                    return .data(ABI.word(UInt64(18)))
+                }
+                if address == token && selector == ABI.symbolSelector {
+                    return .data(abiDynamicString("AUD"))
+                }
+                throw URLError(.badServerResponse)
+            }
+        }
+    }
+
+    func chainID() async throws -> UInt64 { 84_532 }
+    func blockNumber() async throws -> UInt64 { 123 }
+    func canonicalBlockHash(at blockNumber: UInt64) async throws -> Bytes32 {
+        fixtureBlockHash(blockNumber)
+    }
+    func code(at address: EthereumAddress, block: RPCBlockTag) async throws -> Data {
+        Data([0x60, 0x01])
+    }
+    func call(to address: EthereumAddress, data: Data, block: RPCBlockTag) async throws -> Data {
+        throw URLError(.unsupportedURL)
+    }
+}
+
+private actor ConcurrentMultiTokenValidationRPC: EthereumBatchReadRPC {
+    let factory: EthereumAddress
+    let implementation: EthereumAddress
+    let vault: EthereumAddress
+    let symbols: [EthereumAddress: String]
+    private(set) var batchSizes = [Int]()
+    private(set) var maximumInFlight = 0
+    private var inFlight = 0
+
+    init(
+        factory: EthereumAddress,
+        implementation: EthereumAddress,
+        vault: EthereumAddress,
+        symbols: [EthereumAddress: String]
+    ) {
+        self.factory = factory
+        self.implementation = implementation
+        self.vault = vault
+        self.symbols = symbols
+    }
+
+    func batch(_ requests: [EthereumReadBatchRequest]) async throws -> [EthereumReadBatchResult] {
+        batchSizes.append(requests.count)
+        inFlight += 1
+        maximumInFlight = max(maximumInFlight, inFlight)
+        try await Task.sleep(for: .milliseconds(10))
+        inFlight -= 1
+        return try requests.map { request -> EthereumReadBatchResult in
+            switch request {
+            case .chainID:
+                return .quantity(84_532)
+            case .blockNumber:
+                return .quantity(123)
+            case .latestBlockIdentity:
+                return .blockIdentity(number: 123, hash: fixtureBlockHash(123))
+            case let .canonicalBlockHash(block):
+                return .blockHash(fixtureBlockHash(block))
+            case .code:
+                return .data(Data([0x60, 0x01]))
+            case let .call(address, data, _):
+                switch Data(data.prefix(4)) {
+                case ABI.implementationSelector where address == factory:
+                    return .data(ABI.word(implementation))
+                case ABI.factorySelector where address == vault:
+                    return .data(ABI.word(factory))
+                case ABI.isPaymentTokenSelector where address == vault:
+                    return .data(ABI.word(UInt64(1)))
+                case ABI.decimalsSelector where symbols[address] != nil:
+                    return .data(ABI.word(UInt64(18)))
+                case ABI.symbolSelector:
+                    guard let symbol = symbols[address] else {
+                        throw URLError(.badServerResponse)
+                    }
+                    return .data(abiDynamicString(symbol))
+                default:
+                    throw URLError(.badServerResponse)
+                }
+            }
+        }
+    }
+
+    func chainID() async throws -> UInt64 { 84_532 }
+    func blockNumber() async throws -> UInt64 { 123 }
+    func canonicalBlockHash(at blockNumber: UInt64) async throws -> Bytes32 {
+        fixtureBlockHash(blockNumber)
+    }
+    func code(at address: EthereumAddress, block: RPCBlockTag) async throws -> Data {
+        Data([0x60, 0x01])
+    }
+    func call(to address: EthereumAddress, data: Data, block: RPCBlockTag) async throws -> Data {
+        throw URLError(.unsupportedURL)
+    }
+}
+
+private actor BatchedPaymentRPC: EthereumBatchReadRPC {
+    let reportedChainID: UInt64
+    let token: EthereumAddress
+    let balance: UInt256
+    private(set) var batches = [[EthereumReadBatchRequest]]()
+    private(set) var directBlockHashReads = 0
+    private(set) var maximumInFlightBatches = 0
+    private var inFlightBatches = 0
+    private var headHashReads = 0
+    let replaceFinalHeadHash: Bool
+
+    init(
+        chainID: UInt64,
+        token: EthereumAddress,
+        balance: UInt256,
+        replaceFinalHeadHash: Bool = false
+    ) {
+        reportedChainID = chainID
+        self.token = token
+        self.balance = balance
+        self.replaceFinalHeadHash = replaceFinalHeadHash
+    }
+
+    func batch(_ requests: [EthereumReadBatchRequest]) async throws -> [EthereumReadBatchResult] {
+        batches.append(requests)
+        inFlightBatches += 1
+        maximumInFlightBatches = max(maximumInFlightBatches, inFlightBatches)
+        try await Task.sleep(for: .milliseconds(5))
+        inFlightBatches -= 1
+        return try requests.map { request in
+            switch request {
+            case .chainID:
+                return .quantity(reportedChainID)
+            case .blockNumber:
+                return .quantity(100)
+            case .latestBlockIdentity:
+                return .blockIdentity(number: 100, hash: fixtureBlockHash(100))
+            case let .canonicalBlockHash(block):
+                if block == 100 {
+                    headHashReads += 1
+                    let fork: UInt64 = replaceFinalHeadHash ? 1 : 0
+                    return .blockHash(fixtureBlockHash(block, fork: fork))
+                }
+                return .blockHash(fixtureBlockHash(block))
+            case let .call(address, data, block):
+                guard address == token,
+                      Data(data.prefix(4)) == ABI.balanceOfSelector,
+                      block == .number(100)
+                else { throw URLError(.badServerResponse) }
+                return .data(ABI.word(balance))
+            case let .code(_, block):
+                guard block == .number(100) else { throw URLError(.badServerResponse) }
+                return .data(Data())
+            }
+        }
+    }
+
+    func chainID() async throws -> UInt64 { reportedChainID }
+    func blockNumber() async throws -> UInt64 { 100 }
+    func canonicalBlockHash(at blockNumber: UInt64) async throws -> Bytes32 {
+        directBlockHashReads += 1
+        return fixtureBlockHash(blockNumber)
+    }
+    func code(at address: EthereumAddress, block: RPCBlockTag) async throws -> Data {
+        throw URLError(.unsupportedURL)
+    }
+    func call(to address: EthereumAddress, data: Data, block: RPCBlockTag) async throws -> Data {
+        throw URLError(.unsupportedURL)
+    }
+}
+
 private func fixtureBlockHash(_ block: UInt64, fork: UInt64 = 0) -> Bytes32 {
     let prefix = String(repeating: "0", count: 32)
     let forkHex = String(format: "%016llx", fork)
@@ -139,6 +421,104 @@ final class ValidationAndMonitorTests: XCTestCase {
         } catch let ConfigurationValidationError.wrongChain(expected, actual) {
             XCTAssertEqual(expected, 84_532)
             XCTAssertEqual(actual, 1)
+        }
+    }
+
+    func testConfigurationValidationUsesThreeFixedHeadBatches() async throws {
+        let rpc = BatchedValidationRPC(
+            factory: factory,
+            implementation: implementation,
+            vault: vault,
+            token: tokenAddress
+        )
+
+        let report = try await ConfigurationValidator(rpc: rpc).validate(
+            makeConfiguration(requiredBlocks: 2)
+        )
+
+        XCTAssertEqual(report.chainID, 84_532)
+        let batchSizes = await rpc.batchSizes
+        XCTAssertEqual(batchSizes, [2, 9, 1])
+        let proofBlocks = await rpc.proofBlocks
+        XCTAssertEqual(proofBlocks.count, 9)
+        XCTAssertTrue(proofBlocks.allSatisfy { $0 == .number(123) })
+    }
+
+    func testMultiTokenConfigurationProofUsesConcurrentOrderedTenItemChunks() async throws {
+        let tokens = try (1...20).map { index in
+            try PaymentToken(
+                address: EthereumAddress(
+                    hex: "0x" + String(format: "%040llx", index + 100)
+                ),
+                symbol: "T\(index)",
+                decimals: 18
+            )
+        }
+        let rpc = ConcurrentMultiTokenValidationRPC(
+            factory: factory,
+            implementation: implementation,
+            vault: vault,
+            symbols: Dictionary(uniqueKeysWithValues: tokens.map { ($0.address, $0.symbol) })
+        )
+        let configuration = try TerminalConfiguration(
+            chainID: 84_532,
+            rpcEndpoints: [URL(string: "https://rpc.example")!],
+            protocolVersion: .v1_4_1,
+            deployment: OPKDeployment(
+                factory: factory,
+                receiverImplementation: implementation,
+                vault: vault
+            ),
+            tokens: tokens,
+            confirmationPolicy: .init(requiredBlocks: 2),
+            create2TestVector: nil
+        )
+
+        let report = try await ConfigurationValidator(rpc: rpc).validate(configuration)
+
+        XCTAssertEqual(report.checks.filter { $0.name.hasPrefix("token ") }.count, 20)
+        let sizes = await rpc.batchSizes
+        XCTAssertEqual(sizes.reduce(0, +), 88) // 2 anchor + (5 + 4*20) proof + 1 final.
+        XCTAssertTrue(sizes.allSatisfy { $0 <= 10 })
+        XCTAssertEqual(sizes.count, 11)
+        let peak = await rpc.maximumInFlight
+        XCTAssertEqual(peak, 6)
+    }
+
+    func testConfigurationFallbackParallelismIsBoundedByValidationPhase() async throws {
+        let rpc = ConcurrentValidationRPC(
+            factory: factory,
+            implementation: implementation,
+            vault: vault,
+            token: tokenAddress
+        )
+
+        _ = try await ConfigurationValidator(rpc: rpc).validate(
+            makeConfiguration(requiredBlocks: 2)
+        )
+
+        let requestCount = await rpc.requestCount
+        let maximumInFlight = await rpc.maximumInFlight
+        XCTAssertEqual(requestCount, 13)
+        XCTAssertEqual(maximumInFlight, 5)
+    }
+
+    func testConfigurationValidationRejectsCanonicalHeadReplacement() async throws {
+        let rpc = BatchedValidationRPC(
+            factory: factory,
+            implementation: implementation,
+            vault: vault,
+            token: tokenAddress,
+            replaceFinalHeadHash: true
+        )
+
+        do {
+            _ = try await ConfigurationValidator(rpc: rpc).validate(
+                makeConfiguration(requiredBlocks: 2)
+            )
+            XCTFail("Expected canonical replacement to reject the configuration proof")
+        } catch let ConfigurationValidationError.canonicalBlockChanged(blockNumber) {
+            XCTAssertEqual(blockNumber, 123)
         }
     }
 
@@ -196,6 +576,302 @@ final class ValidationAndMonitorTests: XCTestCase {
             observation.status,
             .overpaid(received: UInt256(1_250), excess: UInt256(250))
         )
+    }
+
+    func testMonitorBatchesNetworkAnchorAndFixedHeadBalanceRead() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 2)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+        let rpc = BatchedPaymentRPC(
+            chainID: configuration.chainID,
+            token: tokenAddress,
+            balance: UInt256(400)
+        )
+        let monitor = PaymentMonitor(
+            rpc: rpc,
+            confirmationPolicy: configuration.confirmationPolicy
+        )
+
+        let observation = try await monitor.sample(
+            request,
+            expectedChainID: configuration.chainID
+        )
+
+        XCTAssertEqual(observation.status, .partial(received: UInt256(400)))
+        let batches = await rpc.batches
+        XCTAssertEqual(batches.map(\.count), [2, 1, 1])
+        XCTAssertEqual(batches[0], [.chainID, .latestBlockIdentity])
+        let directBlockHashReads = await rpc.directBlockHashReads
+        XCTAssertEqual(directBlockHashReads, 0)
+    }
+
+    func testReceiverFreshnessUsesAnchoredFixedBlockAndRejectsReorg() async throws {
+        let stableRPC = BatchedPaymentRPC(
+            chainID: 84_532,
+            token: tokenAddress,
+            balance: .zero
+        )
+        let proof = try await ReceiverFreshnessValidator(rpc: stableRPC).validate(
+            receiver: vault,
+            token: tokenAddress,
+            expectedChainID: 84_532
+        )
+        XCTAssertEqual(proof.blockNumber, 100)
+        XCTAssertEqual(proof.blockHash, fixtureBlockHash(100))
+        XCTAssertTrue(proof.receiverCode.isEmpty)
+        XCTAssertTrue(proof.tokenBalance.isZero)
+        let stableBatches = await stableRPC.batches
+        XCTAssertEqual(stableBatches.map(\.count), [2, 2, 1])
+        XCTAssertEqual(stableBatches[0], [.chainID, .latestBlockIdentity])
+        XCTAssertTrue(stableBatches[1].allSatisfy { request in
+            switch request {
+            case let .code(_, block), let .call(_, _, block): block == .number(100)
+            default: false
+            }
+        })
+
+        let reorgRPC = BatchedPaymentRPC(
+            chainID: 84_532,
+            token: tokenAddress,
+            balance: .zero,
+            replaceFinalHeadHash: true
+        )
+        do {
+            _ = try await ReceiverFreshnessValidator(rpc: reorgRPC).validate(
+                receiver: vault,
+                token: tokenAddress,
+                expectedChainID: 84_532
+            )
+            XCTFail("Expected receiver freshness to reject a canonical replacement")
+        } catch let PaymentMonitorError.canonicalBlockChanged(blockNumber) {
+            XCTAssertEqual(blockNumber, 100)
+        }
+    }
+
+    func testTwentyInvoiceTwoCursorSampleUsesThreeWavesAndStrictBoundedBatches() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 2)
+        var inputs = [PaymentSampleInput]()
+        for index in 0..<20 {
+            let nonce = try Bytes32(
+                hex: "0x" + String(repeating: "0", count: 62)
+                    + String(format: "%02x", index + 1)
+            )
+            let request = try InvoiceFactory.create(
+                terminalIdentifier: .init(address: vault),
+                amount: UInt256(1_000),
+                token: configuration.tokens[0],
+                configuration: configuration,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                nonce: nonce
+            )
+            inputs.append(PaymentSampleInput(
+                request: request,
+                previousThresholdCursor: PaymentConfirmationCursor(
+                    blockNumber: UInt64(10 + index),
+                    blockHash: fixtureBlockHash(UInt64(10 + index))
+                ),
+                additionalCursors: [PaymentConfirmationCursor(
+                    blockNumber: UInt64(40 + index),
+                    blockHash: fixtureBlockHash(UInt64(40 + index))
+                )]
+            ))
+        }
+        let rpc = BatchedPaymentRPC(
+            chainID: configuration.chainID,
+            token: tokenAddress,
+            balance: UInt256(1_000)
+        )
+        let monitor = PaymentMonitor(
+            rpc: rpc,
+            confirmationPolicy: configuration.confirmationPolicy
+        )
+
+        let observations = try await monitor.sampleBatch(
+            inputs,
+            expectedChainID: configuration.chainID
+        )
+
+        XCTAssertEqual(observations.count, 20)
+        XCTAssertTrue(observations.allSatisfy {
+            $0.status == .paid(received: UInt256(1_000))
+        })
+        let batchSizes = await rpc.batches.map(\.count)
+        XCTAssertEqual(batchSizes.first, 2)
+        XCTAssertEqual(batchSizes.last, 1)
+        XCTAssertEqual(batchSizes.count, 8)
+        XCTAssertEqual(batchSizes.reduce(0, +), 63)
+        XCTAssertTrue(batchSizes.allSatisfy { $0 <= 10 })
+        let maximumInFlight = await rpc.maximumInFlightBatches
+        XCTAssertEqual(maximumInFlight, 6)
+    }
+
+    func testBatchSampleRejectsHeadReorgAndDoesNotValidateReplacedCursor() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 2)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+        let cursor = PaymentConfirmationCursor(
+            blockNumber: 99,
+            blockHash: fixtureBlockHash(99, fork: 1)
+        )
+        let stableRPC = BatchedPaymentRPC(
+            chainID: configuration.chainID,
+            token: tokenAddress,
+            balance: UInt256(1_000)
+        )
+        let stableMonitor = PaymentMonitor(
+            rpc: stableRPC,
+            confirmationPolicy: configuration.confirmationPolicy
+        )
+        let observation = try await stableMonitor.sampleBatch(
+            [PaymentSampleInput(
+                request: request,
+                previousThresholdCursor: cursor,
+                additionalCursors: [cursor]
+            )],
+            expectedChainID: configuration.chainID
+        )[0]
+        XCTAssertFalse(observation.validated(cursor))
+        XCTAssertEqual(observation.thresholdBlock, 100)
+
+        let reorgRPC = BatchedPaymentRPC(
+            chainID: configuration.chainID,
+            token: tokenAddress,
+            balance: UInt256(1_000),
+            replaceFinalHeadHash: true
+        )
+        do {
+            _ = try await PaymentMonitor(
+                rpc: reorgRPC,
+                confirmationPolicy: configuration.confirmationPolicy
+            ).sampleBatch(
+                [PaymentSampleInput(request: request)],
+                expectedChainID: configuration.chainID
+            )
+            XCTFail("Expected the final canonical-head mismatch to fail closed")
+        } catch let PaymentMonitorError.canonicalBlockChanged(blockNumber) {
+            XCTAssertEqual(blockNumber, 100)
+        }
+    }
+
+    func testMonitorRejectsWrongChainBeforeAnyPaymentStateRead() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 2)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+        let rpc = BatchedPaymentRPC(
+            chainID: 1,
+            token: tokenAddress,
+            balance: UInt256(1_000)
+        )
+        let monitor = PaymentMonitor(
+            rpc: rpc,
+            confirmationPolicy: configuration.confirmationPolicy
+        )
+
+        do {
+            // Omitting the optional override must still derive the required network from the
+            // immutable invoice and prove it before reading payment state.
+            _ = try await monitor.sample(request)
+            XCTFail("Expected chain mismatch")
+        } catch let PaymentMonitorError.wrongChain(expected, actual) {
+            XCTAssertEqual(expected, configuration.chainID)
+            XCTAssertEqual(actual, 1)
+        }
+        let batches = await rpc.batches
+        XCTAssertEqual(batches, [[.chainID, .latestBlockIdentity]])
+        let directBlockHashReads = await rpc.directBlockHashReads
+        XCTAssertEqual(directBlockHashReads, 0)
+    }
+
+    func testMonitorRejectsExplicitNetworkThatDisagreesWithInvoiceBeforeRPC() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 2)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+        let rpc = BatchedPaymentRPC(
+            chainID: configuration.chainID,
+            token: tokenAddress,
+            balance: UInt256(1_000)
+        )
+
+        do {
+            _ = try await PaymentMonitor(
+                rpc: rpc,
+                confirmationPolicy: configuration.confirmationPolicy
+            ).sample(request, expectedChainID: 1)
+            XCTFail("Expected invoice/override mismatch")
+        } catch let PaymentMonitorError.requestChainMismatch(expected, invoice) {
+            XCTAssertEqual(expected, 1)
+            XCTAssertEqual(invoice, configuration.chainID)
+        }
+        let batches = await rpc.batches
+        XCTAssertTrue(batches.isEmpty)
+    }
+
+    func testBatchMonitorRejectsMixedInvoiceNetworksBeforeRPC() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 2)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+        let otherNetworkRequest = PaymentRequest(
+            invoiceID: request.invoiceID,
+            terminalIdentifier: request.terminalIdentifier,
+            chainID: 1,
+            vault: request.vault,
+            receiver: request.receiver,
+            token: request.token,
+            expectedAmount: request.expectedAmount,
+            erc681URI: request.erc681URI,
+            createdAt: request.createdAt,
+            expiresAt: request.expiresAt
+        )
+        let rpc = BatchedPaymentRPC(
+            chainID: configuration.chainID,
+            token: tokenAddress,
+            balance: UInt256(1_000)
+        )
+
+        do {
+            _ = try await PaymentMonitor(
+                rpc: rpc,
+                confirmationPolicy: configuration.confirmationPolicy
+            ).sampleBatch([
+                PaymentSampleInput(request: request),
+                PaymentSampleInput(request: otherNetworkRequest),
+            ])
+            XCTFail("Expected mixed-network sample rejection")
+        } catch PaymentMonitorError.mixedRequestChains {
+            // Expected.
+        }
+        let batches = await rpc.batches
+        XCTAssertTrue(batches.isEmpty)
     }
 
     func testReplacementForkCannotInheritPaymentConfirmationsAtSameBalance() async throws {

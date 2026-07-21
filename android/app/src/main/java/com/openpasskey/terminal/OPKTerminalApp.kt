@@ -12,6 +12,7 @@ import com.openpasskey.terminal.settlement.DaoOperatorResetGuard
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.lifecycle.TerminalResetCoordinator
 import com.openpasskey.terminal.lifecycle.RpcOperatorNativeBalanceReader
+import com.openpasskey.terminal.rpc.RpcWorkCoordinator
 
 class OPKTerminalApp : Application() {
     val chainConfig by lazy { ChainConfig(this) }
@@ -19,6 +20,7 @@ class OPKTerminalApp : Application() {
     val operatorWalletStore by lazy { OperatorWalletStore(this) }
     val adminPinStore by lazy { AdminPinStore(this) }
     val terminalLifecycleGate by lazy { TerminalLifecycleGate() }
+    val rpcWorkCoordinator by lazy { RpcWorkCoordinator() }
     val terminalProvisioner by lazy {
         TerminalProvisioner(
             chainConfig::snapshot,
@@ -46,6 +48,7 @@ class OPKTerminalApp : Application() {
             chainConfig,
             operatorWalletStore,
             terminalLifecycleGate,
+            rpcWorkCoordinator,
         )
     }
     val settlementRepository by lazy {
@@ -54,6 +57,7 @@ class OPKTerminalApp : Application() {
             operatorWalletStore,
             chainConfig,
             terminalLifecycleGate,
+            rpcWorkCoordinator,
         )
     }
 }

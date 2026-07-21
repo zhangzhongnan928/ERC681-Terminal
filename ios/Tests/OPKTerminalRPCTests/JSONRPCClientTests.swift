@@ -10,6 +10,7 @@ import XCTest
 private actor QueueTransport: RPCTransport {
     private var responses: [RPCTransportResponse]
     private(set) var requestBodies = [Data]()
+    private(set) var requestTimeouts = [TimeInterval]()
 
     init(_ bodies: [String], statusCode: Int = 200) {
         responses = bodies.map {
@@ -19,6 +20,7 @@ private actor QueueTransport: RPCTransport {
 
     func send(_ request: URLRequest) async throws -> RPCTransportResponse {
         requestBodies.append(request.httpBody ?? Data())
+        requestTimeouts.append(request.timeoutInterval)
         guard !responses.isEmpty else { throw URLError(.badServerResponse) }
         return responses.removeFirst()
     }
@@ -29,7 +31,7 @@ final class JSONRPCClientTests: XCTestCase {
         let transport = QueueTransport([
             #"{"jsonrpc":"2.0","id":1,"result":"0x14a34"}"#,
             #"{"jsonrpc":"2.0","id":2,"result":"0x10"}"#,
-            #"{"jsonrpc":"2.0","id":3,"result":{"hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
+            #"{"jsonrpc":"2.0","id":3,"result":{"number":"0x10","hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
             #"{"jsonrpc":"2.0","id":4,"result":"0x6001"}"#,
             #"{"jsonrpc":"2.0","id":5,"result":"0x000000000000000000000000000000000000000000000000000000000000002a"}"#,
         ])
@@ -92,5 +94,131 @@ final class JSONRPCClientTests: XCTestCase {
         XCTAssertThrowsError(try JSONRPCEthereumClient.decodeQuantity("0x00"))
         XCTAssertThrowsError(try JSONRPCEthereumClient.decodeQuantity("255"))
     }
+
+    func testCanonicalBlockHashRejectsMismatchedReturnedBlockNumber() async throws {
+        let transport = QueueTransport([
+            #"{"jsonrpc":"2.0","id":1,"result":{"number":"0x11","hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
+            #"[{"jsonrpc":"2.0","id":2,"result":{"number":"0x11","hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]"#,
+        ])
+        let client = try JSONRPCEthereumClient(
+            endpoint: URL(string: "https://rpc.example")!,
+            transport: transport
+        )
+
+        await XCTAssertThrowsErrorAsync(
+            try await client.canonicalBlockHash(at: 16)
+        )
+        await XCTAssertThrowsErrorAsync(
+            try await client.batch([.canonicalBlockHash(16)])
+        )
+    }
+
+    func testStrictBatchAcceptsOutOfOrderCompleteResponsesAndUsesOneRequest() async throws {
+        let transport = QueueTransport([
+            #"[{"jsonrpc":"2.0","id":2,"result":"0x10"},{"jsonrpc":"2.0","id":1,"result":"0x14a34"}]"#,
+        ])
+        let client = try JSONRPCEthereumClient(
+            endpoint: URL(string: "https://rpc.example")!,
+            transport: transport
+        )
+
+        let values = try await client.batch([.chainID, .blockNumber])
+
+        XCTAssertEqual(values, [.quantity(84_532), .quantity(16)])
+        let bodies = await transport.requestBodies
+        XCTAssertEqual(bodies.count, 1)
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: bodies[0]) as? [[String: Any]]
+        )
+        XCTAssertEqual(json.count, 2)
+        XCTAssertEqual(Set(json.compactMap { $0["method"] as? String }), [
+            "eth_chainId", "eth_blockNumber",
+        ])
+    }
+
+    func testStrictBatchRejectsDuplicateMissingAndUnexpectedIDs() async throws {
+        for body in [
+            #"[{"jsonrpc":"2.0","id":1,"result":"0x1"},{"jsonrpc":"2.0","id":1,"result":"0x2"}]"#,
+            #"[{"jsonrpc":"2.0","id":1,"result":"0x1"}]"#,
+            #"[{"jsonrpc":"2.0","id":1,"result":"0x1"},{"jsonrpc":"2.0","id":99,"result":"0x2"}]"#,
+        ] {
+            let transport = QueueTransport([body])
+            let client = try JSONRPCEthereumClient(
+                endpoint: URL(string: "https://rpc.example")!,
+                transport: transport
+            )
+            await XCTAssertThrowsErrorAsync(
+                try await client.batch([.chainID, .blockNumber])
+            )
+        }
+    }
+
+    func testResponseIDsRejectDecimalExponentStringAndBooleanForms() async throws {
+        let invalidIDs = ["1.0", "1e0", "\"1\"", "true"]
+        for invalidID in invalidIDs {
+            let single = QueueTransport([
+                "{\"jsonrpc\":\"2.0\",\"id\":\(invalidID),\"result\":\"0x14a34\"}",
+            ])
+            let singleClient = try JSONRPCEthereumClient(
+                endpoint: URL(string: "https://rpc.example")!,
+                transport: single
+            )
+            await XCTAssertThrowsErrorAsync(try await singleClient.chainID())
+
+            let batch = QueueTransport([
+                "[{\"jsonrpc\":\"2.0\",\"id\":\(invalidID),\"result\":\"0x14a34\"},"
+                    + "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":\"0x10\"}]",
+            ])
+            let batchClient = try JSONRPCEthereumClient(
+                endpoint: URL(string: "https://rpc.example")!,
+                transport: batch
+            )
+            await XCTAssertThrowsErrorAsync(
+                try await batchClient.batch([.chainID, .blockNumber])
+            )
+        }
+    }
+
+    func testEndpointPoolReusesClientIdentityWithoutSharingAcrossEndpoints() throws {
+        let pool = EthereumRPCClientPool(transport: QueueTransport([]))
+        let firstEndpoint = URL(string: "https://rpc.example")!
+        let secondEndpoint = URL(string: "https://rpc-two.example")!
+
+        let first = try pool.client(for: firstEndpoint)
+        XCTAssertTrue(first === (try pool.client(for: firstEndpoint)))
+        XCTAssertFalse(first === (try pool.client(for: secondEndpoint)))
+    }
+
+    func testTaskLocalDeadlineBoundsPhysicalRequestTimeout() async throws {
+        let transport = QueueTransport([
+            #"{"jsonrpc":"2.0","id":1,"result":"0x14a34"}"#,
+        ])
+        let client = try JSONRPCEthereumClient(
+            endpoint: URL(string: "https://rpc.example")!,
+            transport: transport
+        )
+
+        let chainID = try await RPCRequestDeadline.withDeadline(after: .seconds(5)) {
+            try await client.chainID()
+        }
+
+        XCTAssertEqual(chainID, 84_532)
+        let timeouts = await transport.requestTimeouts
+        let timeout = try XCTUnwrap(timeouts.first)
+        XCTAssertGreaterThan(timeout, 0)
+        XCTAssertLessThanOrEqual(timeout, 5)
+        XCTAssertLessThan(timeout, 20)
+    }
+}
+
+private func XCTAssertThrowsErrorAsync<T>(
+    _ expression: @autoclosure () async throws -> T,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    do {
+        _ = try await expression()
+        XCTFail("Expected an error", file: file, line: line)
+    } catch {}
 }
 #endif

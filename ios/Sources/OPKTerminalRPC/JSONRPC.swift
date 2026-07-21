@@ -53,6 +53,124 @@ public protocol RPCTransport: Sendable {
     func send(_ request: URLRequest) async throws -> RPCTransportResponse
 }
 
+public enum RPCRequestDeadlineError: Error, Equatable, Sendable {
+    case expired
+}
+
+extension RPCRequestDeadlineError: LocalizedError {
+    public var errorDescription: String? {
+        "The RPC work deadline expired before the request completed."
+    }
+}
+
+/// An absolute task-local budget for cooperative background RPC units. Every physical request
+/// derives its timeout immediately before transport, so time already spent in earlier proof waves
+/// or waiting for the shared origin limiter reduces the next request's budget. Interactive calls
+/// do not install this value and retain the normal transport timeouts.
+public enum RPCRequestDeadline {
+    @TaskLocal public static var current: ContinuousClock.Instant?
+
+    private static let clock = ContinuousClock()
+
+    public static func withDeadline<Value>(
+        after duration: Duration,
+        isolation: isolated (any Actor)? = #isolation,
+        operation: () async throws -> Value
+    ) async rethrows -> Value {
+        precondition(duration > .zero)
+        let proposed = clock.now.advanced(by: duration)
+        let effective = current.map { min($0, proposed) } ?? proposed
+        return try await $current.withValue(effective) {
+            try await operation()
+        }
+    }
+
+    public static func boundedRequestTimeout(
+        default defaultTimeout: TimeInterval
+    ) throws -> TimeInterval {
+        guard let current else { return defaultTimeout }
+        let remaining = clock.now.duration(to: current)
+        guard remaining > .zero else { throw RPCRequestDeadlineError.expired }
+        let components = remaining.components
+        let seconds = Double(components.seconds)
+            + Double(components.attoseconds) / 1_000_000_000_000_000_000
+        guard seconds > 0 else { throw RPCRequestDeadlineError.expired }
+        return min(defaultTimeout, max(0.001, seconds))
+    }
+
+    public static func check() throws {
+        guard let current, clock.now >= current else { return }
+        throw RPCRequestDeadlineError.expired
+    }
+}
+
+/// Process-wide public-RPC concurrency budget shared by read and operator clients. Limits are
+/// isolated per normalized origin (scheme, host, effective port), so independent networks do not
+/// block each other while helper-local task groups cannot accidentally stack beyond six physical
+/// HTTP requests to one free endpoint.
+public actor RPCOriginRequestLimiter {
+    public static let shared = RPCOriginRequestLimiter()
+
+    private struct OriginState {
+        var active = 0
+        var waiters = [CheckedContinuation<Void, Never>]()
+    }
+
+    private let maximumConcurrentRequests: Int
+    private var states = [String: OriginState]()
+
+    public init(maximumConcurrentRequests: Int = 6) {
+        self.maximumConcurrentRequests = max(1, maximumConcurrentRequests)
+    }
+
+    public func withPermit<Value: Sendable>(
+        for endpoint: URL,
+        operation: @Sendable () async throws -> Value
+    ) async throws -> Value {
+        let origin = Self.originKey(endpoint)
+        await acquire(origin)
+        defer { release(origin) }
+        try Task.checkCancellation()
+        return try await operation()
+    }
+
+    private func acquire(_ origin: String) async {
+        var state = states[origin] ?? OriginState()
+        if state.active < maximumConcurrentRequests {
+            state.active += 1
+            states[origin] = state
+            return
+        }
+        await withCheckedContinuation { continuation in
+            state.waiters.append(continuation)
+            states[origin] = state
+        }
+    }
+
+    private func release(_ origin: String) {
+        guard var state = states[origin], state.active > 0 else { return }
+        if !state.waiters.isEmpty {
+            let next = state.waiters.removeFirst()
+            states[origin] = state
+            next.resume()
+        } else {
+            state.active -= 1
+            if state.active == 0 {
+                states.removeValue(forKey: origin)
+            } else {
+                states[origin] = state
+            }
+        }
+    }
+
+    private nonisolated static func originKey(_ endpoint: URL) -> String {
+        let scheme = endpoint.scheme?.lowercased() ?? ""
+        let host = endpoint.host?.lowercased() ?? ""
+        let effectivePort = endpoint.port ?? (scheme == "https" ? 443 : 80)
+        return "\(scheme)://\(host):\(effectivePort)"
+    }
+}
+
 private final class NoRedirectSessionDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(
         _ session: URLSession,
@@ -66,6 +184,8 @@ private final class NoRedirectSessionDelegate: NSObject, URLSessionTaskDelegate,
 }
 
 public struct URLSessionRPCTransport: RPCTransport {
+    public static let shared = URLSessionRPCTransport()
+
     private let session: URLSession
     private let maximumResponseBytes: Int
 
@@ -107,6 +227,7 @@ enum JSONRPCError: Error, Equatable, Sendable {
     case invalidHTTPStatus(Int)
     case malformedResponse
     case mismatchedID
+    case batchLimitExceeded(maximum: Int)
     case server(RPCServerError)
 }
 
@@ -124,6 +245,61 @@ private struct JSONRPCResponse<Result: Decodable>: Decodable {
     let error: RPCServerError?
 }
 
+/// `JSONDecoder` intentionally accepts JSON `1.0` and `1e0` when decoding `UInt64`. JSON-RPC
+/// correlation is a trust boundary, so inspect Foundation's parsed numeric representation first:
+/// lexical integer JSON numbers are `q`/`Q`, while decimal/exponent numbers are `d` and booleans
+/// are `c`. This uses APIs available in Foundation on Darwin and Linux.
+private enum StrictJSONRPCResponseID {
+    static func single(in data: Data) throws -> UInt64 {
+        let value: Any
+        do {
+            value = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw JSONRPCError.malformedResponse
+        }
+        guard let object = value as? [String: Any] else {
+            throw JSONRPCError.malformedResponse
+        }
+        return try parse(object["id"])
+    }
+
+    static func batch(in data: Data) throws -> [UInt64] {
+        let value: Any
+        do {
+            value = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw JSONRPCError.malformedResponse
+        }
+        guard let objects = value as? [[String: Any]] else {
+            throw JSONRPCError.malformedResponse
+        }
+        return try objects.map { try parse($0["id"]) }
+    }
+
+    private static func parse(_ raw: Any?) throws -> UInt64 {
+        guard let number = raw as? NSNumber else {
+            throw JSONRPCError.mismatchedID
+        }
+        let numericType = String(cString: number.objCType)
+        guard numericType == "q" || numericType == "Q",
+              let value = UInt64(number.stringValue)
+        else { throw JSONRPCError.mismatchedID }
+        return value
+    }
+}
+
+struct JSONRPCBatchCall: Sendable {
+    let method: String
+    let params: [JSONValue]
+}
+
+struct JSONRPCBatchResponse: Decodable {
+    let jsonrpc: String
+    let id: UInt64
+    let result: JSONValue?
+    let error: RPCServerError?
+}
+
 actor JSONRPCClient {
     let endpoint: URL
     private let transport: any RPCTransport
@@ -131,7 +307,7 @@ actor JSONRPCClient {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
-    init(endpoint: URL, transport: any RPCTransport = URLSessionRPCTransport()) throws {
+    init(endpoint: URL, transport: any RPCTransport = URLSessionRPCTransport.shared) throws {
         try RPCURLPolicy.validate(endpoint)
         self.endpoint = endpoint
         self.transport = transport
@@ -149,16 +325,85 @@ actor JSONRPCClient {
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(JSONRPCRequest(id: id, method: method, params: params))
+        let requestToSend = request
 
-        let response = try await transport.send(request)
+        let response = try await RPCOriginRequestLimiter.shared.withPermit(for: endpoint) {
+            var boundedRequest = requestToSend
+            boundedRequest.timeoutInterval = try RPCRequestDeadline.boundedRequestTimeout(
+                default: 20
+            )
+            return try await transport.send(boundedRequest)
+        }
         guard (200..<300).contains(response.statusCode) else {
             throw JSONRPCError.invalidHTTPStatus(response.statusCode)
         }
+        let strictID = try StrictJSONRPCResponseID.single(in: response.body)
         let decoded = try decoder.decode(JSONRPCResponse<Result>.self, from: response.body)
         guard decoded.jsonrpc == "2.0" else { throw JSONRPCError.malformedResponse }
-        guard decoded.id == id else { throw JSONRPCError.mismatchedID }
+        guard strictID == id, decoded.id == strictID else { throw JSONRPCError.mismatchedID }
         if let error = decoded.error { throw JSONRPCError.server(error) }
         guard let result = decoded.result else { throw JSONRPCError.malformedResponse }
         return result
+    }
+
+    /// Sends a small heterogeneous JSON-RPC batch. Responses may arrive in any order, but the
+    /// returned values always match the input order. A partial, duplicate, unexpected, or
+    /// individually failed response rejects the entire batch; callers must never continue with
+    /// an incomplete on-chain proof.
+    func callBatch(_ calls: [JSONRPCBatchCall]) async throws -> [JSONValue] {
+        guard !calls.isEmpty else { return [] }
+        let maximumBatchSize = 10
+        guard calls.count <= maximumBatchSize else {
+            throw JSONRPCError.batchLimitExceeded(maximum: maximumBatchSize)
+        }
+
+        var requests = [JSONRPCRequest]()
+        requests.reserveCapacity(calls.count)
+        var expectedIDs = [UInt64]()
+        expectedIDs.reserveCapacity(calls.count)
+        for call in calls {
+            let id = nextID
+            nextID &+= 1
+            expectedIDs.append(id)
+            requests.append(JSONRPCRequest(id: id, method: call.method, params: call.params))
+        }
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(requests)
+        let requestToSend = request
+
+        let response = try await RPCOriginRequestLimiter.shared.withPermit(for: endpoint) {
+            var boundedRequest = requestToSend
+            boundedRequest.timeoutInterval = try RPCRequestDeadline.boundedRequestTimeout(
+                default: 20
+            )
+            return try await transport.send(boundedRequest)
+        }
+        guard (200..<300).contains(response.statusCode) else {
+            throw JSONRPCError.invalidHTTPStatus(response.statusCode)
+        }
+        let strictIDs = try StrictJSONRPCResponseID.batch(in: response.body)
+        let decoded = try decoder.decode([JSONRPCBatchResponse].self, from: response.body)
+        guard decoded.count == expectedIDs.count,
+              strictIDs.count == decoded.count
+        else { throw JSONRPCError.malformedResponse }
+
+        var byID = [UInt64: JSONRPCBatchResponse]()
+        for (item, strictID) in zip(decoded, strictIDs) {
+            guard item.jsonrpc == "2.0",
+                  item.id == strictID,
+                  expectedIDs.contains(strictID),
+                  byID.updateValue(item, forKey: strictID) == nil
+            else { throw JSONRPCError.mismatchedID }
+        }
+        return try expectedIDs.map { id in
+            guard let item = byID[id] else { throw JSONRPCError.mismatchedID }
+            if let error = item.error { throw JSONRPCError.server(error) }
+            guard let result = item.result else { throw JSONRPCError.malformedResponse }
+            return result
+        }
     }
 }

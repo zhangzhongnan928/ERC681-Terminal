@@ -2,8 +2,12 @@ package com.openpasskey.terminal.viewmodel
 
 import com.openpasskey.terminal.chain.PaymentToken
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
+import com.openpasskey.terminal.rpc.RpcWorkCoordinator
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
 import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -31,6 +35,18 @@ class SettingsOperatorBindingPolicyTest {
                 refreshActive = false,
             ),
         )
+        assertTrue(
+            readinessResultWhenAutomaticRefreshDefers(
+                configurationStillValidated = true,
+                setupStatus = TerminalSetupStatus.READY,
+            ),
+        )
+        assertFalse(
+            readinessResultWhenAutomaticRefreshDefers(
+                configurationStillValidated = false,
+                setupStatus = TerminalSetupStatus.READY,
+            ),
+        )
     }
 
     @Test
@@ -55,6 +71,73 @@ class SettingsOperatorBindingPolicyTest {
                 OperatorWalletSnapshot(OperatorWalletAvailability.NOT_CREATED),
             ),
         )
+    }
+
+    @Test
+    fun automaticReadinessDefersToCheckoutWithoutRunningRpcBlock() = runBlocking {
+        val coordinator = RpcWorkCoordinator(backgroundRetryMillis = 1)
+        val scheduler = ReadinessRpcScheduler(coordinator)
+        val checkoutEntered = CompletableDeferred<Unit>()
+        val releaseCheckout = CompletableDeferred<Unit>()
+        val checkout = launch {
+            coordinator.withInteractiveOperation {
+                checkoutEntered.complete(Unit)
+                releaseCheckout.await()
+            }
+        }
+        checkoutEntered.await()
+        var readinessRan = false
+
+        val result = scheduler.run(ReadinessRpcPriority.AUTOMATIC) {
+            readinessRan = true
+            "ready"
+        }
+
+        assertNull(result)
+        assertFalse(readinessRan)
+        releaseCheckout.complete(Unit)
+        checkout.join()
+    }
+
+    @Test
+    fun manualReadinessAndUserMutationPublishPriorityBeforeBackground() = runBlocking {
+        val coordinator = RpcWorkCoordinator(backgroundRetryMillis = 1)
+        val scheduler = ReadinessRpcScheduler(coordinator)
+        val manualEntered = CompletableDeferred<Unit>()
+        val releaseManual = CompletableDeferred<Unit>()
+        val manual = launch {
+            scheduler.run(ReadinessRpcPriority.INTERACTIVE) {
+                manualEntered.complete(Unit)
+                releaseManual.await()
+                Unit
+            }
+        }
+        manualEntered.await()
+        assertNull(coordinator.withBackgroundOperation { "background" })
+        releaseManual.complete(Unit)
+        manual.join()
+
+        val mutationEntered = CompletableDeferred<Unit>()
+        val releaseMutation = CompletableDeferred<Unit>()
+        val mutation = launch {
+            runUserRpcMutation(coordinator) {
+                mutationEntered.complete(Unit)
+                releaseMutation.await()
+            }
+        }
+        mutationEntered.await()
+        assertNull(coordinator.withBackgroundOperation { "background" })
+        releaseMutation.complete(Unit)
+        mutation.join()
+    }
+
+    @Test
+    fun automaticReadinessSocketBudgetFitsBackgroundLease() {
+        val budgetMillis = SettingsViewModel.AUTOMATIC_RPC_WAVES *
+            (SettingsViewModel.AUTOMATIC_RPC_CONNECT_TIMEOUT_MILLIS +
+                SettingsViewModel.AUTOMATIC_RPC_READ_TIMEOUT_MILLIS)
+
+        assertTrue(budgetMillis < RpcWorkCoordinator.DEFAULT_BACKGROUND_OPERATION_TIMEOUT_MILLIS)
     }
 
     private fun wallet() = OperatorWalletSnapshot(

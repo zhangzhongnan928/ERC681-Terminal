@@ -51,12 +51,12 @@ struct OPKTerminalApp: App {
                     while !Task.isCancelled {
                         await model.reconcileForegroundInvoices()
                         guard !Task.isCancelled else { return }
-                        await model.reconcileSettlements()
+                        await model.reconcileSettlements(mode: .periodic)
                         guard !Task.isCancelled else { return }
                         await model.refreshReadiness()
                         guard !Task.isCancelled else { return }
                         do {
-                            try await Task.sleep(for: .seconds(30))
+                            try await Task.sleep(for: .seconds(60))
                         } catch {
                             return
                         }

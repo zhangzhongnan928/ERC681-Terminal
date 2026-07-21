@@ -3,6 +3,28 @@ import OPKTerminalCore
 
 public enum PaymentMonitorError: Error, Equatable, Sendable {
     case canonicalBlockChanged(blockNumber: UInt64)
+    case wrongChain(expected: UInt64, actual: UInt64)
+    case mixedRequestChains
+    case requestChainMismatch(expected: UInt64, request: UInt64)
+}
+
+/// One immutable invoice read within a shared payment-state sample. Settlement validation uses
+/// this form so every selected invoice is bound to the same chain/head anchor and canonical
+/// block identity instead of sampling a moving head once per invoice.
+public struct PaymentSampleInput: Hashable, Sendable {
+    public let request: PaymentRequest
+    public let previousThresholdCursor: PaymentConfirmationCursor?
+    public let additionalCursors: [PaymentConfirmationCursor]
+
+    public init(
+        request: PaymentRequest,
+        previousThresholdCursor: PaymentConfirmationCursor? = nil,
+        additionalCursors: [PaymentConfirmationCursor] = []
+    ) {
+        self.request = request
+        self.previousThresholdCursor = previousThresholdCursor
+        self.additionalCursors = additionalCursors
+    }
 }
 
 extension PaymentMonitorError: LocalizedError {
@@ -10,7 +32,112 @@ extension PaymentMonitorError: LocalizedError {
         switch self {
         case let .canonicalBlockChanged(blockNumber):
             "Canonical block \(blockNumber) changed while sampling payment state. Retry the observation."
+        case let .wrongChain(expected, actual):
+            "Wrong network: expected chain \(expected), received \(actual)."
+        case .mixedRequestChains:
+            "A payment sample cannot combine invoices from different networks."
+        case let .requestChainMismatch(expected, request):
+            "The requested network \(expected) does not match invoice chain \(request)."
         }
+    }
+}
+
+public struct ReceiverFreshnessProof: Hashable, Sendable {
+    public let blockNumber: UInt64
+    public let blockHash: Bytes32
+    public let receiverCode: Data
+    public let tokenBalance: UInt256
+}
+
+/// Proves a newly derived receiver is unused at one fixed canonical block. This is intentionally
+/// separate from configuration validation: callers can run it in parallel, but must require both
+/// proofs before publishing an invoice.
+public struct ReceiverFreshnessValidator: Sendable {
+    private let rpc: any EthereumReadRPC
+
+    public init(rpc: any EthereumReadRPC) {
+        self.rpc = rpc
+    }
+
+    public func validate(
+        receiver: EthereumAddress,
+        token: EthereumAddress,
+        expectedChainID: UInt64
+    ) async throws -> ReceiverFreshnessProof {
+        if let batchRPC = rpc as? any EthereumBatchReadRPC {
+            let anchor = try await batchRPC.batch([.chainID, .latestBlockIdentity])
+            guard anchor.count == 2,
+                  case let .quantity(actualChainID) = anchor[0],
+                  case let .blockIdentity(head, initialBlockHash) = anchor[1]
+            else { throw RPCDecodingError.invalidData("receiver freshness anchor") }
+            guard actualChainID == expectedChainID else {
+                throw PaymentMonitorError.wrongChain(
+                    expected: expectedChainID,
+                    actual: actualChainID
+                )
+            }
+            let block = RPCBlockTag.number(head)
+            let proof = try await batchRPC.batch([
+                .code(address: receiver, block: block),
+                .call(
+                    address: token,
+                    data: ABI.encodeCall(
+                        selector: ABI.balanceOfSelector,
+                        words: [ABI.word(receiver)]
+                    ),
+                    block: block
+                ),
+            ])
+            guard proof.count == 2,
+                  case let .data(receiverCode) = proof[0],
+                  case let .data(balanceData) = proof[1]
+            else { throw RPCDecodingError.invalidData("receiver freshness proof") }
+            let final = try await batchRPC.batch([.canonicalBlockHash(head)])
+            guard final.count == 1, case let .blockHash(finalBlockHash) = final[0] else {
+                throw RPCDecodingError.invalidData("receiver freshness final head")
+            }
+            guard finalBlockHash == initialBlockHash else {
+                throw PaymentMonitorError.canonicalBlockChanged(blockNumber: head)
+            }
+            return ReceiverFreshnessProof(
+                blockNumber: head,
+                blockHash: finalBlockHash,
+                receiverCode: receiverCode,
+                tokenBalance: try ABI.decodeUInt256(balanceData)
+            )
+        }
+
+        async let chainID = rpc.chainID()
+        async let head = rpc.blockNumber()
+        let (actualChainID, resolvedHead) = try await (chainID, head)
+        guard actualChainID == expectedChainID else {
+            throw PaymentMonitorError.wrongChain(
+                expected: expectedChainID,
+                actual: actualChainID
+            )
+        }
+        let block = RPCBlockTag.number(resolvedHead)
+        let initialBlockHash = try await rpc.canonicalBlockHash(at: resolvedHead)
+        async let receiverCode = rpc.code(at: receiver, block: block)
+        async let balanceData = rpc.call(
+            to: token,
+            data: ABI.encodeCall(
+                selector: ABI.balanceOfSelector,
+                words: [ABI.word(receiver)]
+            ),
+            block: block
+        )
+        let reads = try await (receiverCode, balanceData)
+        let finalBlockHash = try await rpc.canonicalBlockHash(at: resolvedHead)
+        guard finalBlockHash == initialBlockHash else {
+            throw PaymentMonitorError.canonicalBlockChanged(blockNumber: resolvedHead)
+        }
+        return ReceiverFreshnessProof(
+            blockNumber: resolvedHead,
+            blockHash: finalBlockHash,
+            receiverCode: reads.0,
+            tokenBalance: try ABI.decodeUInt256(reads.1)
+        )
     }
 }
 
@@ -22,7 +149,7 @@ public struct PaymentMonitor: Sendable {
     public init(
         rpc: any EthereumReadRPC,
         confirmationPolicy: ConfirmationPolicy,
-        pollIntervalNanoseconds: UInt64 = 2_000_000_000
+        pollIntervalNanoseconds: UInt64 = 5_000_000_000
     ) {
         self.rpc = rpc
         self.confirmationPolicy = confirmationPolicy
@@ -33,49 +160,250 @@ public struct PaymentMonitor: Sendable {
         _ request: PaymentRequest,
         previousThresholdCursor: PaymentConfirmationCursor? = nil,
         additionalCursors: [PaymentConfirmationCursor] = [],
+        expectedChainID: UInt64? = nil,
         now: Date = Date()
     ) async throws -> PaymentObservation {
-        let block = try await rpc.blockNumber()
-        let initialBlockHash = try await rpc.canonicalBlockHash(at: block)
-        let balanceData = try await rpc.call(
-            to: request.token.address,
-            data: ABI.encodeCall(
-                selector: ABI.balanceOfSelector,
-                words: [ABI.word(request.receiver)]
-            ),
-            block: .number(block)
+        let observations = try await sampleBatch(
+            [PaymentSampleInput(
+                request: request,
+                previousThresholdCursor: previousThresholdCursor,
+                additionalCursors: additionalCursors
+            )],
+            expectedChainID: expectedChainID,
+            now: now
         )
-        let balance = try ABI.decodeUInt256(balanceData)
-        let sampledBlockHash = try await rpc.canonicalBlockHash(at: block)
-        guard sampledBlockHash == initialBlockHash else {
+        guard let observation = observations.first else {
+            throw RPCDecodingError.invalidData("empty payment sample")
+        }
+        return observation
+    }
+
+    /// Samples up to the app's twenty-invoice settlement limit in three sequential network waves:
+    /// a chain plus latest block-identity anchor, fixed-block balances plus unique cursor hashes,
+    /// then the final canonical identity check. Every middle-wave batch is capped at ten items and
+    /// only six HTTP batches run concurrently, covering twenty balances and two distinct cursors
+    /// per invoice without self-throttling a free endpoint.
+    public func sampleBatch(
+        _ inputs: [PaymentSampleInput],
+        expectedChainID: UInt64? = nil,
+        now: Date = Date()
+    ) async throws -> [PaymentObservation] {
+        guard !inputs.isEmpty else { return [] }
+        guard inputs.count <= 20 else {
+            throw RPCDecodingError.invalidData("payment sample exceeds settlement limit")
+        }
+
+        let requestChainIDs = Set(inputs.map(\.request.chainID))
+        guard requestChainIDs.count == 1, let requestChainID = requestChainIDs.first else {
+            throw PaymentMonitorError.mixedRequestChains
+        }
+        if let expectedChainID, expectedChainID != requestChainID {
+            throw PaymentMonitorError.requestChainMismatch(
+                expected: expectedChainID,
+                request: requestChainID
+            )
+        }
+        // The invoice itself is the default network authority. Even SDK callers that omit the
+        // optional override must prove the live endpoint is serving that exact chain before any
+        // balance or confirmation state is accepted.
+        let requiredChainID = expectedChainID ?? requestChainID
+        let anchor = try await resolve([.chainID, .latestBlockIdentity])
+        let block: UInt64
+        let initialBlockHash: Bytes32
+        guard anchor.count == 2,
+              case let .quantity(actualChainID) = anchor[0],
+              case let .blockIdentity(number, hash) = anchor[1]
+        else { throw RPCDecodingError.invalidData("payment network anchor batch") }
+        guard actualChainID == requiredChainID else {
+            throw PaymentMonitorError.wrongChain(
+                expected: requiredChainID,
+                actual: actualChainID
+            )
+        }
+        block = number
+        initialBlockHash = hash
+
+        var cursorSets = [[PaymentConfirmationCursor]]()
+        cursorSets.reserveCapacity(inputs.count)
+        var historicalBlocks = Set<UInt64>()
+        for input in inputs {
+            var seen = Set<PaymentConfirmationCursor>()
+            let cursors = ([input.previousThresholdCursor].compactMap { $0 }
+                + input.additionalCursors).filter {
+                    seen.insert($0).inserted && $0.blockNumber <= block
+                }
+            cursorSets.append(cursors)
+            historicalBlocks.formUnion(cursors.map(\.blockNumber))
+        }
+        historicalBlocks.remove(block)
+        let orderedHistoricalBlocks = historicalBlocks.sorted()
+
+        var proofRequests = [EthereumReadBatchRequest]()
+        proofRequests.reserveCapacity(inputs.count + orderedHistoricalBlocks.count)
+        proofRequests.append(contentsOf: inputs.map { input in
+            .call(
+                address: input.request.token.address,
+                data: ABI.encodeCall(
+                    selector: ABI.balanceOfSelector,
+                    words: [ABI.word(input.request.receiver)]
+                ),
+                block: .number(block)
+            )
+        })
+        proofRequests.append(contentsOf: orderedHistoricalBlocks.map {
+            .canonicalBlockHash($0)
+        })
+        let proof = try await resolve(proofRequests)
+        guard proof.count == proofRequests.count else {
+            throw RPCDecodingError.invalidData("payment proof batch")
+        }
+
+        var balances = [UInt256]()
+        balances.reserveCapacity(inputs.count)
+        for index in inputs.indices {
+            guard case let .data(data) = proof[index] else {
+                throw RPCDecodingError.invalidData("payment balance batch")
+            }
+            balances.append(try ABI.decodeUInt256(data))
+        }
+        var historicalHashes = [UInt64: Bytes32]()
+        let hashOffset = inputs.count
+        for (index, historicalBlock) in orderedHistoricalBlocks.enumerated() {
+            guard case let .blockHash(hash) = proof[hashOffset + index] else {
+                throw RPCDecodingError.invalidData("canonical cursor batch")
+            }
+            historicalHashes[historicalBlock] = hash
+        }
+
+        let final = try await resolve([.canonicalBlockHash(block)])
+        guard final.count == 1, case let .blockHash(finalBlockHash) = final[0] else {
+            throw RPCDecodingError.invalidData("payment final head batch")
+        }
+        guard finalBlockHash == initialBlockHash else {
             throw PaymentMonitorError.canonicalBlockChanged(blockNumber: block)
         }
 
-        let cursors = [previousThresholdCursor].compactMap { $0 } + additionalCursors
-        var validatedCursors = [PaymentConfirmationCursor]()
-        var seenCursors = Set<PaymentConfirmationCursor>()
-        for cursor in cursors where seenCursors.insert(cursor).inserted {
-            guard cursor.blockNumber <= block else { continue }
-            let canonicalHash = cursor.blockNumber == block
-                ? sampledBlockHash
-                : try await rpc.canonicalBlockHash(at: cursor.blockNumber)
-            if canonicalHash == cursor.blockHash {
-                validatedCursors.append(cursor)
+        return zip(zip(inputs, cursorSets), balances).map { pair, balance in
+            let (input, cursors) = pair
+            let validatedCursors = cursors.filter { cursor in
+                let canonicalHash = cursor.blockNumber == block
+                    ? finalBlockHash
+                    : historicalHashes[cursor.blockNumber]
+                return canonicalHash == cursor.blockHash
+            }
+            return classify(
+                input.request,
+                balance: balance,
+                block: block,
+                blockHash: finalBlockHash,
+                previousThresholdCursor: input.previousThresholdCursor,
+                validatedCursors: validatedCursors,
+                now: now
+            )
+        }
+    }
+
+    private func resolve(
+        _ requests: [EthereumReadBatchRequest]
+    ) async throws -> [EthereumReadBatchResult] {
+        guard !requests.isEmpty else { return [] }
+        if let batchRPC = rpc as? any EthereumBatchReadRPC {
+            let chunks = stride(from: 0, to: requests.count, by: 10).map { start in
+                Array(requests[start..<min(start + 10, requests.count)])
+            }
+            return try await withThrowingTaskGroup(
+                of: (Int, [EthereumReadBatchResult]).self,
+                returning: [EthereumReadBatchResult].self
+            ) { group in
+                var nextChunk = 0
+                let maximumConcurrentBatches = min(6, chunks.count)
+                func enqueue(_ index: Int) {
+                    let chunk = chunks[index]
+                    group.addTask { (index, try await batchRPC.batch(chunk)) }
+                }
+                while nextChunk < maximumConcurrentBatches {
+                    enqueue(nextChunk)
+                    nextChunk += 1
+                }
+                var resolved = Array<[EthereumReadBatchResult]?>(
+                    repeating: nil,
+                    count: chunks.count
+                )
+                for try await (index, values) in group {
+                    guard values.count == chunks[index].count else {
+                        throw RPCDecodingError.invalidData("partial payment proof batch")
+                    }
+                    resolved[index] = values
+                    if nextChunk < chunks.count {
+                        enqueue(nextChunk)
+                        nextChunk += 1
+                    }
+                }
+                guard resolved.allSatisfy({ $0 != nil }) else {
+                    throw RPCDecodingError.invalidData("missing payment proof batch")
+                }
+                return resolved.flatMap { $0! }
             }
         }
-        let finalBlockHash = try await rpc.canonicalBlockHash(at: block)
-        guard finalBlockHash == sampledBlockHash else {
-            throw PaymentMonitorError.canonicalBlockChanged(blockNumber: block)
+
+        return try await withThrowingTaskGroup(
+            of: (Int, EthereumReadBatchResult).self,
+            returning: [EthereumReadBatchResult].self
+        ) { group in
+            var nextRequest = 0
+            // Alternate RPC implementations still perform one HTTP call per read. Keep the
+            // same six-request ceiling as the production batch path so a fallback cannot create
+            // a larger burst against a rate-limited endpoint.
+            let maximumConcurrentReads = min(6, requests.count)
+            func enqueue(_ index: Int) {
+                let request = requests[index]
+                group.addTask { (index, try await resolveOne(request)) }
+            }
+            while nextRequest < maximumConcurrentReads {
+                enqueue(nextRequest)
+                nextRequest += 1
+            }
+            var resolved = Array<EthereumReadBatchResult?>(
+                repeating: nil,
+                count: requests.count
+            )
+            for try await (index, value) in group {
+                resolved[index] = value
+                if nextRequest < requests.count {
+                    enqueue(nextRequest)
+                    nextRequest += 1
+                }
+            }
+            guard resolved.allSatisfy({ $0 != nil }) else {
+                throw RPCDecodingError.invalidData("missing payment proof read")
+            }
+            return resolved.map { $0! }
         }
-        return classify(
-            request,
-            balance: balance,
-            block: block,
-            blockHash: finalBlockHash,
-            previousThresholdCursor: previousThresholdCursor,
-            validatedCursors: validatedCursors,
-            now: now
-        )
+    }
+
+    private func resolveOne(
+        _ request: EthereumReadBatchRequest
+    ) async throws -> EthereumReadBatchResult {
+        switch request {
+        case .chainID:
+            .quantity(try await rpc.chainID())
+        case .blockNumber:
+            .quantity(try await rpc.blockNumber())
+        case .latestBlockIdentity:
+            try await {
+                let number = try await rpc.blockNumber()
+                return .blockIdentity(
+                    number: number,
+                    hash: try await rpc.canonicalBlockHash(at: number)
+                )
+            }()
+        case let .canonicalBlockHash(block):
+            .blockHash(try await rpc.canonicalBlockHash(at: block))
+        case let .code(address, block):
+            .data(try await rpc.code(at: address, block: block))
+        case let .call(address, data, block):
+            .data(try await rpc.call(to: address, data: data, block: block))
+        }
     }
 
     public func classify(

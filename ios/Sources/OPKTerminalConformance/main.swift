@@ -109,9 +109,26 @@ private actor FixtureTransport: RPCTransport {
     }
 
     func send(_ request: URLRequest) async throws -> RPCTransportResponse {
-        guard let body = request.httpBody,
-              let object = try JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let id = object["id"] as? NSNumber,
+        guard let body = request.httpBody else {
+            throw ConformanceFailure.failed("malformed JSON-RPC request")
+        }
+        let root = try JSONSerialization.jsonObject(with: body)
+        let responseRoot: Any
+        if let object = root as? [String: Any] {
+            responseRoot = try response(for: object)
+        } else if let objects = root as? [[String: Any]], !objects.isEmpty {
+            responseRoot = try objects.map { try response(for: $0) }
+        } else {
+            throw ConformanceFailure.failed("malformed JSON-RPC request")
+        }
+        return RPCTransportResponse(
+            statusCode: 200,
+            body: try JSONSerialization.data(withJSONObject: responseRoot)
+        )
+    }
+
+    private func response(for object: [String: Any]) throws -> [String: Any] {
+        guard let id = object["id"] as? NSNumber,
               let method = object["method"] as? String
         else { throw ConformanceFailure.failed("malformed JSON-RPC request") }
 
@@ -123,6 +140,7 @@ private actor FixtureTransport: RPCTransport {
             result = "0x64"
         case "eth_getBlockByNumber":
             result = [
+                "number": "0x64",
                 "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ]
         case "eth_getCode":
@@ -162,15 +180,11 @@ private actor FixtureTransport: RPCTransport {
             throw ConformanceFailure.failed("non-read-only RPC method \(method)")
         }
 
-        let response: [String: Any] = [
+        return [
             "jsonrpc": "2.0",
             "id": id,
             "result": result,
         ]
-        return RPCTransportResponse(
-            statusCode: 200,
-            body: try JSONSerialization.data(withJSONObject: response)
-        )
     }
 }
 

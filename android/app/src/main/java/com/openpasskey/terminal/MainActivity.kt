@@ -34,6 +34,7 @@ class MainActivity : FragmentActivity() {
                 app.terminalProvisioner,
                 app.terminalResetCoordinator,
                 app.terminalLifecycleGate,
+                app.rpcWorkCoordinator,
             )
         )[SettingsViewModel::class.java]
         val settlementViewModel = ViewModelProvider(
@@ -55,6 +56,8 @@ class MainActivity : FragmentActivity() {
 
     override fun onStart() {
         super.onStart()
-        if (::settingsViewModel.isInitialized) settingsViewModel.refreshOperatorStatus()
+        if (::settingsViewModel.isInitialized) {
+            settingsViewModel.refreshOperatorStatusAutomatically()
+        }
     }
 }

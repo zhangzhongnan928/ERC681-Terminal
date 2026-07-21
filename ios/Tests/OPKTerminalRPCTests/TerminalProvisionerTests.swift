@@ -11,9 +11,13 @@ private actor ProvisioningRPC: EthereumReadRPC {
     let reportedFactory: EthereumAddress
     let reportedImplementation: EthereumAddress
     let vaultRuntimeCode: Data
+    let fixedHeadVaultRuntimeCode: Data?
+    let fixedHeadReportedFactory: EthereumAddress?
     let symbolResult: Data
     let whitelisted: Bool
+    let replaceFinalHeadHash: Bool
     private(set) var getterCallCount = 0
+    private var canonicalHashReadCount = 0
 
     init(
         chain: UInt64 = 84_532,
@@ -22,8 +26,11 @@ private actor ProvisioningRPC: EthereumReadRPC {
         reportedFactory: EthereumAddress = TerminalKnownChainProfile.baseSepolia.factory,
         reportedImplementation: EthereumAddress = TerminalKnownChainProfile.baseSepolia.receiverImplementation,
         vaultRuntimeCode: Data = TerminalProvisionerTests.canonicalVaultRuntimeCode,
+        fixedHeadVaultRuntimeCode: Data? = nil,
+        fixedHeadReportedFactory: EthereumAddress? = nil,
         symbolResult: Data = TerminalProvisionerTests.abiString("AUD"),
-        whitelisted: Bool = true
+        whitelisted: Bool = true,
+        replaceFinalHeadHash: Bool = false
     ) {
         self.chain = chain
         self.vault = vault
@@ -31,18 +38,28 @@ private actor ProvisioningRPC: EthereumReadRPC {
         self.reportedFactory = reportedFactory
         self.reportedImplementation = reportedImplementation
         self.vaultRuntimeCode = vaultRuntimeCode
+        self.fixedHeadVaultRuntimeCode = fixedHeadVaultRuntimeCode
+        self.fixedHeadReportedFactory = fixedHeadReportedFactory
         self.symbolResult = symbolResult
         self.whitelisted = whitelisted
+        self.replaceFinalHeadHash = replaceFinalHeadHash
     }
 
     func chainID() async throws -> UInt64 { chain }
     func blockNumber() async throws -> UInt64 { 1 }
     func canonicalBlockHash(at blockNumber: UInt64) async throws -> Bytes32 {
-        try Bytes32(hex: "0x" + String(repeating: "0", count: 63) + "1")
+        canonicalHashReadCount += 1
+        let suffix = replaceFinalHeadHash && canonicalHashReadCount > 1 ? "2" : "1"
+        return try Bytes32(hex: "0x" + String(repeating: "0", count: 63) + suffix)
     }
 
     func code(at address: EthereumAddress, block: RPCBlockTag) async throws -> Data {
-        if address == vault { return vaultRuntimeCode }
+        if address == vault {
+            if case .number = block, let fixedHeadVaultRuntimeCode {
+                return fixedHeadVaultRuntimeCode
+            }
+            return vaultRuntimeCode
+        }
         return [token, reportedFactory, reportedImplementation].contains(address)
             ? Data([0x60, 0x00]) : Data()
     }
@@ -51,6 +68,9 @@ private actor ProvisioningRPC: EthereumReadRPC {
         getterCallCount += 1
         let selector = Data(data.prefix(4))
         if address == vault && selector == ABI.factorySelector {
+            if case .number = block, let fixedHeadReportedFactory {
+                return ABI.word(fixedHeadReportedFactory)
+            }
             return ABI.word(reportedFactory)
         }
         if address == reportedFactory && selector == ABI.implementationSelector {
@@ -66,6 +86,83 @@ private actor ProvisioningRPC: EthereumReadRPC {
             return symbolResult
         }
         throw URLError(.badServerResponse)
+    }
+}
+
+private actor HistoricalBatchedRPC: EthereumBatchReadRPC {
+    let vault: EthereumAddress
+    let token: EthereumAddress
+    private(set) var batchSizes = [Int]()
+    private(set) var directChainReads = 0
+    private(set) var directCodeReads = 0
+
+    init(vault: EthereumAddress, token: EthereumAddress) {
+        self.vault = vault
+        self.token = token
+    }
+
+    func batch(_ requests: [EthereumReadBatchRequest]) async throws -> [EthereumReadBatchResult] {
+        batchSizes.append(requests.count)
+        let profile = TerminalKnownChainProfile.baseSepolia
+        return try requests.map { request in
+            switch request {
+            case .chainID:
+                return .quantity(profile.chainID)
+            case .blockNumber:
+                return .quantity(123)
+            case .latestBlockIdentity:
+                return .blockIdentity(
+                    number: 123,
+                    hash: try Bytes32(hex: "0x" + String(format: "%064llx", 123))
+                )
+            case let .canonicalBlockHash(block):
+                return .blockHash(try Bytes32(
+                    hex: "0x" + String(format: "%064llx", block)
+                ))
+            case let .code(address, block):
+                guard block == .number(123) else { throw URLError(.badServerResponse) }
+                return .data(address == vault
+                    ? TerminalProvisionerTests.canonicalVaultRuntimeCode
+                    : Data([0x60, 0x00]))
+            case let .call(address, data, block):
+                guard block == .number(123) else { throw URLError(.badServerResponse) }
+                let selector = Data(data.prefix(4))
+                if address == profile.factory && selector == ABI.implementationSelector {
+                    return .data(ABI.word(profile.receiverImplementation))
+                }
+                if address == vault && selector == ABI.factorySelector {
+                    return .data(ABI.word(profile.factory))
+                }
+                if address == vault && selector == ABI.isPaymentTokenSelector {
+                    return .data(ABI.word(UInt64(1)))
+                }
+                if address == token && selector == ABI.decimalsSelector {
+                    return .data(ABI.word(UInt64(18)))
+                }
+                if address == token && selector == ABI.symbolSelector {
+                    return .data(TerminalProvisionerTests.abiString("AUD"))
+                }
+                throw URLError(.badServerResponse)
+            }
+        }
+    }
+
+    func chainID() async throws -> UInt64 {
+        directChainReads += 1
+        return TerminalKnownChainProfile.baseSepolia.chainID
+    }
+    func blockNumber() async throws -> UInt64 { 123 }
+    func canonicalBlockHash(at blockNumber: UInt64) async throws -> Bytes32 {
+        try Bytes32(hex: "0x" + String(format: "%064llx", blockNumber))
+    }
+    func code(at address: EthereumAddress, block: RPCBlockTag) async throws -> Data {
+        directCodeReads += 1
+        return address == vault
+            ? TerminalProvisionerTests.canonicalVaultRuntimeCode
+            : Data([0x60, 0x00])
+    }
+    func call(to address: EthereumAddress, data: Data, block: RPCBlockTag) async throws -> Data {
+        throw URLError(.unsupportedURL)
     }
 }
 
@@ -269,6 +366,83 @@ final class TerminalProvisionerTests: XCTestCase {
         XCTAssertEqual(getterCallCount, 0, "Counterfeit code must reject before trusting its getters")
     }
 
+    func testProvisioningPinsVaultRuntimeFromFinalFixedHeadProof() async throws {
+        let replacedRuntime = Data([0x60, 0x01])
+        let rpc = ProvisioningRPC(
+            vault: vault,
+            token: token,
+            // Bootstrap latest state looks canonical; the validator's fixed head deliberately
+            // returns different nonempty bytes to prove the persisted decision uses its proof.
+            fixedHeadVaultRuntimeCode: replacedRuntime
+        )
+        let profile = TerminalKnownChainProfile.baseSepolia
+
+        do {
+            _ = try await TerminalProvisioner(rpcFactory: { _ in rpc })
+                .deriveAndValidate(
+                    payload(),
+                    expectedOperator: operatorAddress,
+                    confirmationPolicy: .init(requiredBlocks: 2)
+                )
+            XCTFail("Expected fixed-head vault runtime mismatch")
+        } catch let error as TerminalProvisioningValidationError {
+            XCTAssertEqual(
+                error,
+                .vaultRuntimeCodeHashMismatch(
+                    expected: profile.vaultRuntimeCodeHash,
+                    actual: Keccak256.hash(replacedRuntime)
+                )
+            )
+        }
+        let getterCallCount = await rpc.getterCallCount
+        XCTAssertGreaterThan(getterCallCount, 0)
+    }
+
+    func testProvisioningRejectsCanonicalHeadReplacementAcrossFinalProof() async throws {
+        let rpc = ProvisioningRPC(
+            vault: vault,
+            token: token,
+            replaceFinalHeadHash: true
+        )
+
+        do {
+            _ = try await TerminalProvisioner(rpcFactory: { _ in rpc })
+                .deriveAndValidate(
+                    payload(),
+                    expectedOperator: operatorAddress,
+                    confirmationPolicy: .init(requiredBlocks: 2)
+                )
+            XCTFail("Expected canonical head replacement to reject provisioning")
+        } catch let ConfigurationValidationError.canonicalBlockChanged(blockNumber) {
+            XCTAssertEqual(blockNumber, 1)
+        }
+    }
+
+    func testProvisioningReprovesBootstrapLinkageAtFinalFixedHead() async throws {
+        let wrongFactory = try EthereumAddress(
+            hex: "0x2222222222222222222222222222222222222222",
+            allowZero: false
+        )
+        let rpc = ProvisioningRPC(
+            vault: vault,
+            token: token,
+            fixedHeadReportedFactory: wrongFactory
+        )
+
+        do {
+            _ = try await TerminalProvisioner(rpcFactory: { _ in rpc })
+                .deriveAndValidate(
+                    payload(),
+                    expectedOperator: operatorAddress,
+                    confirmationPolicy: .init(requiredBlocks: 2)
+                )
+            XCTFail("Expected fixed-head vault/factory mismatch")
+        } catch let ConfigurationValidationError.vaultFactoryMismatch(expected, actual) {
+            XCTAssertEqual(expected, TerminalKnownChainProfile.baseSepolia.factory)
+            XCTAssertEqual(actual, wrongFactory)
+        }
+    }
+
     func testInvalidSymbolRejectsAndRPCOverrideIsPreserved() async throws {
         let invalidSymbolRPC = ProvisioningRPC(
             vault: vault,
@@ -342,6 +516,67 @@ final class TerminalProvisionerTests: XCTestCase {
         let trustedGetterCalls = await trustedRPC.getterCallCount
         XCTAssertEqual(operationalGetterCalls, 0)
         XCTAssertGreaterThan(trustedGetterCalls, 0)
+    }
+
+    func testHistoricalConfigurationUsesThreeTrustedWavesWithoutDuplicateChainOrCodeReads() async throws {
+        let profile = TerminalKnownChainProfile.baseSepolia
+        let operationalEndpoint = URL(string: "https://rpc.example.invalid")!
+        let configuration = try TerminalConfiguration(
+            chainID: profile.chainID,
+            rpcEndpoints: [operationalEndpoint],
+            protocolVersion: profile.protocolVersion,
+            deployment: try OPKDeployment(
+                factory: profile.factory,
+                receiverImplementation: profile.receiverImplementation,
+                vault: vault
+            ),
+            tokens: [try PaymentToken(address: token, symbol: "AUD", decimals: 18)],
+            confirmationPolicy: .init(requiredBlocks: 2),
+            create2TestVector: nil
+        )
+        let operationalRPC = ProvisioningRPC(vault: vault, token: token)
+        let trustedRPC = HistoricalBatchedRPC(vault: vault, token: token)
+
+        let report = try await TerminalProvisioner(rpcFactory: { endpoint in
+            if endpoint == profile.rpcEndpoint { return trustedRPC }
+            return operationalRPC
+        }).validateHistoricalConfiguration(configuration)
+
+        XCTAssertEqual(report.chainID, profile.chainID)
+        let trustedBatchSizes = await trustedRPC.batchSizes
+        XCTAssertEqual(trustedBatchSizes, [2, 9, 1])
+        let directChainReads = await trustedRPC.directChainReads
+        let directCodeReads = await trustedRPC.directCodeReads
+        XCTAssertEqual(directChainReads, 0)
+        XCTAssertEqual(directCodeReads, 0)
+        let operationalGetterCalls = await operationalRPC.getterCallCount
+        XCTAssertEqual(operationalGetterCalls, 0)
+    }
+
+    func testHistoricalConfigurationSameEndpointDoesNotDuplicateOperationalChainRead() async throws {
+        let profile = TerminalKnownChainProfile.baseSepolia
+        let configuration = try TerminalConfiguration(
+            chainID: profile.chainID,
+            rpcEndpoints: [profile.rpcEndpoint],
+            protocolVersion: profile.protocolVersion,
+            deployment: try OPKDeployment(
+                factory: profile.factory,
+                receiverImplementation: profile.receiverImplementation,
+                vault: vault
+            ),
+            tokens: [try PaymentToken(address: token, symbol: "AUD", decimals: 18)],
+            confirmationPolicy: .init(requiredBlocks: 2),
+            create2TestVector: profile.create2TestVector
+        )
+        let trustedRPC = HistoricalBatchedRPC(vault: vault, token: token)
+
+        _ = try await TerminalProvisioner(rpcFactory: { _ in trustedRPC })
+            .validateHistoricalConfiguration(configuration)
+
+        let trustedBatchSizes = await trustedRPC.batchSizes
+        XCTAssertEqual(trustedBatchSizes, [2, 9, 1])
+        let directChainReads = await trustedRPC.directChainReads
+        XCTAssertEqual(directChainReads, 0)
     }
 
     func testHistoricalConfigurationRejectsUntrustedSnapshotPinsBeforeRPC() async throws {

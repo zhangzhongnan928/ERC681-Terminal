@@ -3,10 +3,12 @@ package com.openpasskey.terminal.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import android.os.SystemClock
 import com.openpasskey.terminal.data.model.Invoice
 import com.openpasskey.terminal.data.model.SettlementTransaction
 import com.openpasskey.terminal.data.repository.PreparedSettlement
 import com.openpasskey.terminal.data.repository.SettlementRepository
+import com.openpasskey.terminal.rpc.RpcInteractiveReservation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,16 +20,20 @@ data class SettlementUiState(
     val readyInvoices: List<Invoice> = emptyList(),
     val recentTransactions: List<SettlementTransaction> = emptyList(),
     val preparing: Boolean = false,
+    val preparingAuthentication: Boolean = false,
     val submitting: Boolean = false,
     val prepared: PreparedSettlement? = null,
     val message: String? = null,
-    val isError: Boolean = false
+    val isError: Boolean = false,
+    val authenticationRequestSequence: Long = 0,
 )
 
 class SettlementViewModel(private val repository: SettlementRepository) : ViewModel() {
     private val _state = MutableStateFlow(SettlementUiState())
     val state: StateFlow<SettlementUiState> = _state.asStateFlow()
     private var recoveryInFlight = false
+    private var lastAuthenticationPromptedSequence = 0L
+    private var authenticationReservation: RpcInteractiveReservation? = null
 
     init {
         viewModelScope.launch {
@@ -73,17 +79,69 @@ class SettlementViewModel(private val repository: SettlementRepository) : ViewMo
     }
 
     fun dismissReview() {
-        if (!_state.value.submitting) _state.value = _state.value.copy(prepared = null)
+        if (!_state.value.submitting && !_state.value.preparingAuthentication) {
+            releaseAuthenticationReservation()
+            _state.value = _state.value.copy(prepared = null)
+        }
+    }
+
+    /** Runs slow live settlement checks before opening the 30-second Keystore auth window. */
+    fun prepareForAuthentication() {
+        val reviewed = _state.value.prepared ?: return
+        if (_state.value.preparingAuthentication || _state.value.submitting) return
+        releaseAuthenticationReservation()
+        authenticationReservation = repository.reserveAuthenticationWindow()
+        _state.value = _state.value.copy(
+            preparingAuthentication = true,
+            message = null,
+            isError = false,
+        )
+        viewModelScope.launch {
+            try {
+                val fresh = repository.prepareForAuthentication(reviewed)
+                _state.value = _state.value.copy(
+                    preparingAuthentication = false,
+                    prepared = fresh,
+                    authenticationRequestSequence = _state.value.authenticationRequestSequence + 1,
+                )
+            } catch (error: CancellationException) {
+                releaseAuthenticationReservation()
+                throw error
+            } catch (error: Exception) {
+                releaseAuthenticationReservation()
+                _state.value = _state.value.copy(
+                    preparingAuthentication = false,
+                    message = error.message ?: "Settlement pre-authentication check failed",
+                    isError = true,
+                )
+            }
+        }
+    }
+
+    /** One-shot ownership prevents rotation/recomposition from presenting the same prompt twice. */
+    fun beginAuthenticationPrompt(sequence: Long): Boolean {
+        if (sequence <= 0 || sequence != _state.value.authenticationRequestSequence) return false
+        if (sequence <= lastAuthenticationPromptedSequence) return false
+        lastAuthenticationPromptedSequence = sequence
+        return true
     }
 
     /** Called only from the OS authentication success callback. */
     fun submitAuthenticated() {
-        val prepared = _state.value.prepared ?: return
+        val prepared = _state.value.prepared ?: run {
+            releaseAuthenticationReservation()
+            return
+        }
         if (_state.value.submitting) return
+        val authenticatedAtElapsedRealtimeMillis = SystemClock.elapsedRealtime()
         _state.value = _state.value.copy(submitting = true, message = null, isError = false)
         viewModelScope.launch {
             try {
-                val transaction = repository.submit(prepared, userExplicitlyConfirmed = true)
+                val transaction = repository.submit(
+                    reviewed = prepared,
+                    userExplicitlyConfirmed = true,
+                    authenticatedAtElapsedRealtimeMillis = authenticatedAtElapsedRealtimeMillis,
+                )
                 _state.value = _state.value.copy(
                     submitting = false,
                     prepared = null,
@@ -100,11 +158,14 @@ class SettlementViewModel(private val repository: SettlementRepository) : ViewMo
                     message = error.message ?: "Settlement submission failed",
                     isError = true
                 )
+            } finally {
+                releaseAuthenticationReservation()
             }
         }
     }
 
     fun authenticationFailed(message: String) {
+        releaseAuthenticationReservation()
         _state.value = _state.value.copy(message = "Authentication failed: $message", isError = true)
     }
 
@@ -131,6 +192,16 @@ class SettlementViewModel(private val repository: SettlementRepository) : ViewMo
         }
     }
 
+    override fun onCleared() {
+        releaseAuthenticationReservation()
+        super.onCleared()
+    }
+
+    private fun releaseAuthenticationReservation() {
+        authenticationReservation?.close()
+        authenticationReservation = null
+    }
+
     class Factory(private val repository: SettlementRepository) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
@@ -138,6 +209,6 @@ class SettlementViewModel(private val repository: SettlementRepository) : ViewMo
     }
 
     private companion object {
-        const val RECOVERY_INTERVAL_MILLIS = 30_000L
+        const val RECOVERY_INTERVAL_MILLIS = 60_000L
     }
 }
