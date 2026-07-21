@@ -8,10 +8,13 @@ enum TerminalReadiness: Equatable {
     case validationRequired
     case statusCheckRequired
     case authorizationRequired
-    case gasRequired(available: UInt256)
+    case gasRequired(
+        available: UInt256,
+        required: UInt256,
+        nativeCurrencySymbol: String,
+        nativeCurrencyDecimals: UInt8
+    )
     case ready
-
-    static let minimumGasBalance = UInt256(100_000_000_000_000)
 
     var isReady: Bool { self == .ready }
 
@@ -42,8 +45,8 @@ enum TerminalReadiness: Equatable {
             "Refresh the on-chain authorization and native balance."
         case .authorizationRequired:
             "Grant this EOA owner/operator access from the merchant portal."
-        case let .gasRequired(available):
-            "Fund the operator to at least \(Self.minimumGasBalance.decimalString) wei; current balance is \(available.decimalString) wei."
+        case let .gasRequired(available, required, symbol, decimals):
+            "Fund the operator to at least \(TokenAmount(rawValue: required, decimals: decimals).displayString()) \(symbol); current balance is \(TokenAmount(rawValue: available, decimals: decimals).displayString()) \(symbol)."
         case .ready:
             "Configuration, operator authorization, and gas are ready for a new payment QR."
         }
@@ -79,8 +82,17 @@ enum TerminalReadiness: Equatable {
               String(operatorStatus.chainID) == settings.chainID
         else { return .statusCheckRequired }
         guard operatorStatus.isAuthorizedOperator else { return .authorizationRequired }
-        guard operatorStatus.balance >= minimumGasBalance else {
-            return .gasRequired(available: operatorStatus.balance)
+        guard let reserve = settings.displayedPaymentProfile.minimumOperatorNativeReserve else {
+            return .configurationRequired
+        }
+        guard operatorStatus.balance >= reserve else {
+            let profile = settings.displayedPaymentProfile
+            return .gasRequired(
+                available: operatorStatus.balance,
+                required: reserve,
+                nativeCurrencySymbol: profile.nativeCurrencySymbol,
+                nativeCurrencyDecimals: profile.nativeCurrencyDecimals
+            )
         }
         return .ready
     }

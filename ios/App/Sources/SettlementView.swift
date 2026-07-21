@@ -121,7 +121,7 @@ struct SettlementView: View {
                 if let status = model.operatorStatus {
                     LabeledContent(
                         "Gas",
-                        value: "\(TokenAmount(rawValue: status.balance, decimals: 18).displayString()) ETH"
+                        value: "\(TokenAmount(rawValue: status.balance, decimals: model.settings.displayedPaymentProfile.nativeCurrencyDecimals).displayString()) \(model.settings.displayedPaymentProfile.nativeCurrencySymbol)"
                     )
                     Label(
                         status.isAuthorizedOperator ? "Vault authorized" : "Vault authorization required",
@@ -129,7 +129,10 @@ struct SettlementView: View {
                     )
                     .foregroundStyle(status.isAuthorizedOperator ? .green : .red)
                     if status.isLowGas {
-                        Label("Fund the operator wallet with ETH", systemImage: "fuelpump")
+                        Label(
+                            "Fund the operator wallet with \(model.settings.displayedPaymentProfile.nativeCurrencySymbol)",
+                            systemImage: "fuelpump"
+                        )
                             .foregroundStyle(.orange)
                     }
                 } else if let message = model.operatorStatusMessage {
@@ -209,11 +212,11 @@ private struct SettlementConfirmationView: View {
                     LabeledContent("Gas limit", value: String(prepared.gasLimit))
                     LabeledContent(
                         "Maximum gas reserve",
-                        value: "\(TokenAmount(rawValue: prepared.maximumGasCost, decimals: 18).displayString()) ETH"
+                        value: formatNative(prepared.maximumGasCost)
                     )
                     LabeledContent(
                         "OP L1 reserve",
-                        value: "\(TokenAmount(rawValue: prepared.l1DataFeeReserve, decimals: 18).displayString()) ETH"
+                        value: formatNative(prepared.l1DataFeeReserve)
                     )
                 }
 
@@ -276,6 +279,16 @@ private struct SettlementConfirmationView: View {
             return amount.decimalString
         }
         return "\(TokenAmount(rawValue: amount, decimals: token.decimals).displayString()) \(token.symbol)"
+    }
+
+    private var nativeNetwork: TerminalKnownChainProfile? {
+        TerminalKnownChainProfile.profile(for: prepared.intent.chainID)
+    }
+
+    private func formatNative(_ amount: UInt256) -> String {
+        let decimals = nativeNetwork?.nativeCurrencyDecimals ?? 18
+        let symbol = nativeNetwork?.nativeCurrencySymbol ?? "native"
+        return "\(TokenAmount(rawValue: amount, decimals: decimals).displayString()) \(symbol)"
     }
 }
 

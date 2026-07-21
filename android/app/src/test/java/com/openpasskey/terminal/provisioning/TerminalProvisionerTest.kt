@@ -3,6 +3,7 @@ package com.openpasskey.terminal.provisioning
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.erc681.NetworkValidation
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
+import com.openpasskey.terminal.chain.resolvedPaymentProfiles
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.lifecycle.TerminalResetCoordinator
 import com.openpasskey.terminal.lifecycle.OperatorNativeBalanceReader
@@ -24,7 +25,7 @@ import java.util.concurrent.TimeUnit
 
 class TerminalProvisionerTest {
     @Test
-    fun successfulProvisioningCommitsExactlyOnceAndReplacesTokensAtomically() = runBlocking {
+    fun provisioningUsesKnownNetworkDefaultWithoutLeakingPreviousFinality() = runBlocking {
         val committed = mutableListOf<TerminalConfigSnapshot>()
         val operational = FakeReader().apply {
             provenanceFailure = IllegalStateException("Operational override cannot prove provenance")
@@ -50,7 +51,10 @@ class TerminalProvisionerTest {
 
         assertEquals(1, committed.size)
         assertEquals(committed.single(), result.configuration)
-        assertEquals(7, result.configuration.confirmationBlocks)
+        assertEquals(
+            KnownChainPolicy.requireProfile(84532).defaultConfirmationBlocks,
+            result.configuration.confirmationBlocks,
+        )
         assertEquals("https://merchant-rpc.example", result.configuration.rpcUrl)
         assertEquals(1, result.configuration.paymentTokens.size)
         assertEquals("AUD", result.token.symbol)
@@ -66,6 +70,33 @@ class TerminalProvisionerTest {
         assertTrue(trusted.provenanceCalls > 0)
         assertTrue(operational.closed)
         assertTrue(trusted.closed)
+    }
+
+    @Test
+    fun repeatedV1ScansUpsertAndSelectCompleteProfiles() = runBlocking {
+        var stored = previous()
+        val provisioner = TerminalProvisioner(
+            snapshot = { stored },
+            compareAndCommit = { expected, candidate ->
+                assertEquals(stored, expected)
+                stored = candidate
+                true
+            },
+            currentWalletSnapshot = ::wallet,
+            lifecycleGate = TerminalLifecycleGate(),
+            clientFactory = ProvisioningChainReaderFactory { FakeReader() },
+        )
+
+        provisioner.provision(CANONICAL, wallet()) { commit -> commit() }
+        val secondPayload = CANONICAL.replace(
+            "0x7ffba642bc902880a737cb1c18a4e9540879e211",
+            "0x8888888888888888888888888888888888888888",
+        )
+        val second = provisioner.provision(secondPayload, wallet()) { commit -> commit() }
+
+        assertEquals(2, stored.resolvedPaymentProfiles().size)
+        assertEquals(second.profile.id, stored.selectedProfileId)
+        assertEquals(second.profile, stored.resolvedPaymentProfiles().last())
     }
 
     @Test
@@ -132,6 +163,7 @@ class TerminalProvisionerTest {
         listOf(
             CANONICAL.replace(OPERATOR, "0x" + "22".repeat(20)),
             CANONICAL.replace("chainId=84532", "chainId=1"),
+            CANONICAL.replace("chainId=84532", "chainId=8453"),
         ).forEach { payload ->
             var clients = 0
             var writes = 0

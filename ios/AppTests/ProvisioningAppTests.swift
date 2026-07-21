@@ -96,7 +96,7 @@ final class ProvisioningAppTests: XCTestCase {
         let probe = BlockingReadinessRefreshProbe(
             status: OperatorChainStatus(
                 chainID: 84_532,
-                balance: TerminalReadiness.minimumGasBalance,
+                balance: TerminalKnownChainProfile.baseSepolia.minimumOperatorNativeReserve,
                 isAuthorizedOperator: true,
                 isVaultOwner: false,
                 isLowGas: false
@@ -221,7 +221,103 @@ final class ProvisioningAppTests: XCTestCase {
         )
     }
 
-    func testProvisionedSettingsAreBuiltDetachedAndPreserveConfirmationPolicy() throws {
+    func testStoredInvoicePersistsCompleteSelectedProfileBAndIgnoresLaterSelection() throws {
+        let operatorAddress = try address("0x7777777777777777777777777777777777777777")
+        let tokenA = try PaymentToken(
+            address: address("0x1111111111111111111111111111111111111111"),
+            symbol: "AUDM",
+            decimals: 18
+        )
+        let tokenB = try PaymentToken(
+            address: address("0x2222222222222222222222222222222222222222"),
+            symbol: "USDC",
+            decimals: 6
+        )
+        let configurationA = try TerminalConfiguration(
+            chainID: 84_532,
+            rpcEndpoints: [URL(string: "https://sepolia.base.org")!],
+            protocolVersion: .v1_4_1,
+            deployment: OPKDeployment(
+                factory: try address("0x3333333333333333333333333333333333333333"),
+                receiverImplementation: try address("0x4444444444444444444444444444444444444444"),
+                vault: try address("0x5555555555555555555555555555555555555555")
+            ),
+            tokens: [tokenA],
+            confirmationPolicy: .init(requiredBlocks: 2)
+        )
+        let configurationB = try TerminalConfiguration(
+            chainID: 9_999,
+            rpcEndpoints: [URL(string: "https://rpc.merchant.example")!],
+            protocolVersion: .v1_4_1,
+            deployment: OPKDeployment(
+                factory: try address("0x6666666666666666666666666666666666666666"),
+                receiverImplementation: try address("0x8888888888888888888888888888888888888888"),
+                vault: try address("0x9999999999999999999999999999999999999999")
+            ),
+            tokens: [tokenB],
+            confirmationPolicy: .init(requiredBlocks: 7)
+        )
+        let profileA = try TerminalPaymentProfile(configuration: configurationA)
+        let profileB = try TerminalPaymentProfile(configuration: configurationB)
+        let originalCatalog = try TerminalPaymentProfileCatalog(
+            profiles: [profileA, profileB],
+            selectedProfileID: profileA.id
+        )
+        let selectedB = try originalCatalog.selecting(id: profileB.id)
+        let capturedProfile = try XCTUnwrap(selectedB.selected)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: TerminalIdentifier(address: operatorAddress),
+            amount: TokenAmount(rawValue: UInt256(1_234_567), decimals: tokenB.decimals),
+            profile: capturedProfile,
+            createdAt: Date(timeIntervalSince1970: 1_234),
+            nonce: Bytes32(
+                hex: "0xabababababababababababababababababababababababababababababababab"
+            )
+        )
+
+        let persisted = try StoredInvoice(
+            request: request,
+            configuration: capturedProfile.configuration
+        )
+        let laterSelection = try selectedB.selecting(id: profileA.id)
+
+        XCTAssertEqual(laterSelection.selected?.id, profileA.id)
+        XCTAssertEqual(persisted.chainID, Int64(configurationB.chainID))
+        XCTAssertEqual(persisted.rpcURL, configurationB.rpcEndpoints[0].absoluteString)
+        XCTAssertEqual(persisted.protocolVersion, configurationB.protocolVersion.rawValue)
+        XCTAssertEqual(persisted.factory, configurationB.deployment.factory.hex)
+        XCTAssertEqual(
+            persisted.receiverImplementation,
+            configurationB.deployment.receiverImplementation.hex
+        )
+        XCTAssertEqual(persisted.vault, configurationB.deployment.vault.hex)
+        XCTAssertEqual(persisted.confirmationBlocks, 7)
+        XCTAssertEqual(persisted.tokenAddress, tokenB.address.hex)
+        XCTAssertEqual(persisted.tokenSymbol, tokenB.symbol)
+        XCTAssertEqual(persisted.tokenDecimals, Int(tokenB.decimals))
+        XCTAssertEqual(persisted.terminalIdentifier, operatorAddress.hex)
+        XCTAssertEqual(persisted.expectedAmount, "1234567")
+    }
+
+    func testSettlementInvoiceOperatorSnapshotsMustMatchTheCurrentDeviceEOA() throws {
+        let current = try address("0x1111111111111111111111111111111111111111")
+        let other = try address("0x2222222222222222222222222222222222222222")
+
+        XCTAssertTrue(
+            invoiceOperatorSnapshotsMatch([current, current], currentOperator: current)
+        )
+        XCTAssertFalse(
+            invoiceOperatorSnapshotsMatch([current, other], currentOperator: current)
+        )
+        XCTAssertFalse(
+            invoiceOperatorSnapshotsMatch([other], currentOperator: current)
+        )
+        XCTAssertFalse(
+            invoiceOperatorSnapshotsMatch([], currentOperator: current)
+        )
+    }
+
+    func testProvisionedSettingsUseKnownNetworkDefaultWithoutLeakingPreviousFinality() throws {
         var original = AppSettings()
         original.rpcURL = "https://example-rpc.invalid"
         original.confirmationBlocks = "7"
@@ -244,14 +340,18 @@ final class ProvisioningAppTests: XCTestCase {
                 vault: try address("0x3333333333333333333333333333333333333333")
             ),
             tokens: [token],
-            confirmationPolicy: .init(requiredBlocks: 7),
+            confirmationPolicy: .init(requiredBlocks: profile.defaultConfirmationBlocks),
             create2TestVector: profile.create2TestVector
         )
 
         let candidate = try original.applying(configuration, boundTo: operatorAddress)
 
         XCTAssertEqual(original, snapshot, "Derivation must not mutate the live settings value")
-        XCTAssertEqual(candidate.confirmationBlocks, "7")
+        XCTAssertEqual(original.confirmationBlocks, "7")
+        XCTAssertEqual(
+            candidate.confirmationBlocks,
+            String(profile.defaultConfirmationBlocks)
+        )
         XCTAssertEqual(candidate.rpcURL, "https://example-rpc.invalid")
         XCTAssertEqual(candidate.chainID, "84532")
         XCTAssertEqual(candidate.factory, profile.factory.hex)
@@ -296,6 +396,276 @@ final class ProvisioningAppTests: XCTestCase {
         XCTAssertEqual(original, snapshot)
     }
 
+    func testLegacyFlatSettingsMigrateToOneSelectedProfileAndRoundTripV2() throws {
+        let operatorAddress = "0x1111111111111111111111111111111111111111"
+        let legacy: [String: Any] = [
+            "rpcURL": "https://sepolia.base.org",
+            "chainID": "84532",
+            "protocolVersion": "1.4.1",
+            "factory": "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
+            "receiverImplementation": "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
+            "vault": "0x3333333333333333333333333333333333333333",
+            "tokenAddress": "0x2222222222222222222222222222222222222222",
+            "tokenSymbol": "AUDM",
+            "tokenDecimals": "18",
+            "confirmationBlocks": "7",
+            "provisionedOperatorAddress": operatorAddress,
+        ]
+        let migrated = try JSONDecoder().decode(
+            AppSettings.self,
+            from: JSONSerialization.data(withJSONObject: legacy)
+        )
+
+        XCTAssertEqual(migrated.paymentProfiles.count, 1)
+        XCTAssertEqual(migrated.selectedPaymentProfileID, migrated.paymentProfiles[0].id)
+        XCTAssertTrue(migrated.paymentProfiles[0].id.hasPrefix("eip155:84532:"))
+        XCTAssertEqual(migrated.provisionedOperatorAddress, operatorAddress)
+        XCTAssertEqual(migrated.confirmationBlocks, "7")
+
+        let roundTripped = try JSONDecoder().decode(
+            AppSettings.self,
+            from: JSONEncoder().encode(migrated)
+        )
+        XCTAssertEqual(roundTripped, migrated)
+    }
+
+    func testPersistedCatalogRejectsUnsupportedChainBeforeOfferingFunding() throws {
+        let operatorAddress = "0x1111111111111111111111111111111111111111"
+        let untrusted: [String: Any] = [
+            "schemaVersion": 2,
+            "confirmationBlocks": "2",
+            "paymentProfiles": [[
+                "rpcURL": "https://ethereum.example",
+                "chainID": "1",
+                "protocolVersion": "1.4.1",
+                "factory": "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
+                "receiverImplementation": "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
+                "vault": "0x3333333333333333333333333333333333333333",
+                "tokenAddress": "0x2222222222222222222222222222222222222222",
+                "tokenSymbol": "USDC",
+                "tokenDecimals": "6",
+                "provisionedOperatorAddress": operatorAddress,
+            ]],
+        ]
+
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(
+                AppSettings.self,
+                from: JSONSerialization.data(withJSONObject: untrusted)
+            )
+        )
+    }
+
+    func testProvisioningUpsertsCanonicalProfileAndPreservesOtherEnabledRoutes() throws {
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let sepolia = TerminalKnownChainProfile.baseSepolia
+        let sepoliaTokenAddress = try address("0x2222222222222222222222222222222222222222")
+        let secondTokenAddress = try address("0x4444444444444444444444444444444444444444")
+        let sepoliaConfiguration = try TerminalConfiguration(
+            chainID: sepolia.chainID,
+            rpcEndpoints: [sepolia.rpcEndpoint],
+            protocolVersion: sepolia.protocolVersion,
+            deployment: OPKDeployment(
+                factory: sepolia.factory,
+                receiverImplementation: sepolia.receiverImplementation,
+                vault: try address("0x3333333333333333333333333333333333333333")
+            ),
+            tokens: [PaymentToken(
+                address: sepoliaTokenAddress,
+                symbol: "AUDM",
+                decimals: 18
+            )],
+            confirmationPolicy: .init(requiredBlocks: 2),
+            create2TestVector: sepolia.create2TestVector
+        )
+        let secondConfiguration = try TerminalConfiguration(
+            chainID: sepolia.chainID,
+            rpcEndpoints: [sepolia.rpcEndpoint],
+            protocolVersion: sepolia.protocolVersion,
+            deployment: OPKDeployment(
+                factory: sepolia.factory,
+                receiverImplementation: sepolia.receiverImplementation,
+                vault: try address("0x5555555555555555555555555555555555555555")
+            ),
+            tokens: [PaymentToken(
+                address: secondTokenAddress,
+                symbol: "USDC",
+                decimals: 6
+            )],
+            confirmationPolicy: .init(requiredBlocks: 2),
+            create2TestVector: sepolia.create2TestVector
+        )
+
+        let one = try AppSettings().applying(
+            sepoliaConfiguration,
+            boundTo: operatorAddress
+        )
+        let two = try one.applying(secondConfiguration, boundTo: operatorAddress)
+        XCTAssertEqual(two.paymentProfiles.count, 2)
+        XCTAssertEqual(two.chainID, "84532")
+        XCTAssertEqual(two.tokenSymbol, "USDC")
+        XCTAssertEqual(two.operatorFundingPayload(for: operatorAddress), "ethereum:\(operatorAddress.hex)@84532")
+        XCTAssertEqual(
+            try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(two)),
+            two
+        )
+
+        let firstID = try XCTUnwrap(
+            two.paymentProfiles.first(where: { $0.chainID == "84532" })?.id
+        )
+        let selectedSepolia = try two.selectingPaymentProfile(id: firstID)
+        XCTAssertEqual(selectedSepolia.tokenSymbol, "AUDM")
+        XCTAssertEqual(selectedSepolia.chainID, "84532")
+        XCTAssertNotEqual(selectedSepolia.validationFingerprint, two.validationFingerprint)
+
+        let updatedSecondRoute = try TerminalConfiguration(
+            chainID: secondConfiguration.chainID,
+            rpcEndpoints: secondConfiguration.rpcEndpoints,
+            protocolVersion: secondConfiguration.protocolVersion,
+            deployment: secondConfiguration.deployment,
+            tokens: [PaymentToken(
+                address: secondTokenAddress,
+                symbol: "USDC.e",
+                decimals: 6
+            )],
+            confirmationPolicy: secondConfiguration.confirmationPolicy,
+            create2TestVector: secondConfiguration.create2TestVector
+        )
+        let upserted = try selectedSepolia.applying(
+            updatedSecondRoute,
+            boundTo: operatorAddress
+        )
+        XCTAssertEqual(upserted.paymentProfiles.count, 2)
+        XCTAssertEqual(upserted.tokenSymbol, "USDC.e")
+
+        let removed = try upserted.removingPaymentProfile(
+            id: try XCTUnwrap(upserted.selectedPaymentProfileID)
+        )
+        XCTAssertEqual(removed.paymentProfiles.count, 1)
+        XCTAssertEqual(removed.chainID, "84532")
+        XCTAssertTrue(removed.isProvisioned)
+        XCTAssertFalse(removed.paymentProfiles.contains { $0.tokenSymbol == "USDC.e" })
+    }
+
+    func testProfileSelectionCannotLeakFinalityAndRejectsBelowNetworkFloor() throws {
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let known = TerminalKnownChainProfile.baseSepolia
+        func configuration(vault: String, token: String) throws -> TerminalConfiguration {
+            try TerminalConfiguration(
+                chainID: known.chainID,
+                rpcEndpoints: [known.rpcEndpoint],
+                protocolVersion: known.protocolVersion,
+                deployment: OPKDeployment(
+                    factory: known.factory,
+                    receiverImplementation: known.receiverImplementation,
+                    vault: address(vault)
+                ),
+                tokens: [PaymentToken(address: address(token), symbol: "USD", decimals: 6)],
+                confirmationPolicy: .init(requiredBlocks: known.defaultConfirmationBlocks),
+                create2TestVector: known.create2TestVector
+            )
+        }
+
+        var first = try AppSettings().applying(
+            configuration(
+                vault: "0x2222222222222222222222222222222222222222",
+                token: "0x3333333333333333333333333333333333333333"
+            ),
+            boundTo: operatorAddress
+        )
+        first.confirmationBlocks = "7"
+        let firstID = try XCTUnwrap(first.selectedPaymentProfileID)
+        let second = try first.applying(
+            configuration(
+                vault: "0x4444444444444444444444444444444444444444",
+                token: "0x5555555555555555555555555555555555555555"
+            ),
+            boundTo: operatorAddress
+        )
+        let secondID = try XCTUnwrap(second.selectedPaymentProfileID)
+
+        XCTAssertEqual(try second.selectingPaymentProfile(id: firstID).confirmationBlocks, "7")
+        XCTAssertEqual(try second.selectingPaymentProfile(id: secondID).confirmationBlocks, "2")
+        var unsafe = second.displayedPaymentProfile
+        unsafe.confirmationBlocks = "1"
+        XCTAssertThrowsError(try unsafe.configuration())
+    }
+
+    func testProfileIdentityDisambiguatesDuplicateSymbolsByVault() throws {
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let known = TerminalKnownChainProfile.baseSepolia
+        let token = try PaymentToken(
+            address: address("0x2222222222222222222222222222222222222222"),
+            symbol: "USDC",
+            decimals: 6
+        )
+        func configuration(vault: String) throws -> TerminalConfiguration {
+            try TerminalConfiguration(
+                chainID: known.chainID,
+                rpcEndpoints: [known.rpcEndpoint],
+                protocolVersion: known.protocolVersion,
+                deployment: OPKDeployment(
+                    factory: known.factory,
+                    receiverImplementation: known.receiverImplementation,
+                    vault: address(vault)
+                ),
+                tokens: [token],
+                create2TestVector: known.create2TestVector
+            )
+        }
+        let first = try AppSettings().applying(
+            configuration(vault: "0x3333333333333333333333333333333333333333"),
+            boundTo: operatorAddress
+        )
+        let second = try first.applying(
+            configuration(vault: "0x4444444444444444444444444444444444444444"),
+            boundTo: operatorAddress
+        )
+        XCTAssertEqual(second.paymentProfiles.map(\.tokenSymbol), ["USDC", "USDC"])
+        XCTAssertEqual(Set(second.paymentProfiles.map(\.id)).count, 2)
+        XCTAssertNotEqual(second.paymentProfiles[0].detail, second.paymentProfiles[1].detail)
+    }
+
+    func testProfileDisplayDisambiguatesSameSymbolAndVaultByTokenAddress() throws {
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let known = TerminalKnownChainProfile.baseSepolia
+        let vault = try address("0x3333333333333333333333333333333333333333")
+        func configuration(tokenAddress: String) throws -> TerminalConfiguration {
+            try TerminalConfiguration(
+                chainID: known.chainID,
+                rpcEndpoints: [known.rpcEndpoint],
+                protocolVersion: known.protocolVersion,
+                deployment: OPKDeployment(
+                    factory: known.factory,
+                    receiverImplementation: known.receiverImplementation,
+                    vault: vault
+                ),
+                tokens: [PaymentToken(
+                    address: address(tokenAddress),
+                    symbol: "USD",
+                    decimals: 6
+                )],
+                create2TestVector: known.create2TestVector
+            )
+        }
+        let first = try AppSettings().applying(
+            configuration(tokenAddress: "0x2222222222222222222222222222222222222222"),
+            boundTo: operatorAddress
+        )
+        let second = try first.applying(
+            configuration(tokenAddress: "0x4444444444444444444444444444444444444444"),
+            boundTo: operatorAddress
+        )
+
+        XCTAssertEqual(second.paymentProfiles.map(\.displayName), [
+            "USD · Base Sepolia",
+            "USD · Base Sepolia",
+        ])
+        XCTAssertNotEqual(second.paymentProfiles[0].detail, second.paymentProfiles[1].detail)
+        XCTAssertTrue(second.paymentProfiles[0].detail.contains("0x222222…2222"))
+        XCTAssertTrue(second.paymentProfiles[1].detail.contains("0x444444…4444"))
+    }
+
     func testReadinessRequiresCurrentValidationAuthorizationAndMinimumGas() throws {
         let operatorAddress = try address("0x1111111111111111111111111111111111111111")
         var settings = AppSettings()
@@ -332,7 +702,7 @@ final class ProvisioningAppTests: XCTestCase {
 
         let unauthorized = OperatorChainStatus(
             chainID: 84_532,
-            balance: TerminalReadiness.minimumGasBalance,
+            balance: TerminalKnownChainProfile.baseSepolia.minimumOperatorNativeReserve,
             isAuthorizedOperator: false,
             isVaultOwner: false,
             isLowGas: false
@@ -361,12 +731,17 @@ final class ProvisioningAppTests: XCTestCase {
                 validatedFingerprint: settings.validationFingerprint,
                 operatorStatus: underfunded
             ),
-            .gasRequired(available: underfunded.balance)
+            .gasRequired(
+                available: underfunded.balance,
+                required: TerminalKnownChainProfile.baseSepolia.minimumOperatorNativeReserve,
+                nativeCurrencySymbol: "ETH",
+                nativeCurrencyDecimals: 18
+            )
         )
 
         let ready = OperatorChainStatus(
             chainID: 84_532,
-            balance: TerminalReadiness.minimumGasBalance,
+            balance: TerminalKnownChainProfile.baseSepolia.minimumOperatorNativeReserve,
             isAuthorizedOperator: true,
             isVaultOwner: false,
             isLowGas: false
@@ -609,6 +984,53 @@ final class ProvisioningAppTests: XCTestCase {
             settings.operatorFundingPayload(for: current),
             "ethereum:\(current.hex)@84532"
         )
+    }
+
+    @MainActor
+    func testResetChecksEveryEnabledNetworkAndBlocksFundedKeyDeletion() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        let container = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let deletionProbe = OperatorDeletionProbe()
+        let lifecycle = BlockingOperatorWalletLifecycle(
+            address: operatorAddress,
+            deletionProbe: deletionProbe
+        )
+        let balanceProbe = ResetNetworkBalanceProbe(
+            fundedChainID: TerminalKnownChainProfile.baseSepolia.chainID
+        )
+        let namespace = UUID().uuidString
+        let model = AppModel(
+            container: container,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.tests.\(namespace)"
+            ),
+            operatorWalletLifecycle: lifecycle,
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            operatorResetBalanceReader: { configuration, _ in
+                balanceProbe.snapshot(chainID: configuration.chainID)
+            }
+        )
+        // No current profile remembers the chain, but the published device EOA may still hold gas
+        // on any network enabled by the app.
+        model.settings = AppSettings()
+        model.unlockAdmin(with: "123456")
+
+        await model.resetOperatorWallet()
+
+        XCTAssertEqual(
+            Set(balanceProbe.requestedChainIDs),
+            TerminalKnownChainProfile.supportedChainIDs
+        )
+        XCTAssertFalse(deletionProbe.wasDeleted)
+        XCTAssertEqual(model.operatorAddress, operatorAddress)
+        XCTAssertNotNil(model.errorMessage)
     }
 
     func testOperatorResetBlocksUnresolvedPhasesIncludingNeedsReview() {
@@ -1543,6 +1965,26 @@ private final class UnconfiguredAdminPINStore: AdminPINManaging, @unchecked Send
     }
 
     func secondsUntilNextAttempt() throws -> Int { 0 }
+}
+
+private final class ResetNetworkBalanceProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let fundedChainID: UInt64
+    private var chains = [UInt64]()
+
+    init(fundedChainID: UInt64) {
+        self.fundedChainID = fundedChainID
+    }
+
+    var requestedChainIDs: [UInt64] {
+        lock.withLock { chains }
+    }
+
+    func snapshot(chainID: UInt64) -> OperatorNativeBalanceSnapshot {
+        lock.withLock { chains.append(chainID) }
+        let balance = chainID == fundedChainID ? UInt256(1) : .zero
+        return OperatorNativeBalanceSnapshot(latest: balance, pending: balance)
+    }
 }
 
 private actor BlockingReadinessRefreshProbe {

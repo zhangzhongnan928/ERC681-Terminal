@@ -7,20 +7,21 @@ import java.lang.reflect.Proxy
 
 class InvoiceDatabaseMigrationTest {
     @Test
+    fun v6PersistsTheInvoiceOperatorSnapshot() {
+        val statements = mutableListOf<String>()
+        val database = recordingDatabase(statements)
+
+        InvoiceDatabase.MIGRATION_5_6.migrate(database)
+
+        assertTrue(statements.any {
+            "operatorAddress TEXT NOT NULL DEFAULT ''" in it
+        })
+    }
+
+    @Test
     fun v5PersistsAmbiguityAndDurableRecoveryFairness() {
         val statements = mutableListOf<String>()
-        val database = Proxy.newProxyInstance(
-            SupportSQLiteDatabase::class.java.classLoader,
-            arrayOf(SupportSQLiteDatabase::class.java),
-        ) { _, method, arguments ->
-            when (method.name) {
-                "execSQL" -> {
-                    statements += requireNotNull(arguments)[0] as String
-                    Unit
-                }
-                else -> error("Unexpected migration database call: ${method.name}")
-            }
-        } as SupportSQLiteDatabase
+        val database = recordingDatabase(statements)
 
         InvoiceDatabase.MIGRATION_4_5.migrate(database)
 
@@ -33,4 +34,17 @@ class InvoiceDatabaseMigrationTest {
             "settlementAmbiguous = 1" in it && "SETTLEMENT_REVIEW_REQUIRED" in it
         })
     }
+
+    private fun recordingDatabase(statements: MutableList<String>) = Proxy.newProxyInstance(
+        SupportSQLiteDatabase::class.java.classLoader,
+        arrayOf(SupportSQLiteDatabase::class.java),
+    ) { _, method, arguments ->
+        when (method.name) {
+            "execSQL" -> {
+                statements += requireNotNull(arguments)[0] as String
+                Unit
+            }
+            else -> error("Unexpected migration database call: ${method.name}")
+        }
+    } as SupportSQLiteDatabase
 }

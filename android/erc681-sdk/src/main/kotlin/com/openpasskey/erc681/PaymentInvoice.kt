@@ -16,6 +16,40 @@ object PaymentInvoiceFactory {
     @JvmStatic
     @JvmOverloads
     fun create(
+        profile: PaymentProfile,
+        amount: TokenAmount,
+        terminalIdentifier: EvmAddress,
+        timestampSeconds: Long = System.currentTimeMillis() / 1_000,
+        random: java.security.SecureRandom = java.security.SecureRandom(),
+    ): PaymentInvoice {
+        require(amount.decimals == profile.token.decimals) {
+            "Amount decimals must match the selected payment profile token"
+        }
+        return create(
+            profile.network,
+            profile.token.address,
+            amount,
+            terminalIdentifier,
+            timestampSeconds,
+            random,
+        )
+    }
+
+    @JvmStatic
+    fun create(
+        profile: PaymentProfile,
+        amount: TokenAmount,
+        invoiceId: InvoiceId,
+    ): PaymentInvoice {
+        require(amount.decimals == profile.token.decimals) {
+            "Amount decimals must match the selected payment profile token"
+        }
+        return create(profile.network, profile.token.address, amount, invoiceId)
+    }
+
+    @JvmStatic
+    @JvmOverloads
+    fun create(
         network: NetworkConfig,
         token: EvmAddress,
         amount: TokenAmount,

@@ -59,7 +59,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.openpasskey.terminal.chain.PaymentToken
+import com.openpasskey.terminal.chain.TerminalPaymentProfile
+import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import com.openpasskey.terminal.viewmodel.CheckoutKey
 import com.openpasskey.terminal.viewmodel.CLEAR_AMOUNT_ACCESSIBILITY_LABEL
 import com.openpasskey.terminal.viewmodel.InvoiceViewModel
@@ -76,12 +77,11 @@ import com.openpasskey.terminal.viewmodel.isSubmittableCheckoutAmount
 fun InvoiceScreen(
     viewModel: InvoiceViewModel,
     terminalStatus: TerminalSetupStatus,
-    terminalNetworkName: String,
-    terminalChainId: Long,
     terminalStatusMessage: String?,
     terminalRefreshing: Boolean,
     terminalConfigurationValidated: Boolean,
     onRefreshTerminalStatus: () -> Unit,
+    onProfileSelection: () -> Unit,
     onRecoverFromInvoiceFailure: () -> Unit,
     onOpenSettings: () -> Unit,
     onInvoiceCreated: (String) -> Unit,
@@ -97,6 +97,9 @@ fun InvoiceScreen(
             onRecoverFromInvoiceFailure()
         }
     }
+    LaunchedEffect(state.profileSelectionSequence) {
+        if (state.profileSelectionSequence > 0) onProfileSelection()
+    }
     LaunchedEffect(state.createdInvoice) {
         state.createdInvoice?.let {
             onInvoiceCreated(it.invoiceId)
@@ -104,47 +107,64 @@ fun InvoiceScreen(
         }
     }
 
-    val selectedToken = state.selectedToken
+    val selectedProfile = state.selectedProfile
     val ready = isCheckoutReady(
         terminalStatus = terminalStatus,
         configurationValidated = terminalConfigurationValidated,
         refreshing = terminalRefreshing,
-        readinessInvalidated = state.readinessInvalidated,
+        readinessInvalidated = state.readinessInvalidated || state.profileSelectionPending,
         operatorWalletReady = state.operatorWalletReady,
-        hasSelectedToken = selectedToken != null,
+        hasSelectedToken = selectedProfile != null,
     )
     if (!ready) {
         Scaffold(topBar = { TopAppBar(title = { Text("Checkout") }) }) { padding ->
-            CheckoutBlocker(
-                status = when {
-                    state.readinessInvalidated -> TerminalSetupStatus.ERROR
-                    terminalStatus == TerminalSetupStatus.READY &&
-                        (terminalRefreshing || !terminalConfigurationValidated) ->
-                        TerminalSetupStatus.READY
-                    terminalStatus == TerminalSetupStatus.READY -> TerminalSetupStatus.ERROR
-                    else -> terminalStatus
-                },
-                statusMessage = when {
-                    state.readinessInvalidated -> state.repositoryFailure
-                    terminalStatus == TerminalSetupStatus.READY -> null
-                    else -> terminalStatusMessage
-                },
-                onOpenSettings = onOpenSettings,
+            Column(
                 modifier = Modifier.fillMaxSize().padding(padding).padding(20.dp),
-            )
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                // A newly selected profile can be unready without trapping the cashier. Keep the
+                // full profile picker available so another ready currency/network can be chosen.
+                if (state.profiles.size > 1 && selectedProfile != null) {
+                    ProfileSelector(
+                        state.profiles,
+                        selectedProfile,
+                        enabled = !state.isCreating && !state.profileSelectionPending,
+                        onSelected = viewModel::selectProfile,
+                    )
+                }
+                CheckoutBlocker(
+                    status = when {
+                        state.profileSelectionPending ->
+                            TerminalSetupStatus.READY
+                        state.readinessInvalidated -> TerminalSetupStatus.ERROR
+                        terminalStatus == TerminalSetupStatus.READY &&
+                            (terminalRefreshing || !terminalConfigurationValidated) ->
+                            TerminalSetupStatus.READY
+                        terminalStatus == TerminalSetupStatus.READY -> TerminalSetupStatus.ERROR
+                        else -> terminalStatus
+                    },
+                    statusMessage = when {
+                        state.profileSelectionPending -> null
+                        state.readinessInvalidated -> state.repositoryFailure
+                        terminalStatus == TerminalSetupStatus.READY -> null
+                        else -> terminalStatusMessage
+                    },
+                    selectedProfile = selectedProfile,
+                    onOpenSettings = onOpenSettings,
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                )
+            }
         }
         return
     }
     CheckoutReadyScreen(
         amount = state.amount,
-        token = requireNotNull(selectedToken),
-        tokens = state.tokens,
-        networkName = terminalNetworkName,
-        chainId = terminalChainId,
+        profile = requireNotNull(selectedProfile),
+        profiles = state.profiles,
         error = state.error,
         isCreating = state.isCreating,
         onAmountChanged = viewModel::updateAmount,
-        onTokenSelected = viewModel::selectToken,
+        onProfileSelected = viewModel::selectProfile,
         onCreateInvoice = viewModel::createInvoice,
     )
 }
@@ -153,16 +173,15 @@ fun InvoiceScreen(
 @Composable
 internal fun CheckoutReadyScreen(
     amount: String,
-    token: PaymentToken,
-    tokens: List<PaymentToken>,
-    networkName: String,
-    chainId: Long,
+    profile: TerminalPaymentProfile,
+    profiles: List<TerminalPaymentProfile>,
     error: String?,
     isCreating: Boolean,
     onAmountChanged: (String) -> Unit,
-    onTokenSelected: (PaymentToken) -> Unit,
+    onProfileSelected: (TerminalPaymentProfile) -> Unit,
     onCreateInvoice: () -> Unit,
 ) {
+    val token = profile.token
     val displayAmount = checkoutAmountDisplay(amount, token.decimals)
     val amountValid = isSubmittableCheckoutAmount(amount, token.decimals)
     Scaffold(
@@ -185,7 +204,12 @@ internal fun CheckoutReadyScreen(
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            CheckoutStatusRow(networkName, isTestNetwork = chainId == 84532L)
+            CheckoutStatusRow(
+                profile.networkName,
+                isTestNetwork = runCatching {
+                    KnownChainPolicy.requireProfile(profile.chainId).isTestnet
+                }.getOrDefault(false),
+            )
             AmountDisplay(
                 amount = displayAmount,
                 tokenSymbol = token.symbol,
@@ -196,7 +220,14 @@ internal fun CheckoutReadyScreen(
                 canClear = amount.isNotEmpty() && !isCreating,
                 onClear = { onAmountChanged("") },
             )
-            if (tokens.size > 1) TokenSelector(tokens, token, onTokenSelected)
+            if (profiles.size > 1) {
+                ProfileSelector(
+                    profiles,
+                    profile,
+                    enabled = !isCreating,
+                    onSelected = onProfileSelected,
+                )
+            }
             error?.let { CheckoutError(it) }
             CheckoutKeypad(
                 amount = amount,
@@ -429,10 +460,11 @@ private fun CheckoutActionBar(
 internal fun CheckoutBlocker(
     status: TerminalSetupStatus,
     statusMessage: String?,
+    selectedProfile: TerminalPaymentProfile? = null,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val copy = checkoutBlockerCopy(status, statusMessage)
+    val copy = checkoutBlockerCopy(status, statusMessage, selectedProfile)
     Box(
         modifier = modifier
             .testTag("checkout_blocker_scroll")
@@ -477,7 +509,11 @@ internal data class CheckoutBlockerCopy(
 internal fun checkoutBlockerCopy(
     status: TerminalSetupStatus,
     statusMessage: String? = null,
+    selectedProfile: TerminalPaymentProfile? = null,
 ): CheckoutBlockerCopy {
+    val network = selectedProfile?.let { profile ->
+        runCatching { KnownChainPolicy.requireProfile(profile.chainId) }.getOrNull()
+    }
     val (title, detail) = when (status) {
         TerminalSetupStatus.CREATE_WALLET -> "Create terminal wallet" to
             "Create the device-local operator wallet before accepting payments."
@@ -490,7 +526,12 @@ internal fun checkoutBlockerCopy(
         TerminalSetupStatus.AWAITING_AUTHORIZATION -> "Authorize this terminal" to
             "Confirm the operator authorization in the merchant portal."
         TerminalSetupStatus.AWAITING_GAS -> "Fund terminal gas" to
-            "Send at least 0.0001 native currency to the operator funding address."
+            if (network == null) {
+                "Send the required native gas reserve to the operator funding address."
+            } else {
+                "Send at least ${network.minimumOperatorNativeReserve} wei " +
+                    "(${network.nativeCurrencySymbol}) to the operator funding address."
+            }
         TerminalSetupStatus.READY -> "Refreshing terminal status" to
             "Checkout will unlock after the fresh on-chain validation completes."
         TerminalSetupStatus.ERROR -> "Terminal setup needs attention" to
@@ -524,31 +565,44 @@ private fun CheckoutError(message: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TokenSelector(
-    tokens: List<PaymentToken>,
-    selected: PaymentToken?,
-    onSelected: (PaymentToken) -> Unit,
+private fun ProfileSelector(
+    profiles: List<TerminalPaymentProfile>,
+    selected: TerminalPaymentProfile?,
+    enabled: Boolean,
+    onSelected: (TerminalPaymentProfile) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     ExposedDropdownMenuBox(
         expanded = expanded,
-        onExpandedChange = { expanded = it },
+        onExpandedChange = { if (enabled) expanded = it },
         modifier = Modifier.fillMaxWidth(),
     ) {
         OutlinedTextField(
-            value = selected?.let { "${it.symbol} · ${short(it.address)}" } ?: "",
+            value = selected?.let {
+                "${it.token.symbol} · ${it.networkName} · " +
+                    "${short(it.vaultAddress)} · ${short(it.token.address)}"
+            } ?: "",
             onValueChange = {},
             readOnly = true,
-            label = { Text("Payment token") },
-            placeholder = { Text("Select token") },
+            enabled = enabled,
+            label = { Text("Currency and destination") },
+            placeholder = { Text("Select payment profile") },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
-            modifier = Modifier.fillMaxWidth().menuAnchor(MenuAnchorType.PrimaryNotEditable),
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                .testTag("checkout_profile_selector"),
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            tokens.forEach { token ->
+            profiles.forEach { profile ->
                 DropdownMenuItem(
-                    text = { Text("${token.symbol} (${token.decimals}) · ${short(token.address)}") },
-                    onClick = { onSelected(token); expanded = false },
+                    text = {
+                        Text(
+                            "${profile.token.symbol} · ${profile.networkName}\n" +
+                                "Vault ${short(profile.vaultAddress)} · Token ${short(profile.token.address)}",
+                        )
+                    },
+                    onClick = { onSelected(profile); expanded = false },
                 )
             }
         }

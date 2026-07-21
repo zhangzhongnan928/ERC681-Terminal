@@ -1,6 +1,7 @@
 package com.openpasskey.terminal.lifecycle
 
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
+import com.openpasskey.terminal.chain.resolvedPaymentProfiles
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import com.openpasskey.terminal.settlement.OperatorResetGuard
 import com.openpasskey.terminal.settlement.SettlementChainClient
@@ -24,14 +25,29 @@ class RpcOperatorNativeBalanceReader(
 ) : OperatorNativeBalanceReader {
     override suspend fun read(operatorAddress: String): OperatorNativeBalances {
         val config = configSnapshot()
-        val profile = KnownChainPolicy.requireProfile(config.chainId)
-        return clientFactory(profile.rpcUrl).use { client ->
-            check(client.chainId() == profile.chainId) {
-                "Unable to verify operator balance: RPC chain ID mismatch"
+        // A removed profile must not erase knowledge of a chain where this same EOA may still
+        // hold gas. Check every network enabled by this app build, plus every configured chain,
+        // before allowing irreversible key deletion.
+        val chainIds = (
+            config.resolvedPaymentProfiles().map { it.chainId } +
+                KnownChainPolicy.enabledChainIds()
+            ).distinct().sorted()
+        return chainIds.fold(
+            OperatorNativeBalances(BigInteger.ZERO, BigInteger.ZERO),
+        ) { total, chainId ->
+            val profile = KnownChainPolicy.requireProfile(chainId)
+            val balance = clientFactory(profile.rpcUrl).use { client ->
+                check(client.chainId() == profile.chainId) {
+                    "Unable to verify operator balance: RPC chain ID mismatch"
+                }
+                OperatorNativeBalances(
+                    latest = client.latestNativeBalance(operatorAddress),
+                    pending = client.nativeBalance(operatorAddress),
+                )
             }
             OperatorNativeBalances(
-                latest = client.latestNativeBalance(operatorAddress),
-                pending = client.nativeBalance(operatorAddress),
+                latest = total.latest + balance.latest,
+                pending = total.pending + balance.pending,
             )
         }
     }

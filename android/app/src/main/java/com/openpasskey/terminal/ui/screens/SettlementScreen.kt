@@ -24,6 +24,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -39,6 +40,7 @@ import com.openpasskey.terminal.ui.components.DeviceAuthentication
 import com.openpasskey.terminal.viewmodel.SettlementViewModel
 import java.math.BigDecimal
 import java.math.BigInteger
+import com.openpasskey.terminal.provisioning.KnownChainPolicy
 
 private data class SettlementGroupKey(
     val chainId: Long,
@@ -206,6 +208,9 @@ private fun SettlementReviewDialog(
     onDismiss: () -> Unit,
     onConfirm: () -> Unit
 ) {
+    val networkPolicy = remember(prepared.chainId) {
+        runCatching { KnownChainPolicy.requireProfile(prepared.chainId) }.getOrNull()
+    }
     AlertDialog(
         onDismissRequest = { if (!submitting) onDismiss() },
         title = { Text("Confirm settlement") },
@@ -225,10 +230,10 @@ private fun SettlementReviewDialog(
                 )
                 ReviewLine("Nonce", prepared.nonce.toString())
                 ReviewLine("Gas limit", prepared.gasLimit.toString())
-                ReviewLine("Maximum fee", formatNative(prepared.maximumGasCost))
-                ReviewLine("Safety/L1 reserve", formatNative(prepared.safetyReserve))
-                ReviewLine("Required balance", formatNative(prepared.requiredBalance))
-                ReviewLine("Current balance", formatNative(prepared.currentBalance))
+                ReviewLine("Maximum fee", formatNative(prepared.maximumGasCost, networkPolicy))
+                ReviewLine("Safety/L1 reserve", formatNative(prepared.safetyReserve, networkPolicy))
+                ReviewLine("Required balance", formatNative(prepared.requiredBalance, networkPolicy))
+                ReviewLine("Current balance", formatNative(prepared.currentBalance, networkPolicy))
                 Text(
                     "Confirming will sign and broadcast sweepSessions. Fees are rechecked and an increase above 20% requires a new review. Settlement is only recorded after ${prepared.requiredConfirmations} confirmation(s) and matching Swept proof.",
                     style = MaterialTheme.typography.bodySmall
@@ -273,8 +278,13 @@ private fun SettlementTransactionCard(transaction: SettlementTransaction) {
     }
 }
 
-private fun formatNative(wei: BigInteger): String =
-    BigDecimal(wei).movePointLeft(18).stripTrailingZeros().toPlainString() + " native"
+private fun formatNative(
+    wei: BigInteger,
+    network: com.openpasskey.terminal.provisioning.KnownChainProfile?,
+): String = BigDecimal(wei)
+    .movePointLeft(network?.nativeCurrencyDecimals ?: 18)
+    .stripTrailingZeros()
+    .toPlainString() + " " + (network?.nativeCurrencySymbol ?: "native")
 
 private fun compact(value: String): String =
     if (value.length <= 24) value else value.take(10) + "…" + value.takeLast(8)

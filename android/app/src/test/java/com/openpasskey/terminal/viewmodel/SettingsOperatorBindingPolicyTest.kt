@@ -42,6 +42,13 @@ class SettingsOperatorBindingPolicyTest {
         assertNull(operatorFundingPayload(config().copy(provisionedOperatorAddress = null), wallet()))
         assertNull(operatorFundingPayload(config().copy(provisionedOperatorAddress = OTHER), wallet()))
         assertNull(operatorFundingPayload(config().copy(provisioned = false), wallet()))
+        assertNull(operatorFundingPayload(config().copy(chainId = 1), wallet()))
+        assertNull(
+            operatorFundingPayload(
+                config().copy(factoryAddress = "0x3333333333333333333333333333333333333333"),
+                wallet(),
+            ),
+        )
         assertNull(
             operatorFundingPayload(
                 config(),

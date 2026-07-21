@@ -12,7 +12,7 @@ import com.openpasskey.terminal.data.model.SettlementTransaction
 
 @Database(
     entities = [Invoice::class, SettlementTransaction::class, SettlementEvent::class],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class InvoiceDatabase : RoomDatabase() {
@@ -166,6 +166,16 @@ abstract class InvoiceDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                // Historical rows cannot recover the preimage terminal EOA from an invoice ID.
+                // New invoices persist it explicitly; the empty default keeps old history readable.
+                database.execSQL(
+                    "ALTER TABLE invoices ADD COLUMN operatorAddress TEXT NOT NULL DEFAULT ''"
+                )
+            }
+        }
+
         fun getInstance(context: Context): InvoiceDatabase = INSTANCE ?: synchronized(this) {
             INSTANCE ?: Room.databaseBuilder(
                 context.applicationContext,
@@ -176,6 +186,7 @@ abstract class InvoiceDatabase : RoomDatabase() {
                 MIGRATION_2_3,
                 MIGRATION_3_4,
                 MIGRATION_4_5,
+                MIGRATION_5_6,
             ).build().also { INSTANCE = it }
         }
     }

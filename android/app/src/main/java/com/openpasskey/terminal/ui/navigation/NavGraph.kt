@@ -12,6 +12,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -61,6 +62,10 @@ fun AppNavigation(
     val currentRoute = current?.destination?.route
     val showBottomBar = currentRoute in navItems.map { it.route }
 
+    LaunchedEffect(settingsState.selectedProfileId, settingsState.paymentProfiles) {
+        invoiceViewModel.refreshConfiguration()
+    }
+
     Scaffold(
         bottomBar = {
             if (showBottomBar) BottomNavigationBar(controller, currentRoute)
@@ -75,13 +80,16 @@ fun AppNavigation(
                 InvoiceScreen(
                     viewModel = invoiceViewModel,
                     terminalStatus = settingsState.setupStatus,
-                    terminalNetworkName = settingsState.networkName,
-                    terminalChainId = settingsState.chainId,
                     terminalStatusMessage = settingsState.message,
                     terminalRefreshing = settingsState.refreshingOperator,
                     terminalConfigurationValidated = settingsState.configurationValidated,
                     onRefreshTerminalStatus = {
                         settingsViewModel.refreshOperatorStatus(
+                            invoiceViewModel::completeReadinessRefresh,
+                        )
+                    },
+                    onProfileSelection = {
+                        settingsViewModel.refreshOperatorStatusAfterProfileSelection(
                             invoiceViewModel::completeReadinessRefresh,
                         )
                     },

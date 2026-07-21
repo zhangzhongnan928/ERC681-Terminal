@@ -4,14 +4,16 @@ import com.openpasskey.erc681.Erc681PaymentRequest
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.erc681.NetworkConfig
 import com.openpasskey.erc681.PaymentInvoiceFactory
+import com.openpasskey.erc681.PaymentInvoice
 import com.openpasskey.erc681.PaymentObservation
 import com.openpasskey.erc681.PaymentObserver
 import com.openpasskey.erc681.PaymentStatus
 import com.openpasskey.erc681.ReadOnlyRpcClient
 import com.openpasskey.erc681.TokenAmount
 import com.openpasskey.terminal.chain.ChainConfig
-import com.openpasskey.terminal.chain.PaymentToken
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
+import com.openpasskey.terminal.chain.TerminalPaymentProfile
+import com.openpasskey.terminal.chain.selectedPaymentProfile
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.settlement.SettlementChainClient
@@ -50,11 +52,29 @@ class InvoiceRepository(
         lifecycleGate,
     )
 
-    suspend fun createInvoice(displayAmount: String, token: PaymentToken): Invoice =
+    /** Serializes cashier profile changes with invoice publication and settlement mutations. */
+    suspend fun selectPaymentProfile(profileId: String): TerminalConfigSnapshot =
+        withContext(Dispatchers.IO) {
+            selectPaymentProfileExclusively(
+                lifecycleGate = lifecycleGate,
+                profileId = profileId,
+                selectProfile = chainConfig::selectProfile,
+                snapshot = chainConfig::snapshot,
+            )
+        }
+
+    suspend fun createInvoice(displayAmount: String, profileId: String): Invoice =
         withContext(Dispatchers.IO) {
             lifecycleGate.withExclusiveMutation {
             val settings = chainConfig.snapshot()
             require(settings.provisioned) { "Provision this terminal from the merchant portal first" }
+            val selectedProfile = requireNotNull(settings.selectedPaymentProfile()) {
+                "Select a configured payment profile"
+            }
+            require(selectedProfile.id == profileId) {
+                "Selected payment profile changed; review the currency and try again"
+            }
+            val token = selectedProfile.token
             val profile = KnownChainPolicy.requireProfile(settings.chainId)
             profile.requireValidCreate2Fixture()
             require(settings.factoryAddress.equals(profile.factory.value, true)) { "Factory pin mismatch" }
@@ -64,13 +84,6 @@ class InvoiceRepository(
                     true,
                 ),
             ) { "Receiver implementation pin mismatch" }
-            val configuredToken = settings.paymentTokens.single()
-            require(configuredToken.address.equals(token.address, true)) {
-                "Selected token does not match the provisioned terminal token"
-            }
-            require(configuredToken.symbol == token.symbol && configuredToken.decimals == token.decimals) {
-                "Selected token metadata does not match the provisioned configuration"
-            }
             val network = settings.toNetworkConfig()
             val tokenAddress = EvmAddress.parse(token.address)
             val amount = TokenAmount.parse(displayAmount, token.decimals)
@@ -131,23 +144,11 @@ class InvoiceRepository(
             )
 
             val createdAt = System.currentTimeMillis() / 1_000
-            val invoice = Invoice(
-                invoiceId = protocolInvoice.invoiceId.hex,
-                receiver = receiver.value,
-                token = tokenAddress.value,
-                tokenSymbol = token.symbol,
-                tokenDecimals = token.decimals,
-                expectedAmount = amount.rawUnits.toString(),
-                status = InvoiceStatus.WAITING,
+            val invoice = buildPublishedInvoiceSnapshot(
+                protocolInvoice = protocolInvoice,
+                selectedProfile = selectedProfile,
+                operatorAddress = operatorIdentifier,
                 createdAt = createdAt,
-                chainId = settings.chainId,
-                networkName = settings.networkName,
-                rpcUrl = settings.rpcUrl,
-                factoryAddress = network.factory.value,
-                receiverImplementationAddress = network.receiverImplementation.value,
-                vaultAddress = network.vault.value,
-                confirmationBlocks = settings.confirmationBlocks,
-                erc681Uri = protocolInvoice.erc681Uri
             )
             // Persist the complete request before the UI is allowed to display its QR.
             invoiceDao.insert(invoice)
@@ -330,8 +331,67 @@ class InvoiceRepository(
         private const val RECOVERY_TIMEOUT_MILLIS = 15_000L
         private const val RECOVERY_RPC_CONNECT_TIMEOUT_MILLIS = 2_500
         private const val RECOVERY_RPC_READ_TIMEOUT_MILLIS = 4_000
-        val MINIMUM_GAS_RESERVE_WEI: BigInteger = BigInteger("100000000000000")
     }
+}
+
+/**
+ * Detaches every payment-routing value needed by monitoring, settlement, and audit from the
+ * mutable profile catalog before the QR is published. The returned entity is safe to persist even
+ * if a cashier selects another profile immediately afterwards.
+ */
+internal fun buildPublishedInvoiceSnapshot(
+    protocolInvoice: PaymentInvoice,
+    selectedProfile: TerminalPaymentProfile,
+    operatorAddress: EvmAddress,
+    createdAt: Long,
+): Invoice {
+    val request = protocolInvoice.request
+    val token = selectedProfile.token
+    require(request.chainId == selectedProfile.chainId) {
+        "Invoice chain does not match the selected payment profile"
+    }
+    require(protocolInvoice.vault.value.equals(selectedProfile.vaultAddress, true)) {
+        "Invoice vault does not match the selected payment profile"
+    }
+    require(request.token.value.equals(token.address, true)) {
+        "Invoice token does not match the selected payment profile"
+    }
+    require(request.amount.decimals == token.decimals) {
+        "Invoice amount decimals do not match the selected payment profile"
+    }
+    require(!operatorAddress.isZero) { "Invoice operator address must not be zero" }
+
+    return Invoice(
+        invoiceId = protocolInvoice.invoiceId.hex,
+        receiver = request.receiver.value,
+        operatorAddress = operatorAddress.value,
+        token = request.token.value,
+        tokenSymbol = token.symbol,
+        tokenDecimals = token.decimals,
+        expectedAmount = request.amount.rawUnits.toString(),
+        status = InvoiceStatus.WAITING,
+        createdAt = createdAt,
+        chainId = selectedProfile.chainId,
+        networkName = selectedProfile.networkName,
+        rpcUrl = selectedProfile.rpcUrl,
+        factoryAddress = EvmAddress.parse(selectedProfile.factoryAddress).value,
+        receiverImplementationAddress = EvmAddress.parse(
+            selectedProfile.receiverImplementationAddress,
+        ).value,
+        vaultAddress = EvmAddress.parse(selectedProfile.vaultAddress).value,
+        confirmationBlocks = selectedProfile.confirmationBlocks,
+        erc681Uri = protocolInvoice.erc681Uri,
+    )
+}
+
+internal suspend fun selectPaymentProfileExclusively(
+    lifecycleGate: TerminalLifecycleGate,
+    profileId: String,
+    selectProfile: (String) -> Boolean,
+    snapshot: () -> TerminalConfigSnapshot,
+): TerminalConfigSnapshot = lifecycleGate.withExclusiveMutation {
+    check(selectProfile(profileId)) { "Unable to save the selected payment profile" }
+    snapshot()
 }
 
 internal suspend fun recoverOpenInvoiceBatch(
@@ -381,8 +441,10 @@ internal fun requireTerminalReadiness(
     check(readiness.authorized) {
         "Authorize this terminal operator on the provisioned vault before creating a payment QR"
     }
-    check(readiness.nativeBalance >= InvoiceRepository.MINIMUM_GAS_RESERVE_WEI) {
-        "Fund the terminal operator with at least 0.0001 native currency before creating a payment QR"
+    val networkPolicy = KnownChainPolicy.requireProfile(settings.chainId)
+    check(readiness.nativeBalance >= networkPolicy.minimumOperatorNativeReserve) {
+        "Fund the terminal operator with at least ${networkPolicy.minimumOperatorNativeReserve} " +
+            "wei (${networkPolicy.nativeCurrencySymbol}) before creating a payment QR"
     }
 }
 

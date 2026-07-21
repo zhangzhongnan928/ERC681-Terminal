@@ -20,7 +20,7 @@ The terminal first shows its public EOA to the portal:
 opk-terminal:operator?v=1&address=<operator>
 ```
 
-After the merchant confirms `grantOperator`, the portal returns one configuration bound to that
+After the merchant confirms `grantOperator`, the portal returns one payment profile bound to that
 same terminal:
 
 ```text
@@ -31,17 +31,28 @@ opk-terminal:provision?v=1&chainId=<chainId>&vault=<vault>&token=<token>&operato
 provisioning `operator` must equal the terminal's local EOA. The shared accepted and rejected vectors
 are in `conformance/opk-terminal-provisioning-v1.json`.
 
+Each successful scan atomically adds or updates the profile identified by `(chainId, vault, token)`
+and selects it; it does not delete other configured profiles. The merchant can therefore scan the
+portal setup QR for each desired vault/token combination. A sale selects exactly one stored profile,
+and an invoice never requests multiple tokens. Re-scanning the same identity refreshes its
+chain-derived metadata without creating a duplicate.
+
 ## Supported deployment
 
-Automatic provisioning v1 supports Base Sepolia (`84532`) only. The app owns an immutable profile
-containing the default RPC endpoint, network name, protocol version, factory, receiver
-implementation, CREATE2 vector, and gas-reserve policy. Persisted settings are never a source of
-deployment pins. Unknown chains are rejected before contacting an RPC endpoint.
+The native apps enable only Base Sepolia (`84532`) in this release. They own an immutable per-chain
+profile containing the default RPC endpoint, network name, protocol version, factory, receiver
+implementation, vault runtime hash, CREATE2 vector, testnet flag, native-currency metadata,
+minimum/default confirmation policy, and gas-reserve policy. Persisted settings are never a source
+of those trust anchors or minimums. Base Mainnet (`8453`) and all other chains are rejected before
+contacting an RPC endpoint. Mainnet remains disabled pending a frozen or multisig-governed,
+implementation-pinned deployment. The checked-in enabled cross-platform constants are in
+`conformance/opk-terminal-networks-v1.json`; the reusable SDK payment-profile catalogs remain
+EVM-generic.
 
 The terminal reads the scanned vault's factory, the pinned factory's implementation, token
-whitelist membership, decimals, and symbol. It performs the complete existing configuration and
-CREATE2 validation before atomically replacing current settings. A failed or cancelled attempt
-does not alter settings. A retained operational RPC override is checked only for the expected chain
+whitelist membership, decimals, and symbol. It performs the complete configuration and CREATE2
+validation before atomically upserting and selecting that payment profile. A failed or cancelled
+attempt does not alter the catalog or its current selection. A retained operational RPC override is checked only for the expected chain
 ID; vault runtime, factory/implementation, whitelist, token metadata, and full provenance validation
 come exclusively from the immutable shipped RPC endpoint. The override is persisted only after both
 checks pass. Historical invoices and settlements retain their stored configuration
@@ -58,12 +69,20 @@ The setup state advances as follows:
 Create device EOA -> set local admin PIN -> authorize EOA in portal -> scan portal QR -> fund EOA -> ready
 ```
 
-Before every new invoice, the terminal fails closed unless all of these are freshly satisfied:
+Before every new invoice, the terminal fails closed unless all of these are freshly satisfied for
+the selected payment profile:
 
 - the device-local EOA is available;
-- the saved configuration validates;
-- the EOA is the configured vault owner or an authorized operator; and
-- its native balance is at least `100000000000000` wei (`0.0001 ETH`).
+- the saved profile and its known-network deployment pins validate;
+- the EOA is that profile's vault owner or an authorized operator; and
+- its native balance on that profile's chain meets the compiled network reserve
+  (`100000000000000` wei, or `0.0001 ETH`, on Base Sepolia); and
+- the profile's confirmation depth meets that network's compiled minimum.
+
+The same device EOA can be authorized by multiple vaults and has the same address on every EVM
+chain. Authorization is still vault-specific, and gas funding is chain-specific. An unready profile
+does not erase or invalidate another profile: the cashier can switch currencies, and the terminal
+then performs a fresh readiness check for the newly selected route before enabling checkout.
 
 An unready terminal blocks only new invoice and payment-QR creation. Settings, funding guidance,
 history, existing invoice monitoring, and settlement recovery remain available.

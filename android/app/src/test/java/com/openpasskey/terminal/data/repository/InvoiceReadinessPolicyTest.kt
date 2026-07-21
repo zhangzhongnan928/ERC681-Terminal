@@ -4,6 +4,7 @@ import com.openpasskey.terminal.chain.PaymentToken
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
 import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
+import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.math.BigInteger
@@ -28,7 +29,10 @@ class InvoiceReadinessPolicyTest {
             requireTerminalReadiness(
                 config(),
                 wallet(),
-                ready().copy(nativeBalance = InvoiceRepository.MINIMUM_GAS_RESERVE_WEI - BigInteger.ONE),
+                ready().copy(
+                    nativeBalance = KnownChainPolicy.requireProfile(84532)
+                        .minimumOperatorNativeReserve - BigInteger.ONE,
+                ),
             )
         }
     }
@@ -69,7 +73,7 @@ class InvoiceReadinessPolicyTest {
 
     private fun ready() = InvoiceReadiness(
         authorized = true,
-        nativeBalance = InvoiceRepository.MINIMUM_GAS_RESERVE_WEI,
+        nativeBalance = KnownChainPolicy.requireProfile(84532).minimumOperatorNativeReserve,
     )
 
     private fun config() = TerminalConfigSnapshot(

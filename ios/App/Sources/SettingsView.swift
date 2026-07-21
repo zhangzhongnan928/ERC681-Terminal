@@ -18,8 +18,10 @@ struct SettingsView: View {
     @State private var unlockPIN = ""
     @State private var manualVault = ""
     @State private var manualToken = ""
+    @State private var manualChainID = TerminalKnownChainProfile.baseSepolia.chainID
     @State private var isPresentingProvisioningScanner = false
     @State private var isConfirmingWalletReset = false
+    @State private var profilePendingRemoval: AppPaymentProfile?
     @FocusState private var focusedField: SettingsFocusField?
 
     var body: some View {
@@ -52,11 +54,32 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Reset permanently deletes this device key and is available only before the terminal has issued its first payment QR. Withdraw all gas first: both latest and pending ETH balances must be exactly zero, and a later deposit to the published address would be unrecoverable. Once any payment QR is published, revoke or reprovision without deleting this key.")
+            Text("Reset permanently deletes this device key and is available only before the terminal has issued its first payment QR. Withdraw all gas first: both latest and pending native-currency balances must be exactly zero on every network supported by this app build, including networks whose local profile was removed. A later deposit to the published address would be unrecoverable. Once any payment QR is published, revoke or reprovision without deleting this key.")
+        }
+        .confirmationDialog(
+            "Remove payment profile?",
+            isPresented: removalConfirmationBinding,
+            titleVisibility: .visible
+        ) {
+            if let profile = profilePendingRemoval {
+                Button("Remove \(profile.displayName)", role: .destructive) {
+                    profilePendingRemoval = nil
+                    Task { await model.removePaymentProfile(id: profile.id) }
+                }
+            }
+            Button("Cancel", role: .cancel) { profilePendingRemoval = nil }
+        } message: {
+            if let profile = profilePendingRemoval {
+                Text("This removes \(profile.displayName) for \(profile.detail) from this terminal only. Historical invoices and settlements remain available, and on-chain operator authorization is not revoked.")
+            }
         }
         .onAppear {
             if manualVault.isEmpty { manualVault = model.settings.vault }
             if manualToken.isEmpty { manualToken = model.settings.tokenAddress }
+            if let selectedChainID = UInt64(model.settings.chainID),
+               TerminalKnownChainProfile.profile(for: selectedChainID) != nil {
+                manualChainID = selectedChainID
+            }
         }
         .onDisappear { focusedField = nil }
     }
@@ -98,7 +121,7 @@ struct SettingsView: View {
         }
 
         Section("3. Import portal setup") {
-            Text("The QR contains only the known chain, vault, token, and this terminal's public operator. RPC and deployment trust anchors never come from the QR.")
+            Text("Each QR adds or updates one chain, vault, and token profile for this terminal's public operator. Existing payment profiles are preserved. RPC and deployment trust anchors never come from the QR.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             Button {
@@ -106,7 +129,7 @@ struct SettingsView: View {
                 isPresentingProvisioningScanner = true
             } label: {
                 Label(
-                    model.settings.isProvisioned ? "Scan replacement provisioning QR" : "Scan provisioning QR",
+                    model.settings.isProvisioned ? "Add or update payment profile" : "Scan first payment profile",
                     systemImage: "qrcode.viewfinder"
                 )
             }
@@ -132,7 +155,56 @@ struct SettingsView: View {
         }
 
         if model.settings.isProvisioned {
-            Section("Derived configuration") {
+            Section("Payment profiles (\(model.settings.paymentProfiles.count))") {
+                ForEach(model.settings.paymentProfiles) { profile in
+                    HStack(spacing: 12) {
+                        Button {
+                            Task { await model.selectPaymentProfile(id: profile.id) }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(profile.displayName)
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
+                                Text(profile.detail)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(
+                            profile.id == model.settings.selectedPaymentProfileID
+                                || model.operationBusy
+                                || model.isRefreshingReadiness
+                        )
+                        .accessibilityLabel(
+                            "\(profile.displayName), \(profile.detail)"
+                                + (profile.id == model.settings.selectedPaymentProfileID
+                                    ? ", selected" : ", select profile")
+                        )
+
+                        Spacer()
+                        if profile.id == model.settings.selectedPaymentProfileID {
+                            Label("Selected", systemImage: "checkmark.circle.fill")
+                                .labelStyle(.iconOnly)
+                                .foregroundStyle(.green)
+                        }
+                        Button(role: .destructive) {
+                            profilePendingRemoval = profile
+                        } label: {
+                            Label("Remove \(profile.displayName)", systemImage: "trash")
+                                .labelStyle(.iconOnly)
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(model.operationBusy || model.isRefreshingReadiness)
+                    }
+                }
+            }
+
+            Section("Selected profile") {
+                LabeledContent(
+                    "Network",
+                    value: model.settings.displayedPaymentProfile.networkName
+                )
                 LabeledContent("Chain", value: model.settings.chainID)
                 LabeledContent("Vault", value: abbreviatedSetup(model.settings.vault))
                 LabeledContent("Factory", value: abbreviatedSetup(model.settings.factory))
@@ -148,12 +220,18 @@ struct SettingsView: View {
         }
 
         Section("4. Readiness") {
+            if model.settings.isProvisioned {
+                LabeledContent(
+                    "Selected route",
+                    value: model.settings.displayedPaymentProfile.displayName
+                )
+            }
             ReadinessLabel(readiness: model.terminalReadiness)
             ValidationStatusLabel(message: model.validationMessage)
             if let status = model.operatorStatus {
                 LabeledContent(
                     "Operator balance",
-                    value: "\(TokenAmount(rawValue: status.balance, decimals: 18).displayString()) ETH"
+                    value: "\(TokenAmount(rawValue: status.balance, decimals: selectedNativeCurrencyDecimals).displayString()) \(selectedNativeCurrencySymbol)"
                 )
                 LabeledContent(
                     "Vault access",
@@ -176,9 +254,19 @@ struct SettingsView: View {
         if let operatorAddress = model.operatorAddress, model.adminPINConfigured {
             Section {
                 DisclosureGroup("Advanced manual setup") {
-                    Text("Enter or scan only the vault and token. Factory, implementation, decimals, and symbol are still derived and pinned on chain.")
+                    Text("Choose a trusted EVM network, then enter or scan only the vault and token. Factory, implementation, decimals, and symbol are derived and pinned on chain. A successful import adds or updates one payment profile.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    Picker("Network", selection: $manualChainID) {
+                        ForEach(TerminalKnownChainProfile.all, id: \.chainID) { profile in
+                            Text(profile.networkName).tag(profile.chainID)
+                        }
+                    }
+                    .onChange(of: manualChainID) {
+                        manualVault = ""
+                        manualToken = ""
+                        focusedField = .vault
+                    }
                     AddressField(
                         "Vault",
                         text: $manualVault,
@@ -197,7 +285,7 @@ struct SettingsView: View {
                         focusedField = nil
                         do {
                             let payload = try TerminalProvisioningPayload(
-                                chainID: TerminalKnownChainProfile.baseSepolia.chainID,
+                                chainID: manualChainID,
                                 vault: EthereumAddress(hex: manualVault, allowZero: false),
                                 token: EthereumAddress(hex: manualToken, allowZero: false),
                                 operatorAddress: operatorAddress
@@ -212,7 +300,7 @@ struct SettingsView: View {
             }
 
             Section("Operator reset") {
-                Text("Destructive key reset is allowed only before the first payment QR is issued and only while both latest and pending operator ETH balances are zero. Withdraw gas first. Anyone can still send to the old public address later, and those late funds would be unrecoverable after deletion. After the first payment QR, retain this key and use merchant-portal revocation or terminal reprovisioning.")
+                Text("Destructive key reset is allowed only before the first payment QR is issued and only while both latest and pending operator native-currency balances are zero on every network supported by this app build, including networks whose local profile was removed. Withdraw gas first. Anyone can still send to the old public address later, and those late funds would be unrecoverable after deletion. After the first payment QR, retain this key and use merchant-portal revocation or terminal reprovisioning.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Button("Reset operator wallet…", role: .destructive) {
@@ -270,7 +358,7 @@ struct SettingsView: View {
                                 accessibilityLabel: "Operator gas funding QR code",
                                 failureDescription: "Copy the operator address instead."
                             )
-                            Text("Send Base Sepolia ETH for settlement gas only.")
+                            Text("Send \(selectedNetworkName) \(selectedNativeCurrencySymbol) for settlement gas only.")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
@@ -323,12 +411,21 @@ struct SettingsView: View {
         }
 
         Section("Terminal readiness") {
+            if model.settings.isProvisioned {
+                LabeledContent(
+                    "Selected route",
+                    value: model.settings.displayedPaymentProfile.displayName
+                )
+            }
             ReadinessLabel(readiness: model.terminalReadiness)
             ValidationStatusLabel(message: model.validationMessage)
             if let status = model.operatorStatus {
                 LabeledContent(
-                    "ETH balance",
-                    value: TokenAmount(rawValue: status.balance, decimals: 18).displayString()
+                    "\(selectedNativeCurrencySymbol) balance",
+                    value: TokenAmount(
+                        rawValue: status.balance,
+                        decimals: selectedNativeCurrencyDecimals
+                    ).displayString()
                 )
                 LabeledContent(
                     "Vault authorization",
@@ -355,7 +452,7 @@ struct SettingsView: View {
                     failureDescription: "Copy the operator address above instead."
                 )
                 .frame(maxWidth: .infinity)
-                Text("Send Base Sepolia ETH for settlement gas only. This QR is shown only for the operator and chain bound by saved provisioning.")
+                Text("Send \(selectedNetworkName) \(selectedNativeCurrencySymbol) for settlement gas only. This QR is shown only for the operator and chain bound by the selected payment profile.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -383,6 +480,25 @@ struct SettingsView: View {
         Binding(
             get: { source.wrappedValue },
             set: { source.wrappedValue = String($0.filter(\.isNumber).prefix(6)) }
+        )
+    }
+
+    private var selectedNetworkName: String {
+        model.settings.displayedPaymentProfile.networkName
+    }
+
+    private var selectedNativeCurrencySymbol: String {
+        model.settings.displayedPaymentProfile.nativeCurrencySymbol
+    }
+
+    private var selectedNativeCurrencyDecimals: UInt8 {
+        model.settings.displayedPaymentProfile.nativeCurrencyDecimals
+    }
+
+    private var removalConfirmationBinding: Binding<Bool> {
+        Binding(
+            get: { profilePendingRemoval != nil },
+            set: { if !$0 { profilePendingRemoval = nil } }
         )
     }
 }

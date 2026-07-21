@@ -9,6 +9,7 @@ import com.openpasskey.erc681.NetworkConfig
 import com.openpasskey.erc681.ReadOnlyRpcClient
 import com.openpasskey.terminal.data.db.InvoiceDatabase
 import com.openpasskey.terminal.chain.ChainConfig
+import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import com.openpasskey.terminal.data.model.Invoice
@@ -28,6 +29,7 @@ import com.openpasskey.terminal.settlement.SweepProofClassification
 import com.openpasskey.terminal.settlement.VerifiedSweep
 import com.openpasskey.terminal.settlement.Web3jSettlementChainClient
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
+import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
 import com.openpasskey.terminal.wallet.OperatorWalletStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
@@ -271,6 +273,7 @@ class SettlementRepository(
         }
         val operator = EvmAddress.parse(requireNotNull(wallet.address)).value
         requireCurrentOperatorBinding(operator)
+        requireInvoiceOperatorSnapshots(invoices, operator)
         val intents = invoices.map {
             SettlementInvoiceIntent(it.invoiceId, it.receiver, BigInteger(it.expectedAmount))
         }
@@ -797,16 +800,11 @@ class SettlementRepository(
         chainId > 0 && rpcUrl.isNotBlank() && vaultAddress.isNotBlank() && token.isNotBlank()
 
     private fun requireCurrentOperatorBinding(operatorAddress: String) {
-        val config = chainConfig.snapshot()
-        val wallet = walletStore.snapshot()
-        check(config.provisioned) { "Terminal is not provisioned for settlement" }
-        check(config.provisionedOperatorAddress?.equals(operatorAddress, true) == true) {
-            "Provisioned operator does not match the settlement operator"
-        }
-        check(
-            wallet.availability == OperatorWalletAvailability.READY &&
-                wallet.address?.equals(operatorAddress, true) == true,
-        ) { "Local settlement wallet does not match the provisioned operator" }
+        requireSettlementOperatorBinding(
+            config = chainConfig.snapshot(),
+            wallet = walletStore.snapshot(),
+            operatorAddress = operatorAddress,
+        )
     }
 
     private suspend fun previouslyProvenSwept(invoice: Invoice): BigInteger =
@@ -855,6 +853,47 @@ class SettlementRepository(
         private const val CONFIRMATION_POLL_ATTEMPTS = 20
         private const val HISTORICAL_RPC_CONNECT_TIMEOUT_MILLIS = 2_500
         private const val HISTORICAL_RPC_READ_TIMEOUT_MILLIS = 4_000
+    }
+}
+
+/**
+ * Historical invoice snapshots and fresh on-chain authorization are the settlement authority.
+ * Removing the final future-checkout profile must not strand already confirmed receiver funds.
+ */
+internal fun requireSettlementOperatorBinding(
+    config: TerminalConfigSnapshot,
+    wallet: OperatorWalletSnapshot,
+    operatorAddress: String,
+) {
+    if (config.provisioned) {
+        check(config.provisionedOperatorAddress?.equals(operatorAddress, true) == true) {
+            "Provisioned operator does not match the settlement operator"
+        }
+    }
+    check(
+        wallet.availability == OperatorWalletAvailability.READY &&
+            wallet.address?.equals(operatorAddress, true) == true,
+    ) { "Local settlement wallet does not match the settlement operator" }
+}
+
+/**
+ * New invoices retain the terminal EOA that derived their invoice ID. A blank value is accepted
+ * only for pre-v6 Room rows, which still pass the existing local-wallet and fresh on-chain
+ * authorization checks. Every available snapshot must identify the same current device EOA.
+ */
+internal fun requireInvoiceOperatorSnapshots(
+    invoices: List<Invoice>,
+    currentOperatorAddress: String,
+) {
+    val current = EvmAddress.parse(currentOperatorAddress).value
+    val snapshotted = invoices.mapNotNull { invoice ->
+        invoice.operatorAddress.takeIf(String::isNotBlank)?.let { EvmAddress.parse(it).value }
+    }
+    require(snapshotted.distinct().size <= 1) {
+        "Batch invoices do not share the same operator snapshot"
+    }
+    require(snapshotted.all { it.equals(current, true) }) {
+        "Invoice operator snapshot does not match the local settlement wallet"
     }
 }
 

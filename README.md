@@ -4,6 +4,10 @@ ERC-20 payment terminal apps and reusable SDKs for Android and iOS. The apps dis
 ERC-681 payment QR codes, can scan QR codes to import configuration addresses, and can settle
 confirmed payments through a tightly constrained device-local operator wallet.
 
+A terminal can keep multiple payment profiles. Each profile binds one known EVM network, merchant
+vault, and ERC-20 token. The cashier chooses exactly one profile for a sale—for example AUDM on one
+vault, AUDD on another, or USDC on a third—and the resulting invoice requests only that token.
+
 The terminal creates a unique invoice, derives its receiver locally with CREATE2, presents a
 canonical ERC-681 QR code, and observes the receiver's ERC-20 balance through read-only JSON-RPC.
 After confirmation, the native app may sign exactly one allowed contract method:
@@ -23,14 +27,17 @@ vault; the terminal never chooses a payout destination.
   is the terminal identity used as the `terminalIdentifier` namespace for every new invoice, so an
   operator wallet must exist before the app can present a new payment QR.
 - Historical invoice records retain their invoice ID, configuration snapshot, and derived receiver
-  unchanged; iOS also retains the per-invoice namespace used in that derivation. The app does not
-  reuse a legacy random identifier for new invoices or reinterpret one as a wallet key.
-- Signing is restricted to the configured chain and vault, zero native value, whitelisted token,
+  unchanged. New invoices on both platforms also retain the device EOA used as their namespace;
+  Android rows migrated from the earlier schema keep an empty legacy operator snapshot and remain
+  subject to the current-wallet and fresh on-chain authorization checks. The app does not reuse a
+  legacy random identifier for new invoices or reinterpret one as a wallet key.
+- Signing is restricted to the invoice profile's chain and vault, zero native value, whitelisted token,
   confirmed locally persisted invoices, and the `sweepSessions` selector. There is no arbitrary
   transaction, transfer, approval, payout, refund, deployment, private-key export, or seed import.
 - Vault authorization and native-token gas funding are also new-invoice readiness checks. The apps
-  freshly validate configuration, owner/operator authorization, and a `0.0001 ETH` native balance
-  before creating each customer invoice. Failure blocks only new invoice/QR creation; history,
+  freshly validate configuration, owner/operator authorization, and the selected network profile's
+  minimum native-gas reserve (`0.0001 ETH` on Base Sepolia) before creating each customer invoice.
+  Failure blocks only new invoice/QR creation; history,
   existing payment monitoring, settlement recovery, and setup remain available. Customer ERC-20
   payments still go only to one-time receiver addresses.
 - Settings shows the full operator address with Copy and an address-only, chain-qualified funding
@@ -51,8 +58,9 @@ Native-asset `?value=` requests and non-transfer calls fail closed.
 
 ## Payment flow
 
-1. Require the device operator wallet and freshly validate the configured chain, contracts, vault,
-   token whitelist, token metadata, operator authorization, and native gas reserve.
+1. Select one configured payment profile, then require the device operator wallet and freshly
+   validate that profile's chain, contracts, vault, token whitelist, token metadata, operator
+   authorization, and native gas reserve.
 2. Use the operator public address as the invoice's terminal namespace,
    generate an invoice ID, and derive the counterfactual receiver locally.
 3. Refuse receiver reuse if code or an existing token balance is detected.
@@ -85,13 +93,20 @@ scripts/       Boundary and reproducible verification checks
 MOBILE_SDK.md  Integration and deployment guide
 ```
 
-## Default network
+## Known EVM networks
 
-The sample apps default to the currently deployed Base Sepolia stack on chain `84532`. No Base
-mainnet configuration is shipped. Production or mainnet use must wait for independently verified
-deployment constants and a matching CREATE2 vector. The current sample also lacks cross-operator
-`Swept`-log discovery and same-nonce fee replacement/cancellation; see the recovery limits in
-[MOBILE_SDK.md](./MOBILE_SDK.md) before operating the settlement wallet.
+Base Sepolia (`84532`) is the only network enabled in the production apps in this release. A
+provisioning QR chooses an enabled chain but cannot supply or override its RPC trust root, factory,
+receiver implementation, vault runtime hash, protocol version, CREATE2 vector, finality floor,
+native-currency metadata, or minimum operator gas reserve. The shared pins are recorded in
+`conformance/opk-terminal-networks-v1.json`. The Swift and Kotlin payment-profile
+catalogs remain EVM-generic. Base Mainnet (`8453`) and any additional network remain app-disabled
+until a frozen or multisig-governed, implementation-pinned OPK deployment and its CREATE2 vector
+are reviewed and shipped; arbitrary QR-provided network infrastructure remains unsupported.
+
+The current implementation still lacks cross-operator `Swept`-log discovery and same-nonce fee
+replacement/cancellation; see the recovery limits in [MOBILE_SDK.md](./MOBILE_SDK.md) before
+operating the settlement wallet.
 
 ## Verify
 

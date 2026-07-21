@@ -1,6 +1,6 @@
 # OPK ERC-681 mobile terminal and SDK
 
-This mobile build accepts one payment rail: an ERC-20 `transfer` requested by an ERC-681 QR code. The Android and iOS apps create invoices, render the payment QR, and observe token balances. Their cameras can import individual contract and token addresses in Settings or scan the separate strict `opk-terminal:provision` setup payload; payment QR payloads are rejected and never imported or acted on. The reusable payment SDKs remain keyless and read-only. Each native app also has an isolated, device-local operator module that can submit only a constrained `ClearingVault.sweepSessions` transaction after payment confirmation.
+This mobile build accepts one payment rail: an ERC-20 `transfer` requested by an ERC-681 QR code. A terminal may store multiple EVM payment profiles, where each profile binds one known network, vault, and token; a cashier selects exactly one profile per invoice. The Android and iOS apps create invoices, render the payment QR, and observe token balances. Their cameras can import individual contract and token addresses in Settings or scan the separate strict `opk-terminal:provision` setup payload; payment QR payloads are rejected and never imported or acted on. The reusable payment SDKs remain keyless and read-only. Each native app also has an isolated, device-local operator module that can submit only a constrained `ClearingVault.sweepSessions` transaction after payment confirmation.
 
 ## Safety boundary
 
@@ -16,7 +16,7 @@ The payment SDK source is intentionally limited to:
 
 There is no NFC, contactless-card path, customer payment-QR import or action, unlocked-node signing, arbitrary transaction API, seed import, or private-key export. Camera access belongs only to the native app Settings UI. Address scan buttons fill only their selected address field, while the separate setup button accepts only the exact provisioning grammar; the reusable SDKs remain camera-free. The payment SDKs cannot call `sweepSessions`, payout, refund, deploy, approve, or transfer. Do not add a private key to an app configuration or RPC URL.
 
-The native operator implementation is a separate trust boundary. It generates one secp256k1 key on the device and restricts signing to the configured chain and vault, native value zero, the `sweepSessions(bytes32[],uint256[],address)` selector, a whitelisted token, and locally persisted paid or overpaid invoices or confirmed late value at a previously swept receiver. It cannot select a recipient or call payout, refund, rescue, approval, transfer, or deployment methods. The shipped apps require this wallet to exist before creating a payment request and use its public address as the terminal identity for every new invoice. The merchant separately authorizes that address with `grantOperator`, provisions the terminal, and pre-funds it with the network's native token before the terminal accepts a new invoice; the same checks run again before settlement.
+The native operator implementation is a separate trust boundary. It generates one secp256k1 key on the device and restricts signing to an invoice snapshot's known chain and vault, native value zero, the `sweepSessions(bytes32[],uint256[],address)` selector, that profile's whitelisted token, and locally persisted paid or overpaid invoices or confirmed late value at a previously swept receiver. It cannot select a recipient or call payout, refund, rescue, approval, transfer, or deployment methods. The shipped apps require this wallet to exist before creating a payment request and use its public address as the terminal identity for every new invoice. The merchant separately authorizes that same address on each configured vault and pre-funds it with each used network's native token before the corresponding profile accepts a new invoice; the same checks run again before settlement.
 
 On Android, the secp256k1 scalar is encrypted with an AES-GCM wrapping key held by Android
 Keystore; only the device-bound ciphertext and IV are stored in private app preferences, and all
@@ -38,7 +38,7 @@ still pass the same local and on-chain validation as manually entered settings b
 QR can be created. Denying camera access, cancelling, or using a camera-less device leaves manual
 entry available. The additive setup scanner has a different exact grammar and derives factory,
 receiver implementation, token decimals, and token symbol from read-only chain calls. It accepts
-only immutable, app-pinned deployment profiles and atomically persists the complete configuration
+only immutable, app-pinned deployment profiles and atomically upserts the complete payment profile
 after every pin, CREATE2, whitelist, metadata, and existing full-validation check succeeds. See
 [PROVISIONING.md](./PROVISIONING.md) for the pairing payloads and recovery model.
 
@@ -89,12 +89,12 @@ The reusable SDKs never sweep the receiver. A native app may pass their data-onl
 invoice namespace. The reusable SDK does not require that namespace to have a private key. The
 shipped Android and iOS apps apply the stricter application policy described above: they always
 pass the device operator EOA public address for new invoices and fail invoice creation unless that
-wallet exists, is authorized by the configured vault, and has at least `100000000000000` wei of
+wallet exists, is authorized by the selected profile's vault, and has at least `100000000000000` wei of
 native gas balance. These checks run again when preparing a settlement.
 
-## Default network
+## Known EVM networks
 
-The bundled development configuration is Base Sepolia, chain ID `84532`:
+The default development network is Base Sepolia, chain ID `84532`:
 
 | Item | Value |
 |---|---|
@@ -103,20 +103,25 @@ The bundled development configuration is Base Sepolia, chain ID `84532`:
 | Test vault | `0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1` |
 | AUD test token | `0x7ffba642bc902880a737cb1c18a4e9540879e211` (18 decimals) |
 
-The live Base Sepolia contracts are the legacy 1.4.1-compatible deployment. The iOS app pins that configuration to protocol `1.4.1`; the Android app uses the same legacy addresses and does not claim a 1.5 deployment. The QR format and local receiver derivation are shared with 1.5, but 1.5-only settlement accounting must not be assumed on this deployment.
-
-No Base-mainnet or protocol 1.5 deployment configuration is shipped with this mobile repository.
-Do not enable mainnet until real deployment constants and a matching CREATE2 vector are published,
-the upgradeable vault implementation is pinned and independently checked, and all constants are
-accepted by the SDK validation path.
+Base Sepolia is the only network enabled in the production apps in this release. The Swift and
+Kotlin profile catalogs are EVM-generic and can model routes on other EVM chains, but an app rejects
+any chain absent from its immutable enabled-network registry before RPC use. Base Mainnet (`8453`)
+remains disabled pending a frozen or multisig-governed, implementation-pinned deployment. Enabling
+it or another network requires reviewed OPK deployment constants, vault runtime hash, trusted HTTPS
+RPC, matching CREATE2 vector, finality floor/default, native-currency metadata, and minimum gas
+reserve in both native registries. A QR cannot introduce these values.
+The enabled cross-platform pins and vectors are recorded in
+`conformance/opk-terminal-networks-v1.json`.
 
 ## Operator identity, authorization, and gas funding
 
 Creating the operator wallet establishes the terminal identity used for new invoices; it does not
-make the EOA a vault operator. The merchant must grant the displayed address with the vault's
-administrative `grantOperator` flow (the vault owner itself is also accepted), scan the portal's
-operator-bound provisioning QR, then transfer at least `0.0001 ETH` of native network currency to
-that address for gas. Until all checks pass, the app does not create a new invoice or customer QR.
+make the EOA a vault operator. For each payment profile, the merchant must grant the displayed
+address with that vault's administrative `grantOperator` flow (the vault owner itself is also
+accepted), then scan its operator-bound provisioning QR. Repeated scans add or update profiles; they
+do not erase unrelated profiles. Transfer at least `0.0001 ETH` on every selected network to that
+same EOA address for gas. Until the selected profile passes all checks, the app does not create its
+invoice or customer QR.
 The app shows the entire address, offers Copy, and displays this address-only funding QR:
 
 ```text
@@ -192,6 +197,18 @@ val network = NetworkConfig(
 val token = EvmAddress.parse("0x7ffba642bc902880a737cb1c18a4e9540879e211")
 val rpc = ReadOnlyRpcClient(network)
 val validated = rpc.validate(token, expectedDecimals = 18)
+val profile = PaymentProfile(
+    network = network,
+    token = PaymentTokenConfig(
+        address = token,
+        symbol = validated.tokenSymbol,
+        decimals = validated.tokenDecimals,
+    ),
+)
+
+// Upsert other independently validated EVM network/vault/token profiles the same way.
+val catalog = PaymentProfileCatalog(listOf(profile), profile.id)
+val selected = requireNotNull(catalog.selected)
 
 val operatorAddress = requireNotNull(loadDeviceOperatorAddress()) {
     "Create the device operator wallet before creating a payment request"
@@ -199,14 +216,13 @@ val operatorAddress = requireNotNull(loadDeviceOperatorAddress()) {
 val invoiceNamespace = EvmAddress.parse(operatorAddress)
 
 val invoice = PaymentInvoiceFactory.create(
-    network = network,
-    token = token,
-    amount = TokenAmount.parse("12.34", validated.tokenDecimals),
+    profile = selected,
+    amount = TokenAmount.parse("12.34", selected.token.decimals),
     terminalIdentifier = invoiceNamespace,
 )
 displayQr(invoice.erc681Uri)
 
-val observer = PaymentObserver(rpc)
+val observer = PaymentObserver(ReadOnlyRpcClient(selected.network))
 var observation = observer.observe(invoice.request, requiredConfirmations = 2)
 observation = observer.observe(
     invoice.request,
@@ -222,11 +238,13 @@ if (observation.status == PaymentStatus.PAID) {
 
 On installations upgraded from the QR-only release, existing invoice records keep their invoice
 ID, configuration snapshot, and derived receiver. iOS also keeps the per-invoice
-`terminalIdentifier`; Android does not need it to monitor or settle a persisted receiver. Do not
-rewrite or reinterpret those immutable records. The application no longer uses the old random
-value as a global fallback: every new invoice requires the operator wallet and supplies that EOA's
-public address as its `terminalIdentifier`, matching protocol 1.4.1. Historical receivers remain
-settleable by any currently authorized vault owner or operator.
+`terminalIdentifier`; Android rows migrated from the earlier database schema retain an empty
+legacy operator snapshot because that preimage cannot be recovered from the invoice ID. Do not
+rewrite or reinterpret those immutable records. Every new invoice on both platforms persists the
+operator EOA used as its `terminalIdentifier`, and settlement checks that snapshot against the
+current device wallet. Historical legacy rows remain subject to the current-wallet and fresh
+on-chain authorization checks, and their receivers remain settleable by any currently authorized
+vault owner or operator.
 
 ## Swift package and iOS app
 
@@ -267,21 +285,33 @@ let configuration = try TerminalConfiguration(
 
 let rpc = try JSONRPCEthereumClient(endpoint: endpoint)
 _ = try await ConfigurationValidator(rpc: rpc).validate(configuration)
+let profile = try TerminalPaymentProfile(configuration: configuration, token: token)
+
+// Upsert other independently validated EVM network/vault/token profiles the same way.
+let catalog = try TerminalPaymentProfileCatalog(
+    profiles: [profile],
+    selectedProfileID: profile.id
+)
+guard let selected = catalog.selected else {
+    throw TerminalPaymentProfileError.profileNotFound(profile.id)
+}
 
 let operatorAddress = try requireDeviceOperatorAddress()
 let invoiceNamespace = TerminalIdentifier(address: operatorAddress)
-let amount = try TokenAmount(display: "12.34", decimals: token.decimals)
+let amount = try TokenAmount(display: "12.34", decimals: selected.token.decimals)
 let request = try InvoiceFactory.create(
     terminalIdentifier: invoiceNamespace,
-    amount: amount.rawValue,
-    token: token,
-    configuration: configuration
+    amount: amount,
+    profile: selected
 )
 displayQR(request.erc681URI)
 
+let selectedRPC = try JSONRPCEthereumClient(
+    endpoint: selected.configuration.rpcEndpoints[0]
+)
 let monitor = PaymentMonitor(
-    rpc: rpc,
-    confirmationPolicy: configuration.confirmationPolicy
+    rpc: selectedRPC,
+    confirmationPolicy: selected.configuration.confirmationPolicy
 )
 for try await observation in monitor.observations(for: request) {
     persist(observation)
@@ -346,10 +376,11 @@ Only create or export a handoff after the terminal has a paid/overpaid observati
 1. Generate the operator wallet once on the device before accepting a new payment. Its public
    address becomes the terminal identity for every new invoice. The private scalar is not exported,
    backed up, synchronized, placed on the clipboard, or stored in ordinary app preferences.
-2. Scan the terminal's operator-pairing QR in the merchant portal, confirm
-   `grantOperator(address)`, then scan the portal's operator-bound provisioning QR back on the
-   terminal. The terminal derives and validates every deployment and token field before saving.
-3. Send at least `0.0001 ETH` of the correct network's native token to the operator address for gas
+2. Scan the terminal's operator-pairing QR in the merchant portal. For each desired currency,
+   confirm `grantOperator(address)` on its vault and scan that vault/token's operator-bound
+   provisioning QR back on the terminal. The terminal derives and validates every deployment and
+   token field before atomically adding or updating that profile.
+3. Send at least `0.0001 ETH` on each used network to the operator address for gas
    only. Do not send customer payment tokens to it. The Settings UI displays the exact address,
    chain, funding QR, balance, authorization state, and readiness result. Authorization and the
    minimum balance are required before each new invoice and checked again before a sweep.
@@ -366,7 +397,7 @@ invoice namespace.
   positive late value, with the same chain, vault, and token; batches are capped.
 - Encode `sweepSessions(bytes32[],uint256[],address)` locally using each invoice's original expected
   raw amount. Reject empty, duplicate, mixed, zero, or corrupted inputs.
-- Check the configured chain, contract links, token whitelist, operator authorization, confirmed
+- Check the historical invoice profile's chain, contract links, token whitelist, operator authorization, confirmed
   receiver balances, simulation, gas estimate, current pending nonce, and conservative maximum fee.
 - Before sweeping an invoice from an earlier provisioning, re-derive its receiver and re-prove its
   network label, known-chain factory/implementation pins, vault runtime/factory link, token
@@ -386,8 +417,10 @@ invoice namespace.
 
 ### Current recovery limits
 
-The sample apps are suitable for Base Sepolia testing, but they are not yet mainnet-ready. Their
-reconciliation intentionally trusts only canonical receipt logs for transactions the terminal
+Base Mainnet remains disabled until its deployment governance and implementation can be pinned as
+described above. Production readiness on any enabled network also requires the operational recovery
+and device testing below. Reconciliation intentionally trusts only canonical receipt logs for
+transactions the terminal
 persisted itself. If the vault owner or a different authorized operator sweeps one of the same
 receivers externally, the app does not yet discover that proof with `eth_getLogs`; reconcile that
 invoice manually instead of retrying it blindly.

@@ -1,6 +1,8 @@
 package com.openpasskey.terminal.lifecycle
 
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
+import com.openpasskey.terminal.chain.PaymentToken
+import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import com.openpasskey.terminal.settlement.OperatorResetGuard
 import com.openpasskey.terminal.settlement.SettlementChainClient
@@ -196,9 +198,9 @@ class TerminalLifecycleGateTest {
     }
 
     @Test
-    fun productionBalanceReaderIgnoresPersistedRpcOverride() = runBlocking {
+    fun productionBalanceReaderIgnoresPersistedRpcOverrideAndChecksRemovedProfileNetworks() = runBlocking {
         val profile = KnownChainPolicy.requireProfile(84532)
-        var openedUrl: String? = null
+        val openedUrls = mutableListOf<String>()
         val reader = RpcOperatorNativeBalanceReader(
             configSnapshot = {
                 TerminalConfigSnapshot(
@@ -216,14 +218,15 @@ class TerminalLifecycleGateTest {
                 )
             },
             clientFactory = { url ->
-                openedUrl = url
+                openedUrls += url
+                val openedProfile = KnownChainPolicy.enabledProfiles().first { it.rpcUrl == url }
                 @Suppress("UNCHECKED_CAST")
                 Proxy.newProxyInstance(
                     SettlementChainClient::class.java.classLoader,
                     arrayOf(SettlementChainClient::class.java),
                 ) { _, method, _ ->
                     when (method.name) {
-                        "chainId" -> profile.chainId
+                        "chainId" -> openedProfile.chainId
                         "latestNativeBalance", "nativeBalance" -> BigInteger.ZERO
                         "close" -> Unit
                         else -> error("Unexpected balance-reader RPC call: ${method.name}")
@@ -233,7 +236,70 @@ class TerminalLifecycleGateTest {
         )
 
         assertEquals(OperatorNativeBalances(BigInteger.ZERO, BigInteger.ZERO), reader.read(OPERATOR))
-        assertEquals(profile.rpcUrl, openedUrl)
+        assertEquals(
+            KnownChainPolicy.enabledProfiles().map { it.rpcUrl }.toSet(),
+            openedUrls.toSet(),
+        )
+        assertFalse(openedUrls.contains("https://merchant-controlled.example"))
+    }
+
+    @Test
+    fun productionBalanceReaderChecksEveryEnabledNetworkTrustRoot() = runBlocking {
+        val knownProfiles = KnownChainPolicy.enabledProfiles()
+        val profiles = knownProfiles.map { known ->
+            TerminalPaymentProfile(
+                networkName = known.networkName,
+                rpcUrl = "https://merchant-controlled.example",
+                chainId = known.chainId,
+                factoryAddress = known.factory.value,
+                receiverImplementationAddress = known.receiverImplementation.value,
+                vaultAddress = known.fixtureVault.value,
+                confirmationBlocks = 2,
+                token = PaymentToken("0x1111111111111111111111111111111111111111", "T", 18),
+                protocolVersion = known.protocolVersion,
+            )
+        }
+        val active = profiles.first()
+        val opened = mutableListOf<String>()
+        val reader = RpcOperatorNativeBalanceReader(
+            configSnapshot = {
+                TerminalConfigSnapshot(
+                    networkName = active.networkName,
+                    rpcUrl = active.rpcUrl,
+                    chainId = active.chainId,
+                    factoryAddress = active.factoryAddress,
+                    receiverImplementationAddress = active.receiverImplementationAddress,
+                    vaultAddress = active.vaultAddress,
+                    confirmationBlocks = active.confirmationBlocks,
+                    paymentTokens = listOf(active.token),
+                    protocolVersion = active.protocolVersion,
+                    provisionedOperatorAddress = OPERATOR,
+                    provisioned = true,
+                    paymentProfiles = profiles,
+                    selectedProfileId = active.id,
+                )
+            },
+            clientFactory = { url ->
+                opened += url
+                val chain = knownProfiles.first { it.rpcUrl == url }.chainId
+                @Suppress("UNCHECKED_CAST")
+                Proxy.newProxyInstance(
+                    SettlementChainClient::class.java.classLoader,
+                    arrayOf(SettlementChainClient::class.java),
+                ) { _, method, _ ->
+                    when (method.name) {
+                        "chainId" -> chain
+                        "latestNativeBalance" -> BigInteger.valueOf(chain % 10)
+                        "nativeBalance" -> BigInteger.valueOf((chain % 10) + 1)
+                        "close" -> Unit
+                        else -> error("Unexpected balance-reader RPC call: ${method.name}")
+                    }
+                } as SettlementChainClient
+            },
+        )
+
+        assertEquals(OperatorNativeBalances(BigInteger.valueOf(2), BigInteger.valueOf(3)), reader.read(OPERATOR))
+        assertEquals(knownProfiles.map { it.rpcUrl }.toSet(), opened.toSet())
     }
 
     private fun emptyBalanceReader() = OperatorNativeBalanceReader {

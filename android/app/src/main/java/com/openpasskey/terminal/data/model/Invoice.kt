@@ -8,6 +8,8 @@ import androidx.room.PrimaryKey
 data class Invoice(
     @PrimaryKey val invoiceId: String,
     val receiver: String,
+    /** Device EOA used as the terminal identifier when this immutable invoice was derived. */
+    @ColumnInfo(defaultValue = "''") val operatorAddress: String = "",
     val token: String,
     val tokenSymbol: String,
     @ColumnInfo(defaultValue = "18") val tokenDecimals: Int = 18,

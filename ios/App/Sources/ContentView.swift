@@ -84,43 +84,60 @@ private struct CheckoutView: View {
                     }
                 )
             } else {
-                Group {
-                    switch CheckoutPresentationState.evaluate(
-                        isSubmitting: isSubmitting,
-                        isProvisioning: model.isProvisioning,
-                        isRefreshingReadiness: model.isRefreshingReadiness,
-                        isBusy: model.isBusy,
-                        readiness: model.terminalReadiness
-                    ) {
-                    case let .checkout(status):
-                        CheckoutReadyView(
-                            amount: $amount,
-                            tokenSymbol: model.settings.tokenSymbol,
-                            tokenDecimals: Int(model.settings.tokenDecimals) ?? 0,
-                            chainID: model.settings.chainID,
-                            status: status,
-                            isSubmitting: isSubmitting,
-                            isInteractionEnabled: allowsQRCreation
-                        ) { displayAmount in
-                            isSubmitting = true
-                            Task {
-                                await model.createSale(displayAmount: displayAmount)
-                                isSubmitting = false
-                            }
+                VStack(spacing: 0) {
+                    if !model.settings.paymentProfiles.isEmpty {
+                        CheckoutPaymentProfilePicker(
+                            profiles: model.settings.paymentProfiles,
+                            selectedID: model.settings.selectedPaymentProfileID,
+                            isEnabled: allowsProfileSelection
+                        ) { profileID in
+                            amount = ""
+                            Task { await model.selectPaymentProfile(id: profileID) }
                         }
-                    case let .checking(kind):
-                        CheckoutCheckingView(kind: kind)
-                    case let .blocked(readiness):
-                        CheckoutBlockedView(
-                            readiness: readiness,
-                            onOpenSettings: onOpenSettings
-                        )
+                        .padding(.horizontal)
+                        .padding(.bottom, 8)
+                    }
+
+                    Group {
+                        switch CheckoutPresentationState.evaluate(
+                            isSubmitting: isSubmitting,
+                            isProvisioning: model.isProvisioning,
+                            isRefreshingReadiness: model.isRefreshingReadiness,
+                            isBusy: model.isBusy,
+                            readiness: model.terminalReadiness
+                        ) {
+                        case let .checkout(status):
+                            CheckoutReadyView(
+                                amount: $amount,
+                                tokenSymbol: model.settings.tokenSymbol,
+                                tokenDecimals: Int(model.settings.tokenDecimals) ?? 0,
+                                chainID: model.settings.chainID,
+                                networkName: model.settings.displayedPaymentProfile.networkName,
+                                isTestnet: model.settings.displayedPaymentProfile.isTestnet,
+                                status: status,
+                                isSubmitting: isSubmitting,
+                                isInteractionEnabled: allowsQRCreation
+                            ) { displayAmount in
+                                isSubmitting = true
+                                Task {
+                                    await model.createSale(displayAmount: displayAmount)
+                                    isSubmitting = false
+                                }
+                            }
+                        case let .checking(kind):
+                            CheckoutCheckingView(kind: kind)
+                        case let .blocked(readiness):
+                            CheckoutBlockedView(
+                                readiness: readiness,
+                                onOpenSettings: onOpenSettings
+                            )
+                        }
                     }
                 }
                 .navigationTitle("Checkout")
             }
         }
-        .onChange(of: model.settings.tokenAddress) {
+        .onChange(of: model.settings.selectedPaymentProfileID) {
             amount = ""
         }
     }
@@ -133,6 +150,82 @@ private struct CheckoutView: View {
             && !model.operationBusy
             && model.terminalReadiness.isReady
     }
+
+    private var allowsProfileSelection: Bool {
+        !isSubmitting
+            && !model.isBusy
+            && !model.isProvisioning
+            && !model.isRefreshingReadiness
+            && !model.operationBusy
+    }
+}
+
+private struct CheckoutPaymentProfilePicker: View {
+    let profiles: [AppPaymentProfile]
+    let selectedID: String?
+    let isEnabled: Bool
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "creditcard.and.123")
+                .font(.title3)
+                .foregroundStyle(.tint)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Charge currency")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(selected?.displayName ?? "Choose a payment profile")
+                    .font(.headline)
+                if let selected {
+                    Text(selected.detail)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+
+            if profiles.count > 1 {
+                Menu {
+                    ForEach(profiles) { profile in
+                        Button {
+                            onSelect(profile.id)
+                        } label: {
+                            if profile.id == selectedID {
+                                Label(menuLabel(profile), systemImage: "checkmark")
+                            } else {
+                                Text(menuLabel(profile))
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Change", systemImage: "chevron.up.chevron.down")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!isEnabled)
+                .accessibilityLabel("Choose charge currency")
+                .accessibilityValue(selected.map(menuLabel) ?? "No profile selected")
+                .accessibilityIdentifier("checkoutPaymentProfilePicker")
+            }
+        }
+        .padding(12)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: profiles.count > 1 ? .contain : .combine)
+        .accessibilityIdentifier("checkoutSelectedPaymentProfile")
+    }
+
+    private var selected: AppPaymentProfile? {
+        profiles.first { $0.id == selectedID }
+    }
+
+    private func menuLabel(_ profile: AppPaymentProfile) -> String {
+        "\(profile.displayName) · \(profile.detail)"
+    }
 }
 
 private struct CheckoutReadyView: View {
@@ -140,6 +233,8 @@ private struct CheckoutReadyView: View {
     let tokenSymbol: String
     let tokenDecimals: Int
     let chainID: String
+    let networkName: String
+    let isTestnet: Bool
     let status: CheckoutOperationalStatus
     let isSubmitting: Bool
     let isInteractionEnabled: Bool
@@ -149,7 +244,12 @@ private struct CheckoutReadyView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
-                CheckoutStatusHeader(chainID: chainID, status: status)
+                CheckoutStatusHeader(
+                    chainID: chainID,
+                    networkName: networkName,
+                    isTestnet: isTestnet,
+                    status: status
+                )
 
                 VStack(spacing: 8) {
                     HStack {
@@ -255,20 +355,50 @@ private struct CheckoutReadyView: View {
 #if DEBUG
 private struct CheckoutReadyUITestFixture: View {
     @State private var amount = ""
+    @State private var selectedProfileIndex = 0
+
+    private let profiles = [
+        AppPaymentProfile(tokenSymbol: "AUDM"),
+        AppPaymentProfile(
+            vault: "0x5555555555555555555555555555555555555555",
+            tokenAddress: "0x8888888888888888888888888888888888888888",
+            tokenSymbol: "USDC",
+            tokenDecimals: "6"
+        ),
+    ]
 
     var body: some View {
+        let selected = profiles[selectedProfileIndex]
         TabView {
             NavigationStack {
-                CheckoutReadyView(
-                    amount: $amount,
-                    tokenSymbol: "AUD",
-                    tokenDecimals: 18,
-                    chainID: "84532",
-                    status: .ready,
-                    isSubmitting: false,
-                    isInteractionEnabled: true,
-                    onSubmit: { _ in }
-                )
+                VStack(spacing: 0) {
+                    CheckoutPaymentProfilePicker(
+                        profiles: profiles,
+                        selectedID: selected.id,
+                        isEnabled: true
+                    ) { profileID in
+                        guard let index = profiles.firstIndex(where: { $0.id == profileID }) else {
+                            return
+                        }
+                        amount = ""
+                        selectedProfileIndex = index
+                    }
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
+
+                    CheckoutReadyView(
+                        amount: $amount,
+                        tokenSymbol: selected.tokenSymbol,
+                        tokenDecimals: Int(selected.tokenDecimals) ?? 0,
+                        chainID: selected.chainID,
+                        networkName: selected.networkName,
+                        isTestnet: selected.isTestnet,
+                        status: .ready,
+                        isSubmitting: false,
+                        isInteractionEnabled: true,
+                        onSubmit: { _ in }
+                    )
+                }
                 .navigationTitle("Checkout")
             }
             .tabItem { Label("Checkout", systemImage: "square.grid.3x3.fill") }
@@ -415,6 +545,8 @@ private struct CheckoutCheckingView: View {
 
 private struct CheckoutStatusHeader: View {
     let chainID: String
+    let networkName: String
+    let isTestnet: Bool
     let status: CheckoutOperationalStatus
 
     var body: some View {
@@ -430,15 +562,17 @@ private struct CheckoutStatusHeader: View {
             Spacer()
 
             VStack(alignment: .trailing, spacing: 2) {
-                Text(chainID == "84532" ? "Base Sepolia" : "Chain \(chainID)")
+                Text(networkName)
                     .font(.subheadline.weight(.semibold))
-                Text("TESTNET")
+                Text(isTestnet ? "TESTNET" : "MAINNET")
                     .font(.caption2.weight(.bold))
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(isTestnet ? Color.orange : Color.green)
             }
             .accessibilityElement(children: .combine)
             .accessibilityLabel(
-                chainID == "84532" ? "Base Sepolia testnet" : "Chain \(chainID) testnet"
+                isTestnet
+                    ? "\(networkName) testnet"
+                    : "\(networkName) mainnet, chain \(chainID)"
             )
             .accessibilityIdentifier("checkoutNetworkStatus")
         }

@@ -52,27 +52,62 @@ final class TerminalProvisioningTests: XCTestCase {
         }
     }
 
-    func testKnownBaseSepoliaPinsAndShippedCreate2Vector() throws {
-        let profile = TerminalKnownChainProfile.baseSepolia
-        XCTAssertEqual(profile.chainID, 84_532)
+    func testKnownNetworkPinsAndShippedCreate2VectorsMatchSharedFixture() throws {
+        let fixture = try loadNetworkFixture()
         XCTAssertEqual(
-            profile.factory.hex,
-            "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5"
+            TerminalKnownChainProfile.supportedChainIDs,
+            Set(fixture.networks.map(\.chainId))
         )
-        XCTAssertEqual(
-            profile.receiverImplementation.hex,
-            "0xdaa292b1bf533737c5ce5d27f220273971db3bdc"
-        )
-        XCTAssertEqual(
-            profile.vaultRuntimeCodeHash.hex,
-            "0xe7310159a3c109346b137a989bfd213e65fe48ded6eb84dbe57a37d7a047513e"
-        )
+        for expected in fixture.networks {
+            let profile = try XCTUnwrap(
+                TerminalKnownChainProfile.profile(for: expected.chainId)
+            )
+            XCTAssertEqual(profile.networkName, expected.networkName)
+            XCTAssertEqual(profile.isTestnet, expected.isTestnet)
+            XCTAssertEqual(profile.nativeCurrencySymbol, expected.nativeCurrencySymbol)
+            XCTAssertEqual(profile.nativeCurrencyDecimals, expected.nativeCurrencyDecimals)
+            XCTAssertEqual(
+                profile.minimumConfirmationBlocks,
+                expected.minimumConfirmationBlocks
+            )
+            XCTAssertEqual(
+                profile.defaultConfirmationBlocks,
+                expected.defaultConfirmationBlocks
+            )
+            XCTAssertEqual(
+                profile.minimumOperatorNativeReserve.decimalString,
+                expected.minimumOperatorNativeReserveWei
+            )
+            XCTAssertEqual(profile.rpcEndpoint.absoluteString, expected.rpcUrl)
+            XCTAssertEqual(profile.protocolVersion.rawValue, expected.protocolVersion)
+            XCTAssertEqual(profile.factory.hex, expected.factory)
+            XCTAssertEqual(
+                profile.receiverImplementation.hex,
+                expected.receiverImplementation
+            )
+            XCTAssertEqual(profile.vaultRuntimeCodeHash.hex, expected.vaultRuntimeCodeHash)
+            XCTAssertEqual(profile.create2TestVector.vault.hex, expected.create2TestVector.vault)
+            XCTAssertEqual(
+                profile.create2TestVector.invoiceID.hex,
+                expected.create2TestVector.invoiceId
+            )
+            XCTAssertEqual(profile.create2TestVector.salt.hex, expected.create2TestVector.salt)
+            XCTAssertEqual(
+                profile.create2TestVector.initCodeHash.hex,
+                expected.create2TestVector.initCodeHash
+            )
+            XCTAssertEqual(
+                profile.create2TestVector.expectedReceiver.hex,
+                expected.create2TestVector.expectedReceiver
+            )
+            try ReceiverDerivation.validate(
+                profile.create2TestVector,
+                factory: profile.factory,
+                receiverImplementation: profile.receiverImplementation
+            )
+        }
+        XCTAssertNil(TerminalKnownChainProfile.profile(for: 8_453))
         XCTAssertNil(TerminalKnownChainProfile.profile(for: 1))
-        try ReceiverDerivation.validate(
-            profile.create2TestVector,
-            factory: profile.factory,
-            receiverImplementation: profile.receiverImplementation
-        )
     }
 
     func testABIAddressPaddingAndBoundedCanonicalDynamicSymbol() throws {
@@ -121,6 +156,47 @@ final class TerminalProvisioningTests: XCTestCase {
         )
         return try JSONDecoder().decode(ProvisioningFixture.self, from: data)
     }
+
+    private func loadNetworkFixture() throws -> NetworkRegistryFixture {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let data = try Data(
+            contentsOf: root.appendingPathComponent("conformance/opk-terminal-networks-v1.json")
+        )
+        return try JSONDecoder().decode(NetworkRegistryFixture.self, from: data)
+    }
+}
+
+private struct NetworkRegistryFixture: Decodable {
+    let networks: [NetworkProfileFixture]
+}
+
+private struct NetworkProfileFixture: Decodable {
+    let chainId: UInt64
+    let networkName: String
+    let isTestnet: Bool
+    let nativeCurrencySymbol: String
+    let nativeCurrencyDecimals: UInt8
+    let minimumConfirmationBlocks: UInt64
+    let defaultConfirmationBlocks: UInt64
+    let minimumOperatorNativeReserveWei: String
+    let rpcUrl: String
+    let protocolVersion: String
+    let factory: String
+    let receiverImplementation: String
+    let vaultRuntimeCodeHash: String
+    let create2TestVector: NetworkCreate2Fixture
+}
+
+private struct NetworkCreate2Fixture: Decodable {
+    let vault: String
+    let invoiceId: String
+    let salt: String
+    let initCodeHash: String
+    let expectedReceiver: String
 }
 
 private struct ProvisioningFixture: Decodable {
