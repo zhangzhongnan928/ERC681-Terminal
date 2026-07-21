@@ -103,7 +103,15 @@ class AdminSessionGateTest {
                     secondReadStarted.complete(Unit)
                     allowSecondReadToFinish.await()
                 }
-                OperatorNativeBalances(BigInteger.ZERO, BigInteger.ZERO)
+                listOf(
+                    OperatorNativeBalances(
+                        networkName = "Base Sepolia",
+                        chainId = 84532,
+                        nativeCurrencySymbol = "ETH",
+                        latest = BigInteger.ZERO,
+                        pending = BigInteger.ZERO,
+                    ),
+                )
             },
             clearProvisioning = {
                 cleared = true

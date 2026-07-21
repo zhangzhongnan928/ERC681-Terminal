@@ -23,11 +23,23 @@ protocol OperatorWalletLifecycleManaging: Sendable {
 
 extension KeychainOperatorWallet: OperatorWalletLifecycleManaging {}
 
+enum AdminPINConfigurationState: Equatable {
+    case configured
+    case notConfigured
+    case unavailable(String)
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var settings: AppSettings {
         didSet {
-            AppPreferences.saveSettings(settings)
+            // A corrupt persisted catalog is kept byte-for-byte until the device admin explicitly
+            // quarantines it. Incidental readiness or UI mutations must never overwrite the only
+            // recovery evidence with an empty default configuration.
+            if !settingsRecoveryRequired {
+                AppPreferences.saveSettings(settings)
+            }
+            guard !settings.hasSamePaymentConfiguration(as: oldValue) else { return }
             validatedConfigurationFingerprint = nil
             validationMessage = "On-chain validation required"
             settlementCoordinator = nil
@@ -47,9 +59,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var validatedConfigurationFingerprint: String?
     @Published private(set) var provisioningMessage: String?
     @Published private(set) var isProvisioning = false
-    @Published private(set) var adminPINConfigured: Bool
+    @Published private(set) var adminPINConfigurationState: AdminPINConfigurationState
     @Published private(set) var adminUnlocked: Bool
     @Published private(set) var preparedSettlement: PreparedSettlement?
+    @Published private(set) var settingsRecoveryRequired = false
     @Published var errorMessage: String?
 
     private let container: ModelContainer
@@ -112,11 +125,23 @@ final class AppModel: ObservableObject {
         self.currentConfigurationValidation = currentConfigurationValidation
         self.operatorStatusReader = operatorStatusReader
         self.operatorResetBalanceReader = operatorResetBalanceReader
-        settings = AppPreferences.loadSettings()
-        let configured = (try? adminPINStore.isConfigured) ?? false
-        adminPINConfigured = configured
-        adminUnlocked = !configured
+        let settingsLoadResult = AppPreferences.loadSettingsResult()
+        settings = settingsLoadResult.settings
+        settingsRecoveryRequired = settingsLoadResult.recoveryRequired
+        let pinConfigurationState: AdminPINConfigurationState
+        do {
+            pinConfigurationState = try adminPINStore.isConfigured
+                ? .configured
+                : .notConfigured
+        } catch {
+            pinConfigurationState = .unavailable(error.localizedDescription)
+        }
+        adminPINConfigurationState = pinConfigurationState
+        adminUnlocked = pinConfigurationState == .notConfigured
         operatorAddress = try? self.operatorWalletLifecycle.existingAddress()
+        if settingsRecoveryRequired {
+            errorMessage = settingsRecoveryMessage
+        }
     }
 
     var terminalReadiness: TerminalReadiness {
@@ -128,11 +153,65 @@ final class AppModel: ObservableObject {
         )
     }
 
-    var canAccessAdmin: Bool { !adminPINConfigured || adminUnlocked }
+    var adminPINConfigured: Bool {
+        adminPINConfigurationState == .configured
+    }
+
+    var adminPINConfigurationUnavailableMessage: String? {
+        guard case let .unavailable(message) = adminPINConfigurationState else { return nil }
+        return message
+    }
+
+    var canAccessAdmin: Bool {
+        switch adminPINConfigurationState {
+        case .notConfigured:
+            true
+        case .configured:
+            adminUnlocked
+        case .unavailable:
+            false
+        }
+    }
+
+    var settingsRecoveryMessage: String? {
+        guard settingsRecoveryRequired else { return nil }
+        if let unavailable = adminPINConfigurationUnavailableMessage {
+            return "The saved terminal setup could not be verified and was not overwritten. "
+                + "The local admin PIN verifier is unavailable: \(unavailable) "
+                + "Restore Keychain access before recovery. The unreadable setup remains active; "
+                + "the operator wallet and invoice history are unchanged."
+        }
+        return "The saved terminal setup could not be verified and was not overwritten. "
+            + "Unlock Admin, quarantine the unreadable setup, then provision the terminal again. "
+            + "The operator wallet and invoice history are unchanged."
+    }
+
+    var pendingSettingsMigrationMessage: String? {
+        settings.migrationNotice.map(Self.migrationNoticeMessage)
+    }
+
+    func acknowledgeSettingsMigrationNotice() {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
+        guard settings.migrationNotice != nil else { return }
+        var updated = settings
+        updated.acknowledgeMigrationNotice()
+        settings = updated
+    }
 
     var operatorPairingPayload: String? {
         guard let operatorAddress else { return nil }
         return try? TerminalOperatorPairingPayload.encode(address: operatorAddress)
+    }
+
+    private static func migrationNoticeMessage(
+        _ notice: AppSettingsMigrationNotice
+    ) -> String {
+        let count = notice.adjustedConfirmationProfileIDs.count
+        return "Safety update: confirmation depth was raised to the compiled network minimum "
+            + "for \(count) legacy payment profile\(count == 1 ? "" : "s")."
     }
 
     var operatorFundingPayload: String? {
@@ -147,11 +226,68 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func selectPaymentProfile(id: String) async {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
+        guard id != settings.selectedPaymentProfileID else { return }
+        guard !operationBusy, !isProvisioning, !isRefreshingReadiness else {
+            errorMessage = AppSettlementError.operationInProgress.localizedDescription
+            return
+        }
+        do {
+            settings = try settings.selectingPaymentProfile(id: id)
+            provisioningMessage = nil
+            errorMessage = nil
+            await refreshReadiness()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func removePaymentProfile(id: String) async {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
+        guard adminPINConfigured, adminUnlocked else {
+            errorMessage = "Unlock Admin before removing a payment profile."
+            return
+        }
+        guard let adminSession = adminSessionGate.capture() else {
+            errorMessage = AppSafetyError.adminSessionExpired.localizedDescription
+            return
+        }
+        guard beginExclusiveOperation() else {
+            errorMessage = AppSettlementError.operationInProgress.localizedDescription
+            return
+        }
+        defer { endExclusiveOperation() }
+        do {
+            let original = settings
+            let candidate = try original.removingPaymentProfile(id: id)
+            guard settings == original else { throw AppSafetyError.configurationChanged }
+            try adminSessionGate.requireCurrent(adminSession)
+            settings = candidate
+            provisioningMessage = candidate.paymentProfiles.isEmpty
+                ? "Payment profile removed. Add a profile before accepting payments."
+                : "Payment profile removed from this terminal. On-chain authorization was not changed."
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+        // `settings` invalidated all selected-profile readiness state. Refresh only the profile
+        // deterministically selected after removal; historical invoice snapshots are untouched.
+        await refreshReadiness()
+    }
+
     func configureAdminPIN(_ pin: String, confirmation: String) {
         do {
             guard pin == confirmation else { throw AdminPINError.invalidFormat }
             try adminPINStore.setPIN(pin)
-            adminPINConfigured = true
+            adminPINConfigurationState = .configured
             adminUnlocked = true
             adminSessionGate.unlock()
             errorMessage = nil
@@ -163,7 +299,7 @@ final class AppModel: ObservableObject {
     func unlockAdmin(with pin: String) {
         do {
             try adminPINStore.verify(pin)
-            adminPINConfigured = true
+            adminPINConfigurationState = .configured
             adminUnlocked = true
             adminSessionGate.unlock()
             errorMessage = nil
@@ -180,7 +316,48 @@ final class AppModel: ObservableObject {
         adminUnlocked = false
     }
 
+    /// Explicit admin recovery for a catalog that failed current trust-pin or structural checks.
+    /// The unreadable bytes are retained in a quarantine slot before a clean, unprovisioned
+    /// catalog is persisted. The operator key and all durable invoice/settlement rows are separate.
+    func resetUnreadableSettingsForRecovery() {
+        guard settingsRecoveryRequired else { return }
+        guard adminPINConfigurationUnavailableMessage == nil else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
+        guard canAccessAdmin else {
+            errorMessage = "Unlock Admin before resetting unreadable terminal setup."
+            return
+        }
+        if adminPINConfigured, adminSessionGate.capture() == nil {
+            errorMessage = AppSafetyError.adminSessionExpired.localizedDescription
+            return
+        }
+        guard !operationBusy, !isProvisioning, !isRefreshingReadiness else {
+            errorMessage = AppSettlementError.operationInProgress.localizedDescription
+            return
+        }
+        guard AppPreferences.quarantineUnreadableSettings() else {
+            errorMessage = "The unreadable setup could not be quarantined. Nothing was changed."
+            return
+        }
+
+        settingsRecoveryRequired = false
+        settings = AppSettings()
+        validatedConfigurationFingerprint = nil
+        validationMessage = "On-chain validation required"
+        provisioningMessage = "Unreadable setup quarantined. Scan the merchant portal setup QR again."
+        operatorStatus = nil
+        operatorStatusMessage = nil
+        errorMessage = nil
+        if adminPINConfigured { lockAdmin() }
+    }
+
     func provision(_ payload: TerminalProvisioningPayload) async {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
         guard canAccessAdmin else {
             errorMessage = "Unlock Admin before changing terminal provisioning."
             return
@@ -210,13 +387,15 @@ final class AppModel: ObservableObject {
         }
         let original = settings
         do {
-            guard let blocks = UInt64(original.confirmationBlocks), blocks > 0 else {
-                throw AppSettingsError.invalidValue
+            guard let knownNetwork = TerminalKnownChainProfile.profile(for: payload.chainID) else {
+                throw AppSettingsError.unsupportedChain
             }
             let derived = try await provisioningValidator.deriveAndValidate(
                 payload,
                 expectedOperator: operatorAddress,
-                confirmationPolicy: .init(requiredBlocks: blocks),
+                confirmationPolicy: .init(
+                    requiredBlocks: knownNetwork.defaultConfirmationBlocks
+                ),
                 rpcEndpointOverride: existingRPCOverride(
                     for: payload.chainID,
                     settings: original
@@ -233,7 +412,7 @@ final class AppModel: ObservableObject {
             settings = candidate
             validatedConfigurationFingerprint = candidate.validationFingerprint
             validationMessage = "On-chain validation passed"
-            provisioningMessage = "Provisioning validated and saved."
+            provisioningMessage = "Payment profile validated and saved. Existing profiles were preserved."
             errorMessage = nil
             lockAdmin()
             await refreshOperatorStatus()
@@ -320,13 +499,13 @@ final class AppModel: ObservableObject {
             guard readiness.isReady else {
                 throw AppSafetyError.terminalNotReady(readiness.detail)
             }
-            let token = configuration.tokens[0]
-            let amount = try TokenAmount(display: displayAmount, decimals: token.decimals).rawValue
+            let paymentProfile = try TerminalPaymentProfile(configuration: configuration)
+            let token = paymentProfile.token
+            let amount = try TokenAmount(display: displayAmount, decimals: token.decimals)
             let request = try InvoiceFactory.create(
                 terminalIdentifier: TerminalIdentifier(address: operatorAddress),
                 amount: amount,
-                token: token,
-                configuration: configuration,
+                profile: paymentProfile,
                 expiresAt: Date().addingTimeInterval(15 * 60)
             )
             let rpc = try JSONRPCEthereumClient(endpoint: configuration.rpcEndpoints[0])
@@ -488,6 +667,10 @@ final class AppModel: ObservableObject {
     }
 
     func resetOperatorWallet() async {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
         guard adminPINConfigured, adminUnlocked else {
             errorMessage = "Unlock Admin before resetting the operator wallet."
             return
@@ -522,49 +705,110 @@ final class AppModel: ObservableObject {
             guard !settlements.contains(where: { OperatorResetSafety.isUnresolved($0.phase) }) else {
                 throw AppSafetyError.operatorResetBlockedBySettlement
             }
-            let operationalConfiguration = try settings.configuration()
-            guard let trustedProfile = TerminalKnownChainProfile.profile(
-                for: operationalConfiguration.chainID
-            ) else { throw AppSettingsError.unsupportedChain }
+            let operationalConfigurations = try settings.configurations()
             // Key deletion must not trust an admin-editable or previously persisted RPC. A
             // compromised endpoint could otherwise report zero for a funded operator address.
-            let resetConfiguration = try TerminalConfiguration(
-                chainID: operationalConfiguration.chainID,
-                rpcEndpoints: [trustedProfile.rpcEndpoint],
-                protocolVersion: operationalConfiguration.protocolVersion,
-                deployment: operationalConfiguration.deployment,
-                tokens: operationalConfiguration.tokens,
-                confirmationPolicy: operationalConfiguration.confirmationPolicy,
-                create2TestVector: operationalConfiguration.create2TestVector
-            )
-            let readResetBalances: @Sendable () async throws -> OperatorNativeBalanceSnapshot
+            // Check every network enabled by this app build, not only currently saved profiles:
+            // an admin may have removed the last profile for a chain that still holds operator gas.
+            let resetTargets = try TerminalKnownChainProfile.all.map { trustedProfile in
+                let operational = operationalConfigurations.first {
+                    $0.chainID == trustedProfile.chainID
+                }
+                let deployment = try operational?.deployment ?? OPKDeployment(
+                    factory: trustedProfile.factory,
+                    receiverImplementation: trustedProfile.receiverImplementation,
+                    vault: trustedProfile.create2TestVector.vault
+                )
+                let resetOnlyToken = try PaymentToken(
+                    address: trustedProfile.factory,
+                    symbol: "RESET",
+                    decimals: 18
+                )
+                let configuration = try TerminalConfiguration(
+                    chainID: trustedProfile.chainID,
+                    rpcEndpoints: [trustedProfile.rpcEndpoint],
+                    protocolVersion: trustedProfile.protocolVersion,
+                    deployment: deployment,
+                    tokens: operational?.tokens ?? [resetOnlyToken],
+                    confirmationPolicy: operational?.confirmationPolicy
+                        ?? .init(requiredBlocks: trustedProfile.defaultConfirmationBlocks),
+                    create2TestVector: trustedProfile.create2TestVector
+                )
+                return (
+                    configuration: configuration,
+                    network: OperatorResetNetworkContext(trustedProfile)
+                )
+            }
+            let readResetBalances: @Sendable () async throws -> [OperatorResetNetworkBalance]
             if let operatorResetBalanceReader {
                 readResetBalances = {
-                    try await operatorResetBalanceReader(resetConfiguration, operatorAddress)
+                    var balances = [OperatorResetNetworkBalance]()
+                    for target in resetTargets {
+                        do {
+                            let snapshot = try await operatorResetBalanceReader(
+                                target.configuration,
+                                operatorAddress
+                            )
+                            balances.append(OperatorResetNetworkBalance(
+                                network: target.network,
+                                snapshot: snapshot
+                            ))
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch {
+                            throw OperatorResetSafety.networkReadFailure(
+                                error,
+                                network: target.network
+                            )
+                        }
+                    }
+                    return balances
                 }
             } else {
-                let resetCoordinator = try coordinator(
-                    configuration: resetConfiguration,
-                    operatorAddress: operatorAddress
-                )
-                readResetBalances = {
-                    try await resetCoordinator.resetSafetyBalances(
-                        expectedChainID: resetConfiguration.chainID
+                let coordinators = try resetTargets.map { target in
+                    (
+                        target,
+                        try coordinator(
+                            configuration: target.configuration,
+                            operatorAddress: operatorAddress
+                        )
                     )
                 }
+                readResetBalances = {
+                    var balances = [OperatorResetNetworkBalance]()
+                    for (target, resetCoordinator) in coordinators {
+                        do {
+                            let snapshot = try await resetCoordinator.resetSafetyBalances(
+                                expectedChainID: target.configuration.chainID
+                            )
+                            balances.append(OperatorResetNetworkBalance(
+                                network: target.network,
+                                snapshot: snapshot
+                            ))
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch {
+                            throw OperatorResetSafety.networkReadFailure(
+                                error,
+                                network: target.network
+                            )
+                        }
+                    }
+                    return balances
+                }
             }
-            try OperatorResetSafety.requireEmptyNativeBalance(
-                try await readResetBalances()
-            )
+            for balance in try await readResetBalances() {
+                try OperatorResetSafety.requireEmptyNativeBalance(balance)
+            }
             let sessionGate = adminSessionGate
             try await operatorWalletLifecycle.reset(
                 reason: "Permanently reset this terminal's empty settlement operator wallet",
                 beforeDeletion: {
                     // Re-read after device authentication so a pending withdrawal cannot make a
                     // funded key look empty during the destructive confirmation window.
-                    try OperatorResetSafety.requireEmptyNativeBalance(
-                        try await readResetBalances()
-                    )
+                    for balance in try await readResetBalances() {
+                        try OperatorResetSafety.requireEmptyNativeBalance(balance)
+                    }
                 },
                 deletionAuthorization: { deletion in
                     try sessionGate.performIfCurrent(adminSession, operation: deletion)
@@ -620,6 +864,9 @@ final class AppModel: ObservableObject {
         defer { endExclusiveOperation() }
         do {
             guard invoices.count <= 20 else { throw AppSettlementError.invalidSelection }
+            guard settlementBatchSnapshotsMatch(invoices) else {
+                throw AppSettlementError.mixedSnapshots
+            }
 
             let activeIDs = try activeSettlementInvoiceIDs()
             guard invoices.allSatisfy({ !activeIDs.contains($0.invoiceID) }) else {
@@ -636,6 +883,10 @@ final class AppModel: ObservableObject {
                 try validateSnapshot(request, against: snapshot)
             }
             guard let operatorAddress else { throw OperatorWalletError.walletNotCreated }
+            guard invoiceOperatorSnapshotsMatch(
+                requests.map(\.terminalIdentifier.address),
+                currentOperator: operatorAddress
+            ) else { throw AppSettlementError.walletMismatch }
             try enforceDurableNonceGate(
                 operatorAddress: operatorAddress,
                 chainID: configuration.chainID
@@ -1385,13 +1636,7 @@ final class AppModel: ObservableObject {
         for chainID: UInt64,
         settings: AppSettings
     ) -> URL? {
-        guard settings.chainID == String(chainID),
-              let profile = TerminalKnownChainProfile.profile(for: chainID),
-              let endpoint = URL(string: settings.rpcURL),
-              endpoint != profile.rpcEndpoint,
-              (try? RPCURLPolicy.validate(endpoint)) != nil
-        else { return nil }
-        return endpoint
+        settings.rpcOverride(for: chainID)
     }
 
     private func coordinator(
@@ -1512,6 +1757,17 @@ final class AppModel: ObservableObject {
             sweepable: invoice.sweepableConfirmationCursor
         )
     }
+}
+
+/// A selected batch may be settled only by the device EOA that derived every invoice identifier.
+internal func invoiceOperatorSnapshotsMatch(
+    _ storedOperators: [EthereumAddress],
+    currentOperator: EthereumAddress
+) -> Bool {
+    guard let first = storedOperators.first,
+          first == currentOperator
+    else { return false }
+    return storedOperators.allSatisfy { $0 == first }
 }
 
 private struct ForegroundInvoiceReconciliationCandidate: Sendable {

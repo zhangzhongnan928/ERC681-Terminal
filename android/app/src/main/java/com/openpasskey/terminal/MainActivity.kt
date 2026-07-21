@@ -33,6 +33,7 @@ class MainActivity : FragmentActivity() {
                 app.adminPinStore,
                 app.terminalProvisioner,
                 app.terminalResetCoordinator,
+                app.terminalLifecycleGate,
             )
         )[SettingsViewModel::class.java]
         val settlementViewModel = ViewModelProvider(

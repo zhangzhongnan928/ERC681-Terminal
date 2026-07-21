@@ -1,10 +1,41 @@
 package com.openpasskey.terminal.ui.screens
 
+import com.openpasskey.terminal.chain.PaymentToken
+import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.viewmodel.TerminalSetupStatus
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CheckoutPresentationTest {
+    @Test
+    fun `gas blocker uses readable network native amount`() {
+        val profile = TerminalPaymentProfile(
+            networkName = "Base Sepolia",
+            rpcUrl = "https://sepolia.base.org",
+            chainId = 84_532,
+            factoryAddress = "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
+            receiverImplementationAddress = "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
+            vaultAddress = "0x1111111111111111111111111111111111111111",
+            confirmationBlocks = 2,
+            token = PaymentToken(
+                "0x2222222222222222222222222222222222222222",
+                "AUDM",
+                18,
+            ),
+            protocolVersion = "1.4.1",
+        )
+
+        val copy = checkoutBlockerCopy(
+            TerminalSetupStatus.AWAITING_GAS,
+            selectedProfile = profile,
+        )
+
+        assertTrue(copy.detail.contains("0.0001 ETH"))
+        assertFalse(copy.detail.contains("wei"))
+    }
+
     @Test
     fun `early setup blockers lead to the setup flow`() {
         listOf(

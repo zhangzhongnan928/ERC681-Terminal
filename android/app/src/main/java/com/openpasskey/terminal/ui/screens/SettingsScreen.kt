@@ -22,10 +22,14 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -52,11 +56,13 @@ import com.openpasskey.terminal.ui.components.DeviceAuthentication
 import com.openpasskey.terminal.ui.components.AddressScannerDialog
 import com.openpasskey.terminal.ui.components.ProvisioningScannerDialog
 import com.openpasskey.terminal.ui.components.QRCodeView
+import com.openpasskey.terminal.provisioning.KnownChainPolicy
+import com.openpasskey.terminal.provisioning.formatNativeCurrencyAmount
+import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.viewmodel.SettingsState
 import com.openpasskey.terminal.viewmodel.SettingsViewModel
 import com.openpasskey.terminal.viewmodel.TerminalSetupStatus
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
-import java.math.BigDecimal
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -69,6 +75,7 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
     var showProvisioningScanner by remember { mutableStateOf(false) }
     var showReset by remember { mutableStateOf(false) }
     var showAdvancedManualSetup by remember { mutableStateOf(false) }
+    var profilePendingRemoval by remember { mutableStateOf<TerminalPaymentProfile?>(null) }
 
     if (showProvisioningScanner) {
         ProvisioningScannerDialog(
@@ -136,8 +143,10 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                 Text(
                     "This permanently deletes the local private key and current provisioning. " +
                         "Before continuing, revoke ${state.operatorWalletAddress ?: "this operator"} " +
-                        "from the vault and withdraw all native gas. The app checks both latest and pending " +
-                        "balances twice and cancels reset unless both are exactly zero. This app cannot undo " +
+                        "from every configured vault and withdraw native gas on every network " +
+                        "supported by this app build. " +
+                        "The app checks both latest and pending balances twice on each network and cancels " +
+                        "reset unless every balance is exactly zero. This app cannot undo " +
                         "the reset. Funds sent later to this previously shared address cannot be recovered. " +
                         "Reset is available only before this terminal issues its first payment QR. A published " +
                         "receiver remains payable forever, so its signing key cannot later be deleted safely. " +
@@ -156,12 +165,33 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
             dismissButton = { TextButton(onClick = { showReset = false }) { Text("Cancel") } },
         )
     }
+    profilePendingRemoval?.let { profile ->
+        AlertDialog(
+            onDismissRequest = { profilePendingRemoval = null },
+            title = { Text("Remove payment profile?") },
+            text = {
+                Text(paymentProfileRemovalConfirmationMessage(profile, state.paymentProfiles.size))
+            },
+            confirmButton = {
+                Button(onClick = {
+                    profilePendingRemoval = null
+                    viewModel.removePaymentProfile(profile.id)
+                }) {
+                    Icon(Icons.Default.DeleteForever, contentDescription = null)
+                    Text(" Remove profile")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { profilePendingRemoval = null }) { Text("Cancel") }
+            },
+        )
+    }
     if (showAdvancedManualSetup) {
         AdvancedManualSetupDialog(
             onDismiss = { showAdvancedManualSetup = false },
-            onProvision = { vault, token ->
+            onProvision = { chainId, vault, token ->
                 showAdvancedManualSetup = false
-                viewModel.provisionManual(vault, token)
+                viewModel.provisionManual(chainId, vault, token)
             },
         )
     }
@@ -212,7 +242,18 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                     }
                 }
             }
-            if (state.provisioned) item { ConfigurationSummary(state) }
+            if (state.provisioned) {
+                item {
+                    ConfigurationSummary(
+                        state = state,
+                        onRemove = if (state.adminUnlocked) {
+                            { profile -> profilePendingRemoval = profile }
+                        } else {
+                            null
+                        },
+                    )
+                }
+            }
             if (state.adminPinConfigured) {
                 item {
                     AdminSetupCard(
@@ -224,6 +265,22 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                         onManualSetup = { showAdvancedManualSetup = true },
                         onReset = { showReset = true },
                     )
+                }
+            }
+            state.migrationNotice?.let { notice ->
+                item {
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(
+                            Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text("Security update applied", style = MaterialTheme.typography.titleMedium)
+                            Text(notice, style = MaterialTheme.typography.bodySmall)
+                            TextButton(onClick = viewModel::acknowledgeMigrationNotice) {
+                                Text("Acknowledge security update")
+                            }
+                        }
+                    }
                 }
             }
             state.message?.let { message ->
@@ -254,7 +311,7 @@ private fun SetupStatusCard(state: SettingsState) {
         TerminalSetupStatus.AWAITING_AUTHORIZATION -> "Awaiting portal authorization" to
             "Confirm the terminal operator transaction in the merchant portal, then refresh."
         TerminalSetupStatus.AWAITING_GAS -> "Awaiting terminal gas" to
-            "Send at least 0.0001 native currency to the funding address below."
+            "Send at least ${formatNativeCurrencyAmount(state.minimumOperatorNativeReserveWei, state.nativeCurrencyDecimals, state.nativeCurrencySymbol)} to the funding address below."
         TerminalSetupStatus.READY -> "Terminal ready" to
             "Configuration, operator authorization, and minimum gas reserve are valid."
         TerminalSetupStatus.ERROR -> "Setup needs attention" to
@@ -343,12 +400,12 @@ private fun OperatorWalletCard(
                             modifier = Modifier.align(Alignment.CenterHorizontally),
                         )
                         Text(
-                            "Send native gas only. ERC-20 customer payments go to one-time receiver addresses.",
+                            "Send ${state.nativeCurrencySymbol} gas only. ERC-20 customer payments go to one-time receiver addresses.",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
                     Text(
-                        "Native balance: ${state.operatorBalanceWei?.let(::formatNativeBalance) ?: "Not checked"}",
+                        "${state.nativeCurrencySymbol} balance: ${state.operatorBalanceWei?.let { formatNativeCurrencyAmount(it, state.nativeCurrencyDecimals, state.nativeCurrencySymbol) } ?: "Not checked"}",
                     )
                     Text(
                         "Vault authorization: ${when (state.operatorAuthorized) {
@@ -369,23 +426,49 @@ private fun OperatorWalletCard(
 }
 
 @Composable
-private fun ConfigurationSummary(state: SettingsState) {
-    val token = state.paymentTokens.singleOrNull()
+private fun ConfigurationSummary(
+    state: SettingsState,
+    onRemove: ((TerminalPaymentProfile) -> Unit)?,
+) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Provisioned configuration", style = MaterialTheme.typography.titleMedium)
-            SummaryLine("Network", "${state.networkName} (${state.chainId})")
-            SummaryLine("Protocol", state.protocolVersion)
+            Text(
+                "Payment profiles (${state.paymentProfiles.size})",
+                style = MaterialTheme.typography.titleMedium,
+            )
             state.provisionedOperatorAddress?.let { SummaryLine("Bound operator", it) }
-            SummaryLine("Vault", state.vaultAddress)
-            SummaryLine("Factory", state.factoryAddress)
-            SummaryLine("Receiver implementation", state.receiverImplementationAddress)
-            token?.let {
-                SummaryLine("Payment token", "${it.symbol} · ${it.decimals} decimals")
-                SummaryLine("Token contract", it.address)
+            state.paymentProfiles.forEachIndexed { index, profile ->
+                val selected = profile.id == state.selectedProfileId
+                Text(
+                    "${if (selected) "Selected · " else ""}${profile.token.symbol} · " +
+                        "${profile.networkName} (${profile.chainId})",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (selected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurface,
+                )
+                SummaryLine("Vault", profile.vaultAddress)
+                SummaryLine(
+                    "Token",
+                    "${profile.token.address} · ${profile.token.decimals} decimals",
+                )
+                SummaryLine("Protocol", profile.protocolVersion)
+                SummaryLine("Factory", profile.factoryAddress)
+                SummaryLine("Receiver implementation", profile.receiverImplementationAddress)
+                if (onRemove != null) {
+                    TextButton(
+                        onClick = { onRemove(profile) },
+                        modifier = Modifier.align(Alignment.End),
+                    ) {
+                        Icon(Icons.Default.DeleteForever, contentDescription = null)
+                        Text(" Remove profile")
+                    }
+                }
+                if (index < state.paymentProfiles.lastIndex) {
+                    Spacer(Modifier.height(6.dp))
+                }
             }
             Text(
-                "These values are chain-derived and read-only. Unlock Admin/setup to scan a replacement portal QR.",
+                "Profiles are chain-derived and read-only. Unlock Admin/setup to add or refresh a portal profile.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -425,7 +508,7 @@ private fun AdminSetupCard(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Icon(Icons.Default.QrCodeScanner, contentDescription = null)
-                    Text(" Reprovision from portal")
+                    Text(" Add or update portal profile")
                 }
                 OutlinedButton(
                     onClick = onManualSetup,
@@ -452,11 +535,15 @@ private fun AdminSetupCard(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AdvancedManualSetupDialog(
     onDismiss: () -> Unit,
-    onProvision: (String, String) -> Unit,
+    onProvision: (Long, String, String) -> Unit,
 ) {
+    val chains = remember { KnownChainPolicy.enabledProfiles() }
+    var selectedChain by remember { mutableStateOf(chains.first()) }
+    var chainMenuExpanded by remember { mutableStateOf(false) }
     var vault by remember { mutableStateOf("") }
     var token by remember { mutableStateOf("") }
     var scanTarget by remember { mutableStateOf<String?>(null) }
@@ -475,16 +562,47 @@ private fun AdvancedManualSetupDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "Base Sepolia only. Enter or scan the vault and selected token. Factory, receiver " +
-                        "implementation, symbol, and decimals remain chain-derived and pinned.",
+                    "Choose a verified EVM deployment, then enter or scan the vault and token. " +
+                        "Factory, receiver implementation, symbol, and decimals remain chain-derived and pinned.",
                 )
+                ExposedDropdownMenuBox(
+                    expanded = chainMenuExpanded,
+                    onExpandedChange = { chainMenuExpanded = it },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    OutlinedTextField(
+                        value = "${selectedChain.networkName} (${selectedChain.chainId})",
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Network") },
+                        trailingIcon = {
+                            ExposedDropdownMenuDefaults.TrailingIcon(chainMenuExpanded)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                            .menuAnchor(MenuAnchorType.PrimaryNotEditable),
+                    )
+                    ExposedDropdownMenu(
+                        expanded = chainMenuExpanded,
+                        onDismissRequest = { chainMenuExpanded = false },
+                    ) {
+                        chains.forEach { chain ->
+                            DropdownMenuItem(
+                                text = { Text("${chain.networkName} (${chain.chainId})") },
+                                onClick = {
+                                    selectedChain = chain
+                                    chainMenuExpanded = false
+                                },
+                            )
+                        }
+                    }
+                }
                 ManualAddressField("Vault address", vault, { vault = it }) { scanTarget = "vault" }
                 ManualAddressField("Token contract", token, { token = it }) { scanTarget = "token" }
             }
         },
         confirmButton = {
             TextButton(
-                onClick = { onProvision(vault, token) },
+                onClick = { onProvision(selectedChain.chainId, vault, token) },
                 enabled = vault.isNotBlank() && token.isNotBlank(),
             ) { Text("Validate & provision") }
         },
@@ -582,6 +700,18 @@ private fun PinField(label: String, value: String, onValueChange: (String) -> Un
     )
 }
 
-private fun formatNativeBalance(wei: String): String = runCatching {
-    BigDecimal(wei).movePointLeft(18).stripTrailingZeros().toPlainString() + " native"
-}.getOrDefault("Unknown")
+internal fun paymentProfileRemovalConfirmationMessage(
+    profile: TerminalPaymentProfile,
+    configuredProfileCount: Int,
+): String {
+    val consequence = if (configuredProfileCount == 1) {
+        " Removing this last payment profile disables Checkout and returns the terminal to setup " +
+            "until a portal payment profile is added."
+    } else {
+        ""
+    }
+    return "Remove ${profile.token.symbol} on ${profile.networkName} for vault " +
+        "${profile.vaultAddress} and token ${profile.token.address} from future checkouts?" +
+        consequence + " Existing invoices, payment monitoring, and settlement history keep their " +
+        "immutable network, vault, and token snapshots."
+}

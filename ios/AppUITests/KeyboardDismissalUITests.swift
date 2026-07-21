@@ -8,6 +8,9 @@ final class KeyboardDismissalUITests: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchEnvironment["OPK_UI_TEST_KEYCHAIN_NAMESPACE"] = UUID().uuidString
+        if name.contains("testReadyCheckoutFixtureSwitchesOneWholePaymentProfileAtATime") {
+            app.launchEnvironment["OPK_UI_TEST_CHECKOUT_FIXTURE"] = "ready"
+        }
         app.launch()
     }
 
@@ -80,7 +83,7 @@ final class KeyboardDismissalUITests: XCTestCase {
         }
 
         let amount = "11111111111111111111"
-        let exactAmount = "\(amount) AUD"
+        let exactAmount = "\(amount) AUDM"
 
         let amountDisplay = element(identifier: "checkoutAmountDisplay")
         XCTAssertEqual(amountDisplay.label, "Checkout amount")
@@ -97,6 +100,30 @@ final class KeyboardDismissalUITests: XCTestCase {
         let clearButton = app.buttons["checkoutClearButton"]
         XCTAssertTrue(clearButton.exists)
         XCTAssertEqual(clearButton.label, "Clear amount")
+    }
+
+    func testReadyCheckoutFixtureSwitchesOneWholePaymentProfileAtATime() {
+        XCTAssertTrue(app.navigationBars["Checkout"].waitForExistence(timeout: 5))
+        let picker = app.buttons["checkoutPaymentProfilePicker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        XCTAssertTrue((picker.value as? String)?.contains("AUDM · Base Sepolia") == true)
+        XCTAssertTrue((picker.value as? String)?.contains("Token 0x7ffba6…e211") == true)
+        XCTAssertEqual(element(identifier: "checkoutNetworkStatus").label, "Base Sepolia testnet")
+
+        picker.tap()
+        let usdc = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS %@", "USDC · Base Sepolia")
+        ).firstMatch
+        XCTAssertTrue(usdc.waitForExistence(timeout: 3))
+        usdc.tap()
+
+        XCTAssertTrue((picker.value as? String)?.contains("USDC · Base Sepolia") == true)
+        XCTAssertTrue((picker.value as? String)?.contains("Token 0x888888…8888") == true)
+        XCTAssertEqual(
+            element(identifier: "checkoutNetworkStatus").label,
+            "Base Sepolia testnet"
+        )
+        XCTAssertEqual(element(identifier: "checkoutAmountDisplay").value as? String, "0.00 USDC")
     }
 
     func testCheckoutSetupActionRemainsReachableInLandscapeAtAccessibilityXXXL() {

@@ -1,7 +1,8 @@
 # OPK ERC-681 Terminal for iOS
 
 This directory contains a keyless, read-only Swift payment SDK and a SwiftUI terminal app for
-ERC-20 payments presented as canonical ERC-681 QR codes. The app's separately isolated operator
+ERC-20 payments presented as canonical ERC-681 QR codes. The app stores a catalog of EVM payment
+profiles and chooses one network/vault/token profile per invoice. Its separately isolated operator
 module manages one device-local settlement key and can sign only constrained `sweepSessions`
 transactions; the payment Core and RPC products do not handle keys or submit transactions. There
 is no customer payment-QR importing, NFC, or CoreNFC capability. Camera access is limited to
@@ -11,8 +12,8 @@ non-address payloads fail closed. The Swift package libraries remain camera-free
 ## Components
 
 - `OPKTerminalCore`: validated EVM values, exact raw-unit amounts, Ethereum Keccak-256, read-only
-  ABI helpers, invoice IDs, local CREATE2 receiver derivation, strict ERC-681, payment models, and
-  metadata-only settlement handoff.
+  ABI helpers, invoice IDs, local CREATE2 receiver derivation, strict ERC-681, cross-network
+  payment-profile catalogs, payment models, and metadata-only settlement handoff.
 - `OPKTerminalRPC`: read-only JSON-RPC methods, chain/contract/token configuration validation, and
   block-confirmed balance observation.
 - `OPKTerminalOperator`: device-local secp256k1 key storage, constrained settlement transaction
@@ -68,10 +69,22 @@ The sample defaults to the currently deployed Base Sepolia v1.4.1-compatible sta
 - Test vault: `0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1`
 - AUD token: `0x7ffba642bc902880a737cb1c18a4e9540879e211`, 18 decimals
 
-No Base-mainnet or v1.5 deployment configuration is shipped or selectable in the sample app. The
-exact configuration snapshot is saved with each invoice and validated before presenting a QR. RPC
+Base Sepolia is the only network enabled in the production app in this release. The Swift
+payment-profile catalog remains EVM-generic, but Base Mainnet (`8453`) and other chains are rejected
+before RPC use until a frozen or multisig-governed, implementation-pinned OPK deployment and its
+CREATE2 vector, finality policy, native-currency metadata, and operator gas reserve are reviewed and
+added to the immutable app registry. Multiple vault/token profiles
+can coexist, while one selected profile supplies the exact configuration snapshot saved with each
+invoice and validated before presenting a QR. RPC
 URLs must use HTTPS, except loopback HTTP for local development, and embedded URL credentials and
 fragments are rejected.
+
+One payment profile binds exactly one EVM chain, vault, and ERC-20 token. Up to 32 canonical
+profiles can be added or updated by scanning existing provisioning-v1 QRs; scanning never replaces
+unrelated profiles. Checkout selects one profile for one invoice, so a payment never mixes tokens
+or networks. Profile identity is `eip155:<chain>:<vault>:<token>`, not the token symbol. Admin can
+remove a local profile with confirmation without rewriting immutable invoice or settlement
+history. The SDK's `TerminalPaymentProfileCatalog` provides matching select/upsert/remove behavior.
 
 Each address row keeps its label visible and offers a Settings-only scan button. The scanner accepts
 a raw non-zero EVM address or an address-only `ethereum:` URI; it rejects customer payment requests
@@ -85,8 +98,14 @@ History. Expiry closes zero-balance and partially funded requests alike.
 The operator wallet must exist before the app can present a new payment QR. Its public EOA address
 is the terminal identity supplied as `terminalIdentifier` for every new invoice. Vault
 authorization and native-token gas funding are checked separately before settlement; they are not
-inputs to invoice or receiver derivation. The full operator address remains available in Settings
-with copy and address-only QR controls.
+inputs to invoice or receiver derivation. Readiness is refreshed for the selected profile whenever
+the merchant switches currency/network. The same EOA is authorized per vault and funded per chain
+to that network's compiled minimum reserve (`0.0001 ETH` on Base Sepolia; future enabled networks
+may use a different native currency, decimals, and reserve).
+Destructive reset checks native balances on every network supported by the app, including a network
+whose last local profile was removed. Funded and unreachable-network reset failures name the
+network and chain ID. The full operator address remains available in Settings with copy and
+address-only QR controls.
 
 Upgraded installations preserve each existing invoice's original terminal identifier, invoice ID,
 configuration snapshot, and derived receiver. Those historical records are not rewritten, and any

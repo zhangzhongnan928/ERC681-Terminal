@@ -141,6 +141,12 @@ public enum TerminalOperatorPairingPayload {
 public struct TerminalKnownChainProfile: Hashable, Sendable {
     public let chainID: UInt64
     public let networkName: String
+    public let isTestnet: Bool
+    public let nativeCurrencySymbol: String
+    public let nativeCurrencyDecimals: UInt8
+    public let minimumConfirmationBlocks: UInt64
+    public let defaultConfirmationBlocks: UInt64
+    public let minimumOperatorNativeReserve: UInt256
     public let rpcEndpoint: URL
     public let protocolVersion: OPKProtocolVersion
     public let factory: EthereumAddress
@@ -151,6 +157,12 @@ public struct TerminalKnownChainProfile: Hashable, Sendable {
     private init(
         chainID: UInt64,
         networkName: String,
+        isTestnet: Bool,
+        nativeCurrencySymbol: String,
+        nativeCurrencyDecimals: UInt8,
+        minimumConfirmationBlocks: UInt64,
+        defaultConfirmationBlocks: UInt64,
+        minimumOperatorNativeReserve: UInt256,
         rpcEndpoint: URL,
         protocolVersion: OPKProtocolVersion,
         factory: EthereumAddress,
@@ -160,6 +172,12 @@ public struct TerminalKnownChainProfile: Hashable, Sendable {
     ) {
         self.chainID = chainID
         self.networkName = networkName
+        self.isTestnet = isTestnet
+        self.nativeCurrencySymbol = nativeCurrencySymbol
+        self.nativeCurrencyDecimals = nativeCurrencyDecimals
+        self.minimumConfirmationBlocks = minimumConfirmationBlocks
+        self.defaultConfirmationBlocks = defaultConfirmationBlocks
+        self.minimumOperatorNativeReserve = minimumOperatorNativeReserve
         self.rpcEndpoint = rpcEndpoint
         self.protocolVersion = protocolVersion
         self.factory = factory
@@ -169,8 +187,15 @@ public struct TerminalKnownChainProfile: Hashable, Sendable {
     }
 
     public static func profile(for chainID: UInt64) -> TerminalKnownChainProfile? {
-        chainID == baseSepolia.chainID ? baseSepolia : nil
+        all.first { $0.chainID == chainID }
     }
+
+    /// EVM networks whose deployment trust anchors are enabled in the production app. Adding a
+    /// network is an explicit release action: a provisioning QR can select only an entry in this
+    /// registry. The reusable payment-profile catalog remains EVM-generic.
+    public static var all: [TerminalKnownChainProfile] { [baseSepolia] }
+
+    public static var supportedChainIDs: Set<UInt64> { Set(all.map(\.chainID)) }
 
     public static let baseSepolia: TerminalKnownChainProfile = {
         let factory = try! EthereumAddress(
@@ -203,6 +228,12 @@ public struct TerminalKnownChainProfile: Hashable, Sendable {
         return TerminalKnownChainProfile(
             chainID: 84_532,
             networkName: "Base Sepolia",
+            isTestnet: true,
+            nativeCurrencySymbol: "ETH",
+            nativeCurrencyDecimals: 18,
+            minimumConfirmationBlocks: 2,
+            defaultConfirmationBlocks: 2,
+            minimumOperatorNativeReserve: UInt256(100_000_000_000_000),
             rpcEndpoint: URL(string: "https://sepolia.base.org")!,
             protocolVersion: .v1_4_1,
             factory: factory,
@@ -213,4 +244,5 @@ public struct TerminalKnownChainProfile: Hashable, Sendable {
             create2TestVector: vector
         )
     }()
+
 }

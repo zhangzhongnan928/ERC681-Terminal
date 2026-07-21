@@ -6,6 +6,10 @@ import com.openpasskey.erc681.NetworkValidation
 import com.openpasskey.erc681.ReadOnlyRpcClient
 import com.openpasskey.terminal.chain.PaymentToken
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
+import com.openpasskey.terminal.chain.TerminalPaymentProfile
+import com.openpasskey.terminal.chain.resolvedPaymentProfiles
+import com.openpasskey.terminal.chain.selectedPaymentProfile
+import com.openpasskey.terminal.chain.upsertingProfile
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
 import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
@@ -63,6 +67,7 @@ private class RpcProvisioningChainReader(
 data class ProvisioningResult(
     val configuration: TerminalConfigSnapshot,
     val token: PaymentToken,
+    val profile: TerminalPaymentProfile,
 )
 
 /** Derives a complete candidate in memory and invokes the store exactly once after every check. */
@@ -122,19 +127,20 @@ class TerminalProvisioner(
             }
         }
 
-        val candidate = TerminalConfigSnapshot(
+        val paymentProfile = TerminalPaymentProfile(
             networkName = profile.networkName,
             rpcUrl = rpcUrl,
             chainId = profile.chainId,
             factoryAddress = profile.factory.value,
             receiverImplementationAddress = profile.receiverImplementation.value,
             vaultAddress = payload.vault.value,
-            confirmationBlocks = previous.confirmationBlocks,
-            paymentTokens = listOf(token),
+            confirmationBlocks = profile.defaultConfirmationBlocks,
+            token = token,
             protocolVersion = profile.protocolVersion,
-            provisionedOperatorAddress = payload.operator.value,
-            provisioned = true,
         )
+        // A v1 portal QR still describes one complete profile. Repeated scans now upsert that
+        // profile into the local catalog instead of replacing other vault/token/network choices.
+        val candidate = previous.upsertingProfile(paymentProfile, payload.operator.value)
         currentCoroutineContext().ensureActive()
         lifecycleGate.withExclusiveMutation {
             currentCoroutineContext().ensureActive()
@@ -152,7 +158,11 @@ class TerminalProvisioner(
                 "Terminal configuration changed during provisioning; scan the portal QR again"
             }
         }
-        return ProvisioningResult(candidate, token)
+        return ProvisioningResult(
+            candidate,
+            token,
+            requireNotNull(candidate.selectedPaymentProfile()),
+        )
     }
 
     private fun validateTrustedProvenance(
@@ -195,16 +205,20 @@ class TerminalProvisioner(
         profile: KnownChainProfile,
         vault: EvmAddress,
     ): String {
-        if (previous.chainId != profile.chainId) return profile.rpcUrl
+        val existingRpc = previous.resolvedPaymentProfiles()
+            .firstOrNull { it.chainId == profile.chainId }
+            ?.rpcUrl
+            ?: previous.rpcUrl.takeIf { previous.chainId == profile.chainId }
+            ?: return profile.rpcUrl
         val overrideIsValid = runCatching {
             NetworkConfig(
                 chainId = profile.chainId,
-                rpcUrl = previous.rpcUrl,
+                rpcUrl = existingRpc,
                 factory = profile.factory,
                 receiverImplementation = profile.receiverImplementation,
                 vault = vault,
             )
         }.isSuccess
-        return if (overrideIsValid) previous.rpcUrl else profile.rpcUrl
+        return if (overrideIsValid) existingRpc else profile.rpcUrl
     }
 }

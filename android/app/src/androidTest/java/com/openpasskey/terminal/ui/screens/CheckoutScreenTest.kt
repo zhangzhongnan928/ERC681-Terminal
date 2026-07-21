@@ -23,7 +23,9 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.openpasskey.terminal.chain.PaymentToken
+import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.viewmodel.TerminalSetupStatus
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -38,14 +40,12 @@ class CheckoutScreenTest {
         composeRule.setContent {
             CheckoutReadyScreen(
                 amount = amount,
-                token = TOKEN,
-                tokens = listOf(TOKEN),
-                networkName = "Base Sepolia",
-                chainId = 84532,
+                profile = PROFILE,
+                profiles = listOf(PROFILE),
                 error = null,
                 isCreating = false,
                 onAmountChanged = { amount = it },
-                onTokenSelected = {},
+                onProfileSelected = {},
                 onCreateInvoice = {},
             )
         }
@@ -117,14 +117,12 @@ class CheckoutScreenTest {
         composeRule.setContent {
             CheckoutReadyScreen(
                 amount = amount,
-                token = TOKEN.copy(decimals = 0),
-                tokens = listOf(TOKEN.copy(decimals = 0)),
-                networkName = "Base Sepolia",
-                chainId = 84532,
+                profile = PROFILE.copy(token = TOKEN.copy(decimals = 0)),
+                profiles = listOf(PROFILE.copy(token = TOKEN.copy(decimals = 0))),
                 error = null,
                 isCreating = false,
                 onAmountChanged = {},
-                onTokenSelected = {},
+                onProfileSelected = {},
                 onCreateInvoice = {},
             )
         }
@@ -136,11 +134,54 @@ class CheckoutScreenTest {
             .assertIsEnabled()
     }
 
+    @Test
+    fun sameSymbolAndVaultProfilesExposeTokenAddressAndCanBeSelected() {
+        val second = PROFILE.copy(
+            token = TOKEN.copy(address = "0x5555555555555555555555555555555555555555"),
+        )
+        var selected by mutableStateOf(PROFILE)
+        composeRule.setContent {
+            CheckoutReadyScreen(
+                amount = "",
+                profile = selected,
+                profiles = listOf(PROFILE, second),
+                error = null,
+                isCreating = false,
+                onAmountChanged = {},
+                onProfileSelected = { selected = it },
+                onCreateInvoice = {},
+            )
+        }
+
+        composeRule.onNodeWithTag("checkout_profile_selector")
+            .assertIsEnabled()
+            .performClick()
+        composeRule.onNodeWithText(
+            "AUD · Base Sepolia\nVault 0x4444…4444 · Token 0x5555…5555",
+        ).assertIsDisplayed().performClick()
+
+        composeRule.runOnIdle { assertEquals(second, selected) }
+        composeRule.onNodeWithText(
+            "AUD · Base Sepolia · 0x4444…4444 · 0x5555…5555",
+        ).assertIsDisplayed()
+    }
+
     private companion object {
         val TOKEN = PaymentToken(
             address = "0x1111111111111111111111111111111111111111",
             symbol = "AUD",
             decimals = 2,
+        )
+        val PROFILE = TerminalPaymentProfile(
+            networkName = "Base Sepolia",
+            rpcUrl = "https://sepolia.base.org",
+            chainId = 84532,
+            factoryAddress = "0x2222222222222222222222222222222222222222",
+            receiverImplementationAddress = "0x3333333333333333333333333333333333333333",
+            vaultAddress = "0x4444444444444444444444444444444444444444",
+            confirmationBlocks = 2,
+            token = TOKEN,
+            protocolVersion = "1.4.1",
         )
     }
 }

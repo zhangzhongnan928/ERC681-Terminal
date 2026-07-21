@@ -9,14 +9,21 @@ import com.openpasskey.erc681.ReadOnlyRpcClient
 import com.openpasskey.terminal.admin.AdminPinStore
 import com.openpasskey.terminal.admin.AdminPinVerification
 import com.openpasskey.terminal.chain.ChainConfig
+import com.openpasskey.terminal.chain.ChainConfigMigrationNotice
 import com.openpasskey.terminal.chain.PaymentToken
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
+import com.openpasskey.terminal.chain.TerminalPaymentProfile
+import com.openpasskey.terminal.chain.resolvedPaymentProfiles
+import com.openpasskey.terminal.chain.hasCompleteProvisioning
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
+import com.openpasskey.terminal.provisioning.KnownChainProfile
+import com.openpasskey.terminal.provisioning.minimumOperatorNativeReserveDisplay
 import com.openpasskey.terminal.provisioning.TerminalProvisioner
 import com.openpasskey.terminal.provisioning.TerminalProvisioningPayloadCodec
 import com.openpasskey.terminal.settlement.SettlementChainClient
 import com.openpasskey.terminal.settlement.Web3jSettlementChainClient
 import com.openpasskey.terminal.lifecycle.TerminalResetCoordinator
+import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
 import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
 import com.openpasskey.terminal.wallet.OperatorWalletStore
@@ -51,8 +58,30 @@ internal fun shouldRestartActiveReadinessRefresh(
     refreshActive: Boolean,
 ): Boolean = refreshActive && trigger == ReadinessRefreshTrigger.INVOICE_FAILURE
 
+/** Main-thread callback ownership for one readiness generation. Cancellation is a false result. */
+internal class ReadinessRefreshCallbacks {
+    private val callbacks = mutableListOf<(Boolean) -> Unit>()
+
+    fun add(callback: (Boolean) -> Unit) {
+        callbacks += callback
+    }
+
+    fun complete(ready: Boolean) {
+        if (callbacks.isEmpty()) return
+        val pending = callbacks.toList()
+        callbacks.clear()
+        pending.forEach { callback -> callback(ready) }
+    }
+
+    fun cancel() = complete(ready = false)
+}
+
 data class SettingsState(
     val networkName: String = "",
+    val isTestnet: Boolean = false,
+    val nativeCurrencySymbol: String = "native currency",
+    val nativeCurrencyDecimals: Int = 18,
+    val minimumOperatorNativeReserveWei: String = "0",
     val rpcUrl: String = "",
     val chainId: Long = 0,
     val factoryAddress: String = "",
@@ -60,6 +89,8 @@ data class SettingsState(
     val vaultAddress: String = "",
     val confirmationBlocks: Int = 0,
     val paymentTokens: List<PaymentToken> = emptyList(),
+    val paymentProfiles: List<TerminalPaymentProfile> = emptyList(),
+    val selectedProfileId: String? = null,
     val protocolVersion: String = "",
     val provisionedOperatorAddress: String? = null,
     val provisioned: Boolean = false,
@@ -80,6 +111,7 @@ data class SettingsState(
     val adminRetryAfterSeconds: Long = 0,
     val refreshingOperator: Boolean = false,
     val message: String? = null,
+    val migrationNotice: String? = null,
     val isError: Boolean = false,
 )
 
@@ -150,6 +182,7 @@ class SettingsViewModel(
     private val adminPinStore: AdminPinStore,
     private val provisioner: TerminalProvisioner,
     private val resetCoordinator: TerminalResetCoordinator,
+    private val lifecycleGate: TerminalLifecycleGate,
     private val clientFactory: (String) -> SettlementChainClient = ::Web3jSettlementChainClient,
 ) : ViewModel() {
     private val adminSession = AdminSessionGate()
@@ -159,12 +192,30 @@ class SettingsViewModel(
     private var provisioningGeneration = 0L
     private var walletCreationAuthorizationEpoch: Long? = null
     private var validatedConfiguration: TerminalConfigSnapshot? = null
-    private val refreshCompletionCallbacks = mutableListOf<(Boolean) -> Unit>()
+    private val refreshCompletionCallbacks = ReadinessRefreshCallbacks()
+    private var migrationNoticeMessage = run {
+        // snapshot() performs any v2 -> v3 migration before the notice is queried.
+        chainConfig.snapshot()
+        chainConfig.pendingMigrationNotice()?.let(::chainConfigMigrationNoticeMessage)
+    }
     private val _state = MutableStateFlow(load())
     val state: StateFlow<SettingsState> = _state.asStateFlow()
 
     init {
         refreshOperatorStatus()
+    }
+
+    fun acknowledgeMigrationNotice() {
+        if (migrationNoticeMessage == null) return
+        if (!chainConfig.acknowledgeMigrationNotice()) {
+            _state.value = _state.value.copy(
+                message = "Unable to save acknowledgement. The security update will remain visible.",
+                isError = true,
+            )
+            return
+        }
+        migrationNoticeMessage = null
+        _state.value = _state.value.copy(migrationNotice = null)
     }
 
     private fun load(
@@ -178,6 +229,9 @@ class SettingsViewModel(
         val pairing = wallet.address?.let {
             runCatching { TerminalProvisioningPayloadCodec.encodeOperatorPairing(it) }.getOrNull()
         }
+        val networkPolicy = runCatching {
+            KnownChainPolicy.requireProfile(config.chainId)
+        }.getOrNull()
         val operatorBindingMatches = config.provisioned && wallet.address != null &&
             config.provisionedOperatorAddress?.equals(wallet.address, true) == true
         val status = when {
@@ -192,6 +246,13 @@ class SettingsViewModel(
         }
         return SettingsState(
             networkName = config.networkName,
+            isTestnet = networkPolicy?.isTestnet ?: false,
+            nativeCurrencySymbol = networkPolicy?.nativeCurrencySymbol ?: "native currency",
+            nativeCurrencyDecimals = networkPolicy?.nativeCurrencyDecimals ?: 18,
+            minimumOperatorNativeReserveWei = networkPolicy
+                ?.minimumOperatorNativeReserve
+                ?.toString()
+                ?: "0",
             rpcUrl = config.rpcUrl,
             chainId = config.chainId,
             factoryAddress = config.factoryAddress,
@@ -199,6 +260,8 @@ class SettingsViewModel(
             vaultAddress = config.vaultAddress,
             confirmationBlocks = config.confirmationBlocks,
             paymentTokens = config.paymentTokens,
+            paymentProfiles = config.resolvedPaymentProfiles(),
+            selectedProfileId = config.selectedProfileId,
             protocolVersion = config.protocolVersion,
             provisionedOperatorAddress = config.provisionedOperatorAddress,
             provisioned = config.provisioned,
@@ -224,6 +287,7 @@ class SettingsViewModel(
             } else {
                 null
             },
+            migrationNotice = migrationNoticeMessage,
             isError = isError || wallet.availability == OperatorWalletAvailability.UNAVAILABLE ||
                 (config.provisioned && !operatorBindingMatches),
         )
@@ -412,7 +476,9 @@ class SettingsViewModel(
                 }
                 adminSession.lock()
                 _state.value = load(
-                    "Provisioned ${result.token.symbol}. Waiting for vault authorization and terminal gas funding.",
+                    "Added ${result.token.symbol} on ${result.profile.networkName}. " +
+                        "${result.configuration.resolvedPaymentProfiles().size} payment profile(s) configured. " +
+                        "Waiting for vault authorization and terminal gas funding.",
                 )
                 refreshOperatorStatus()
             } catch (error: CancellationException) {
@@ -429,7 +495,7 @@ class SettingsViewModel(
         }
     }
 
-    fun provisionManual(vaultAddress: String, tokenAddress: String) {
+    fun provisionManual(chainId: Long, vaultAddress: String, tokenAddress: String) {
         if (!adminSession.isUnlocked()) {
             _state.value = _state.value.copy(
                 message = "Unlock Admin/setup before using manual setup.",
@@ -444,7 +510,7 @@ class SettingsViewModel(
         }
         val payload = runCatching {
             TerminalProvisioningPayloadCodec.encodeProvisioning(
-                chainId = KnownChainPolicy.requireProfile(84532).chainId,
+                chainId = KnownChainPolicy.requireProfile(chainId).chainId,
                 vault = vaultAddress,
                 token = tokenAddress,
                 operator = operator,
@@ -457,6 +523,62 @@ class SettingsViewModel(
             return
         }
         provision(payload)
+    }
+
+    fun removePaymentProfile(profileId: String) {
+        if (provisioningJob?.isActive == true) {
+            _state.value = _state.value.copy(
+                message = "Wait for provisioning to finish before removing a payment profile.",
+                isError = true,
+            )
+            return
+        }
+        val authorizationEpoch = runCatching {
+            requireNotNull(
+                requireAdminAuthorizationEpoch(
+                    adminPinStore.snapshot().configured,
+                    adminSession,
+                    "removing a payment profile",
+                ),
+            )
+        }.getOrElse { error ->
+            _state.value = _state.value.copy(message = error.message, isError = true)
+            return
+        }
+        val removing = chainConfig.snapshot().resolvedPaymentProfiles()
+            .firstOrNull { it.id == profileId }
+        if (removing == null) {
+            _state.value = _state.value.copy(
+                message = "Payment profile is no longer configured.",
+                isError = true,
+            )
+            return
+        }
+        invalidateReadinessRefresh()
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    removePaymentProfileExclusively(
+                        lifecycleGate = lifecycleGate,
+                        profileId = profileId,
+                        commitWithAuthorization = { commit ->
+                            adminSession.withAuthorization(authorizationEpoch, commit)
+                        },
+                        removeProfile = chainConfig::removeProfile,
+                    )
+                }
+                adminSession.lock()
+                val remaining = chainConfig.snapshot().resolvedPaymentProfiles().size
+                _state.value = load(paymentProfileRemovalSuccessMessage(removing, remaining))
+                if (remaining > 0) refreshOperatorStatus()
+            } catch (error: Exception) {
+                _state.value = load(
+                    error.message ?: "Unable to remove the payment profile",
+                    isError = true,
+                )
+                refreshOperatorStatus()
+            }
+        }
     }
 
     fun refreshOperatorStatus() = refreshOperatorStatusInternal()
@@ -472,6 +594,11 @@ class SettingsViewModel(
         ) {
             invalidateReadinessRefresh()
         }
+        refreshOperatorStatusInternal(onComplete)
+    }
+
+    fun refreshOperatorStatusAfterProfileSelection(onComplete: (Boolean) -> Unit) {
+        invalidateReadinessRefresh()
         refreshOperatorStatusInternal(onComplete)
     }
 
@@ -496,7 +623,16 @@ class SettingsViewModel(
             completeReadinessCallbacks(ready = false)
             return
         }
-        _state.value = _state.value.copy(
+        val networkPolicy = try {
+            KnownChainPolicy.requireProfile(config.chainId)
+        } catch (error: Exception) {
+            _state.value = load(error.message ?: "Unsupported terminal network", isError = true)
+            completeReadinessCallbacks(ready = false)
+            return
+        }
+        // Profile selection is owned by ChainConfig and may have changed from Checkout. Reflect
+        // the new network/vault/token immediately while its readiness RPC is in flight.
+        _state.value = load(setupStatusOverride = TerminalSetupStatus.PROVISIONING).copy(
             configurationValidated = false,
             refreshingOperator = true,
             message = null,
@@ -547,7 +683,8 @@ class SettingsViewModel(
                 val refreshedWallet = walletStore.snapshot()
                 val status = when {
                     !result.authorized -> TerminalSetupStatus.AWAITING_AUTHORIZATION
-                    result.balance < MINIMUM_GAS_RESERVE_WEI -> TerminalSetupStatus.AWAITING_GAS
+                    result.balance < networkPolicy.minimumOperatorNativeReserve ->
+                        TerminalSetupStatus.AWAITING_GAS
                     else -> TerminalSetupStatus.READY
                 }
                 if (generation != refreshGeneration) return@launch
@@ -566,7 +703,7 @@ class SettingsViewModel(
                         TerminalSetupStatus.AWAITING_AUTHORIZATION ->
                             "Authorize this operator address from the merchant portal."
                         TerminalSetupStatus.AWAITING_GAS ->
-                            "Authorization confirmed. Fund the operator with at least 0.0001 native currency."
+                            awaitingGasReadinessMessage(networkPolicy)
                         TerminalSetupStatus.READY -> "Terminal is ready to create payments."
                         else -> null
                     },
@@ -644,16 +781,16 @@ class SettingsViewModel(
         refreshGeneration += 1
         validatedConfiguration = null
         _state.value = _state.value.copy(configurationValidated = false)
-        completeReadinessCallbacks(ready = false)
+        // A cancelled pass completes as not ready. Generic callbacks cannot release profile
+        // selection, while the exact sequence/profile-owned callback can terminate its pending
+        // state without making checkout ready.
+        refreshCompletionCallbacks.cancel()
         refreshJob?.cancel()
         refreshJob = null
     }
 
     private fun completeReadinessCallbacks(ready: Boolean) {
-        if (refreshCompletionCallbacks.isEmpty()) return
-        val callbacks = refreshCompletionCallbacks.toList()
-        refreshCompletionCallbacks.clear()
-        callbacks.forEach { callback -> callback(ready) }
+        refreshCompletionCallbacks.complete(ready)
     }
 
     class Factory(
@@ -662,6 +799,7 @@ class SettingsViewModel(
         private val adminPinStore: AdminPinStore,
         private val provisioner: TerminalProvisioner,
         private val resetCoordinator: TerminalResetCoordinator,
+        private val lifecycleGate: TerminalLifecycleGate,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T = SettingsViewModel(
@@ -670,13 +808,48 @@ class SettingsViewModel(
             adminPinStore,
             provisioner,
             resetCoordinator,
+            lifecycleGate,
         ) as T
     }
 
     private data class OperatorChainStatus(val balance: BigInteger, val authorized: Boolean)
 
-    companion object {
-        val MINIMUM_GAS_RESERVE_WEI: BigInteger = BigInteger("100000000000000")
+}
+
+internal fun paymentProfileRemovalSuccessMessage(
+    removed: TerminalPaymentProfile,
+    remainingProfileCount: Int,
+): String {
+    require(remainingProfileCount >= 0) { "Remaining profile count cannot be negative" }
+    val prefix = "Removed ${removed.token.symbol} on ${removed.networkName}. "
+    return if (remainingProfileCount == 0) {
+        prefix + "No payment profiles remain. Checkout is unavailable; add a portal payment " +
+            "profile in setup before accepting payments. Existing invoices and settlements are unchanged."
+    } else {
+        prefix + "$remainingProfileCount payment profile(s) remain. " +
+            "Existing invoices and settlements are unchanged."
+    }
+}
+
+internal fun chainConfigMigrationNoticeMessage(notice: ChainConfigMigrationNotice): String {
+    val count = notice.adjustedConfirmationProfileIds.size
+    val subject = if (count == 1) "1 existing payment profile" else "$count existing payment profiles"
+    return "Confirmation requirements for $subject were increased to the network minimum during " +
+        "this update. Terminal setup was preserved; review readiness before accepting payments."
+}
+
+internal fun awaitingGasReadinessMessage(networkPolicy: KnownChainProfile): String =
+    "Authorization confirmed. Fund the operator with at least " +
+        "${networkPolicy.minimumOperatorNativeReserveDisplay()}."
+
+internal suspend fun removePaymentProfileExclusively(
+    lifecycleGate: TerminalLifecycleGate,
+    profileId: String,
+    commitWithAuthorization: ((() -> Boolean) -> Boolean),
+    removeProfile: (String) -> Boolean,
+) = lifecycleGate.withExclusiveMutation {
+    check(commitWithAuthorization { removeProfile(profileId) }) {
+        "Unable to remove the payment profile"
     }
 }
 
@@ -684,7 +857,9 @@ internal fun operatorFundingPayload(
     config: TerminalConfigSnapshot,
     wallet: OperatorWalletSnapshot,
 ): String? {
-    if (!config.provisioned || wallet.availability != OperatorWalletAvailability.READY) return null
+    if (!config.provisioned || !config.hasCompleteProvisioning() ||
+        wallet.availability != OperatorWalletAvailability.READY
+    ) return null
     val walletAddress = wallet.address ?: return null
     if (config.provisionedOperatorAddress?.equals(walletAddress, true) != true) return null
     return "ethereum:${EvmAddress.parse(walletAddress).value}@${config.chainId}"

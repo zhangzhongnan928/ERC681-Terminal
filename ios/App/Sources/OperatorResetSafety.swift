@@ -46,6 +46,28 @@ enum OperatorResetSafety {
         }
     }
 
+    static func requireEmptyNativeBalance(
+        _ result: OperatorResetNetworkBalance
+    ) throws {
+        guard result.snapshot.isExactlyZero else {
+            throw OperatorResetSafetyError.nativeBalanceNotZeroOnNetwork(
+                network: result.network,
+                latest: result.snapshot.latest,
+                pending: result.snapshot.pending
+            )
+        }
+    }
+
+    static func networkReadFailure(
+        _ error: Error,
+        network: OperatorResetNetworkContext
+    ) -> OperatorResetSafetyError {
+        .networkBalanceUnreadable(
+            network: network,
+            detail: error.localizedDescription
+        )
+    }
+
     static func isUnresolved(_ phase: SettlementTransactionPhase) -> Bool {
         switch phase {
         case .pending, .mined, .unknown, .needsReview:
@@ -176,14 +198,58 @@ enum OperatorResetSafety {
     }
 }
 
+struct OperatorResetNetworkContext: Hashable, Sendable {
+    let chainID: UInt64
+    let networkName: String
+    let nativeCurrencySymbol: String
+    let nativeCurrencyDecimals: UInt8
+
+    init(_ profile: TerminalKnownChainProfile) {
+        chainID = profile.chainID
+        networkName = profile.networkName
+        nativeCurrencySymbol = profile.nativeCurrencySymbol
+        nativeCurrencyDecimals = profile.nativeCurrencyDecimals
+    }
+
+    var label: String { "\(networkName) (chain \(chainID))" }
+}
+
+struct OperatorResetNetworkBalance: Hashable, Sendable {
+    let network: OperatorResetNetworkContext
+    let snapshot: OperatorNativeBalanceSnapshot
+}
+
 enum OperatorResetSafetyError: LocalizedError, Equatable {
     case nativeBalanceNotZero(latest: UInt256, pending: UInt256)
+    case nativeBalanceNotZeroOnNetwork(
+        network: OperatorResetNetworkContext,
+        latest: UInt256,
+        pending: UInt256
+    )
+    case networkBalanceUnreadable(network: OperatorResetNetworkContext, detail: String)
 
     var errorDescription: String? {
         switch self {
         case let .nativeBalanceNotZero(latest, pending):
             "Withdraw all operator gas before deleting this key. Latest balance: \(latest.decimalString) wei; pending balance: \(pending.decimalString) wei. The key is unchanged."
+        case let .nativeBalanceNotZeroOnNetwork(network, latest, pending):
+            "Withdraw all \(network.nativeCurrencySymbol) from the operator on \(network.label) "
+                + "before reset. Latest balance: \(formatted(latest, network: network)); "
+                + "pending balance: \(formatted(pending, network: network)). The key is unchanged."
+        case let .networkBalanceUnreadable(network, detail):
+            "Unable to verify the operator balance on \(network.label); reset was cancelled. \(detail)"
         }
+    }
+
+    private func formatted(
+        _ amount: UInt256,
+        network: OperatorResetNetworkContext
+    ) -> String {
+        let display = TokenAmount(
+            rawValue: amount,
+            decimals: network.nativeCurrencyDecimals
+        ).displayString()
+        return "\(display) \(network.nativeCurrencySymbol) (\(amount.decimalString) wei)"
     }
 }
 

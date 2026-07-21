@@ -1,6 +1,12 @@
 package com.openpasskey.erc681
 
 /** Locally reproduces SessionFactory.computeReceiver without trusting an RPC response. */
+data class Create2ReceiverDerivation(
+    val salt: String,
+    val initCodeHash: String,
+    val receiver: EvmAddress,
+)
+
 class Create2ReceiverResolver(
     val factory: EvmAddress,
     val receiverImplementation: EvmAddress,
@@ -11,6 +17,11 @@ class Create2ReceiverResolver(
     }
 
     fun resolve(vault: EvmAddress, invoiceId: InvoiceId): EvmAddress {
+        return derive(vault, invoiceId).receiver
+    }
+
+    /** Exposes every published CREATE2 vector component for deployment-pin conformance tests. */
+    fun derive(vault: EvmAddress, invoiceId: InvoiceId): Create2ReceiverDerivation {
         require(!vault.isZero) { "Vault address must not be zero" }
 
         val salt = Keccak256.digest(abiEncode(vault, invoiceId))
@@ -21,7 +32,11 @@ class Create2ReceiverResolver(
         salt.copyInto(preimage, destinationOffset = 21)
         initCodeHash.copyInto(preimage, destinationOffset = 53)
         val hash = Keccak256.digest(preimage)
-        return EvmAddress.fromBytes(hash.copyOfRange(12, 32))
+        return Create2ReceiverDerivation(
+            salt = Hex.encode(salt),
+            initCodeHash = Hex.encode(initCodeHash),
+            receiver = EvmAddress.fromBytes(hash.copyOfRange(12, 32)),
+        )
     }
 
     fun initCode(vault: EvmAddress): ByteArray {

@@ -4,6 +4,7 @@ import com.openpasskey.terminal.chain.PaymentToken
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
 import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
+import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.math.BigInteger
@@ -24,13 +25,18 @@ class InvoiceReadinessPolicyTest {
         assertThrows(IllegalStateException::class.java) {
             requireTerminalReadiness(config(), wallet(), ready().copy(authorized = false))
         }
-        assertThrows(IllegalStateException::class.java) {
+        val lowGas = assertThrows(IllegalStateException::class.java) {
             requireTerminalReadiness(
                 config(),
                 wallet(),
-                ready().copy(nativeBalance = InvoiceRepository.MINIMUM_GAS_RESERVE_WEI - BigInteger.ONE),
+                ready().copy(
+                    nativeBalance = KnownChainPolicy.requireProfile(84532)
+                        .minimumOperatorNativeReserve - BigInteger.ONE,
+                ),
             )
         }
+        org.junit.Assert.assertTrue(lowGas.message?.contains("0.0001 ETH") == true)
+        org.junit.Assert.assertFalse(lowGas.message?.contains("wei") == true)
     }
 
     @Test
@@ -69,7 +75,7 @@ class InvoiceReadinessPolicyTest {
 
     private fun ready() = InvoiceReadiness(
         authorized = true,
-        nativeBalance = InvoiceRepository.MINIMUM_GAS_RESERVE_WEI,
+        nativeBalance = KnownChainPolicy.requireProfile(84532).minimumOperatorNativeReserve,
     )
 
     private fun config() = TerminalConfigSnapshot(

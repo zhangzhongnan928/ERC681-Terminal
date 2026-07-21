@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "rail": "OPK terminal known EVM network profiles",
+  "notes": [
+    "Every enabled network is pinned in the native apps; provisioning QR payloads cannot supply or override these trust anchors.",
+    "Base Sepolia is the only production-app-enabled network in this release. Base Mainnet remains disabled pending a frozen or multisig-governed, implementation-pinned deployment.",
+    "The CREATE2 vectors use the same example vault and invoice ID so implementations can prove that network-specific factory and receiver implementation constants produce the published receiver.",
+    "One payment profile selects exactly one network, vault, and ERC-20 token for an invoice."
+  ],
+  "networks": [
+    {
+      "chainId": 84532,
+      "networkName": "Base Sepolia",
+      "isTestnet": true,
+      "nativeCurrencySymbol": "ETH",
+      "nativeCurrencyDecimals": 18,
+      "minimumConfirmationBlocks": 2,
+      "defaultConfirmationBlocks": 2,
+      "minimumOperatorNativeReserveWei": "100000000000000",
+      "rpcUrl": "https://sepolia.base.org",
+      "protocolVersion": "1.4.1",
+      "factory": "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
+      "receiverImplementation": "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
+      "vaultRuntimeCodeHash": "0xe7310159a3c109346b137a989bfd213e65fe48ded6eb84dbe57a37d7a047513e",
+      "create2TestVector": {
+        "vault": "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1",
+        "invoiceId": "0x294d3b9eb0136d18f2a3e8aa9c10224029893c244e822a15902256d778f7f729",
+        "salt": "0x87810f9819659ca2d4dd62a4e7b43c87f611148a2ea26782b9b8da39a63353ce",
+        "initCodeHash": "0x59a3a359c30137feff57a746e7430ee4aef036fe41906d52b4f60a78948a2051",
+        "expectedReceiver": "0x9107decd2cb06c57c40a663648e19cde1d52f606"
+      }
+    }
+  ]
+}
