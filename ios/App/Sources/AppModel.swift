@@ -29,15 +29,17 @@ final class AppModel: ObservableObject {
         didSet {
             AppPreferences.saveSettings(settings)
             validatedConfigurationFingerprint = nil
+            validationMessage = "On-chain validation required"
             settlementCoordinator = nil
             settlementCoordinatorKey = nil
             operatorStatus = nil
         }
     }
-    @Published private(set) var validationMessage = "Not validated"
+    @Published private(set) var validationMessage = "On-chain validation required"
     @Published private(set) var activeRequest: PaymentRequest?
     @Published private(set) var activeObservation: PaymentObservation?
     @Published private(set) var isBusy = false
+    @Published private(set) var isRefreshingReadiness = false
     @Published private(set) var operationBusy = false
     @Published private(set) var operatorAddress: EthereumAddress?
     @Published private(set) var operatorStatus: OperatorChainStatus?
@@ -57,6 +59,13 @@ final class AppModel: ObservableObject {
     private let historicalConfigurationValidator: any HistoricalTerminalConfigurationValidating
     private let adminPINStore: any AdminPINManaging
     private let persistMainContext: (ModelContext) throws -> Void
+    private let currentConfigurationValidation: @Sendable (
+        TerminalConfiguration
+    ) async throws -> Void
+    private let operatorStatusReader: (@Sendable (
+        TerminalConfiguration,
+        EthereumAddress
+    ) async throws -> OperatorChainStatus)?
     private let operatorResetBalanceReader: (@Sendable (
         TerminalConfiguration,
         EthereumAddress
@@ -78,6 +87,16 @@ final class AppModel: ObservableObject {
         historicalConfigurationValidator: any HistoricalTerminalConfigurationValidating = TerminalProvisioner(),
         adminPINStore: any AdminPINManaging = KeychainAdminPINStore(),
         persistMainContext: @escaping (ModelContext) throws -> Void = { try $0.save() },
+        currentConfigurationValidation: @escaping @Sendable (
+            TerminalConfiguration
+        ) async throws -> Void = { configuration in
+            let rpc = try JSONRPCEthereumClient(endpoint: configuration.rpcEndpoints[0])
+            _ = try await ConfigurationValidator(rpc: rpc).validate(configuration)
+        },
+        operatorStatusReader: (@Sendable (
+            TerminalConfiguration,
+            EthereumAddress
+        ) async throws -> OperatorChainStatus)? = nil,
         operatorResetBalanceReader: (@Sendable (
             TerminalConfiguration,
             EthereumAddress
@@ -90,6 +109,8 @@ final class AppModel: ObservableObject {
         self.historicalConfigurationValidator = historicalConfigurationValidator
         self.adminPINStore = adminPINStore
         self.persistMainContext = persistMainContext
+        self.currentConfigurationValidation = currentConfigurationValidation
+        self.operatorStatusReader = operatorStatusReader
         self.operatorResetBalanceReader = operatorResetBalanceReader
         settings = AppPreferences.loadSettings()
         let configured = (try? adminPINStore.isConfigured) ?? false
@@ -211,7 +232,7 @@ final class AppModel: ObservableObject {
             // This is the provisioning flow's single settings mutation and persistence point.
             settings = candidate
             validatedConfigurationFingerprint = candidate.validationFingerprint
-            validationMessage = "Validated \(derived.validationReport.checks.count) checks on chain \(derived.validationReport.chainID)"
+            validationMessage = "On-chain validation passed"
             provisioningMessage = "Provisioning validated and saved."
             errorMessage = nil
             lockAdmin()
@@ -223,6 +244,10 @@ final class AppModel: ObservableObject {
     }
 
     func refreshReadiness() async {
+        guard !isRefreshingReadiness else { return }
+        isRefreshingReadiness = true
+        defer { isRefreshingReadiness = false }
+
         guard settings.isProvisioned else {
             validatedConfigurationFingerprint = nil
             await refreshOperatorStatus()
@@ -1320,6 +1345,9 @@ final class AppModel: ObservableObject {
         configuration: TerminalConfiguration,
         operatorAddress: EthereumAddress
     ) async throws -> OperatorChainStatus {
+        if let operatorStatusReader {
+            return try await operatorStatusReader(configuration, operatorAddress)
+        }
         let coordinator = try coordinator(
             configuration: configuration,
             operatorAddress: operatorAddress
@@ -1388,9 +1416,8 @@ final class AppModel: ObservableObject {
 
     private func validate(_ configuration: TerminalConfiguration) async throws {
         do {
-            let rpc = try JSONRPCEthereumClient(endpoint: configuration.rpcEndpoints[0])
-            let report = try await ConfigurationValidator(rpc: rpc).validate(configuration)
-            validationMessage = "Validated \(report.checks.count) checks on chain \(report.chainID)"
+            try await currentConfigurationValidation(configuration)
+            validationMessage = "On-chain validation passed"
         } catch {
             validationMessage = "Validation failed"
             throw error

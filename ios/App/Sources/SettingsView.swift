@@ -149,6 +149,7 @@ struct SettingsView: View {
 
         Section("4. Readiness") {
             ReadinessLabel(readiness: model.terminalReadiness)
+            ValidationStatusLabel(message: model.validationMessage)
             if let status = model.operatorStatus {
                 LabeledContent(
                     "Operator balance",
@@ -164,7 +165,12 @@ struct SettingsView: View {
             } label: {
                 Label("Refresh on-chain readiness", systemImage: "arrow.clockwise")
             }
-            .disabled(model.isBusy || model.isProvisioning || model.operationBusy)
+            .disabled(
+                model.isBusy
+                    || model.isProvisioning
+                    || model.isRefreshingReadiness
+                    || model.operationBusy
+            )
         }
 
         if let operatorAddress = model.operatorAddress, model.adminPINConfigured {
@@ -318,6 +324,7 @@ struct SettingsView: View {
 
         Section("Terminal readiness") {
             ReadinessLabel(readiness: model.terminalReadiness)
+            ValidationStatusLabel(message: model.validationMessage)
             if let status = model.operatorStatus {
                 LabeledContent(
                     "ETH balance",
@@ -331,7 +338,12 @@ struct SettingsView: View {
             Button("Refresh status") {
                 Task { await model.refreshReadiness() }
             }
-            .disabled(model.isBusy || model.isProvisioning || model.operationBusy)
+            .disabled(
+                model.isBusy
+                    || model.isProvisioning
+                    || model.isRefreshingReadiness
+                    || model.operationBusy
+            )
         }
 
         if let fundingPayload = model.operatorFundingPayload {
@@ -387,6 +399,21 @@ private struct ReadinessLabel: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+private struct ValidationStatusLabel: View {
+    let message: String
+
+    var body: some View {
+        Label(message, systemImage: passed ? "checkmark.shield.fill" : "shield.lefthalf.filled")
+            .font(.subheadline)
+            .foregroundStyle(passed ? .green : .secondary)
+            .accessibilityIdentifier("onChainValidationStatus")
+    }
+
+    private var passed: Bool {
+        message == "On-chain validation passed"
     }
 }
 

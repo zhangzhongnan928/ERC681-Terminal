@@ -166,7 +166,7 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
         )
     }
 
-    Scaffold(topBar = { TopAppBar(title = { Text("Terminal Setup") }) }) { padding ->
+    Scaffold(topBar = { TopAppBar(title = { Text("Settings") }) }) { padding ->
         LazyColumn(
             modifier = Modifier.padding(padding).padding(horizontal = 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -255,7 +255,7 @@ private fun SetupStatusCard(state: SettingsState) {
             "Confirm the terminal operator transaction in the merchant portal, then refresh."
         TerminalSetupStatus.AWAITING_GAS -> "Awaiting terminal gas" to
             "Send at least 0.0001 native currency to the funding address below."
-        TerminalSetupStatus.READY -> "Ready" to
+        TerminalSetupStatus.READY -> "Terminal ready" to
             "Configuration, operator authorization, and minimum gas reserve are valid."
         TerminalSetupStatus.ERROR -> "Setup needs attention" to
             "Review the error below. Existing invoices and history remain accessible."
@@ -263,9 +263,21 @@ private fun SetupStatusCard(state: SettingsState) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(
+                configurationValidationLabel(state),
+                style = MaterialTheme.typography.labelLarge,
+                color = if (state.configurationValidated) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Text(detail, style = MaterialTheme.typography.bodySmall)
         }
     }
+}
+
+internal fun configurationValidationLabel(state: SettingsState): String = when {
+    state.refreshingOperator -> "On-chain validation in progress"
+    state.configurationValidated -> "On-chain validation passed"
+    else -> "On-chain validation not complete"
 }
 
 @Composable

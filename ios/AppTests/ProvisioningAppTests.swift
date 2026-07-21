@@ -6,6 +6,221 @@ import OPKTerminalRPC
 import SwiftData
 
 final class ProvisioningAppTests: XCTestCase {
+    func testCheckoutPresentationBlocksWhileProvisioningOrRefreshingReadiness() {
+        XCTAssertEqual(
+            CheckoutPresentationState.evaluate(
+                isSubmitting: false,
+                isProvisioning: true,
+                isRefreshingReadiness: false,
+                isBusy: false,
+                readiness: .ready
+            ),
+            .checking(.provisioning)
+        )
+        XCTAssertEqual(
+            CheckoutPresentationState.evaluate(
+                isSubmitting: false,
+                isProvisioning: false,
+                isRefreshingReadiness: true,
+                isBusy: false,
+                readiness: .ready
+            ),
+            .checkout(.checking)
+        )
+        XCTAssertEqual(
+            CheckoutPresentationState.evaluate(
+                isSubmitting: false,
+                isProvisioning: false,
+                isRefreshingReadiness: true,
+                isBusy: false,
+                readiness: .validationRequired
+            ),
+            .checking(.readiness)
+        )
+    }
+
+    func testCheckoutPresentationKeepsSubmissionAndActiveReadinessStatesDistinct() {
+        XCTAssertEqual(
+            CheckoutPresentationState.evaluate(
+                isSubmitting: true,
+                isProvisioning: false,
+                isRefreshingReadiness: false,
+                isBusy: true,
+                readiness: .validationRequired
+            ),
+            .checkout(.preparing)
+        )
+        XCTAssertEqual(
+            CheckoutPresentationState.evaluate(
+                isSubmitting: true,
+                isProvisioning: false,
+                isRefreshingReadiness: true,
+                isBusy: true,
+                readiness: .validationRequired
+            ),
+            .checkout(.preparing)
+        )
+        XCTAssertEqual(
+            CheckoutPresentationState.evaluate(
+                isSubmitting: false,
+                isProvisioning: false,
+                isRefreshingReadiness: false,
+                isBusy: false,
+                readiness: .ready
+            ),
+            .checkout(.ready)
+        )
+        XCTAssertEqual(
+            CheckoutPresentationState.evaluate(
+                isSubmitting: false,
+                isProvisioning: false,
+                isRefreshingReadiness: false,
+                isBusy: false,
+                readiness: .authorizationRequired
+            ),
+            .blocked(.authorizationRequired)
+        )
+    }
+
+    @MainActor
+    func testReadinessRefreshGateSpansValidationAndOperatorStatusPhases() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        let container = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let probe = BlockingReadinessRefreshProbe(
+            status: OperatorChainStatus(
+                chainID: 84_532,
+                balance: TerminalReadiness.minimumGasBalance,
+                isAuthorizedOperator: true,
+                isVaultOwner: false,
+                isLowGas: false
+            )
+        )
+        let namespace = UUID().uuidString
+        let model = AppModel(
+            container: container,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.tests.\(namespace)"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(address: operatorAddress),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            currentConfigurationValidation: { configuration in
+                try await probe.validate(configuration)
+            },
+            operatorStatusReader: { configuration, address in
+                try await probe.readStatus(configuration: configuration, address: address)
+            }
+        )
+        var settings = AppSettings()
+        settings.provisionedOperatorAddress = operatorAddress.hex
+        model.settings = settings
+
+        let task = Task { await model.refreshReadiness() }
+        await probe.waitUntilValidationStarts()
+        XCTAssertTrue(model.isRefreshingReadiness)
+        XCTAssertTrue(model.isBusy)
+
+        await probe.finishValidation()
+        await probe.waitUntilStatusReadStarts()
+        XCTAssertTrue(model.isRefreshingReadiness)
+        XCTAssertFalse(model.isBusy)
+
+        await probe.finishStatusRead()
+        await task.value
+        XCTAssertFalse(model.isRefreshingReadiness)
+        XCTAssertTrue(model.terminalReadiness.isReady)
+    }
+
+    func testCheckoutAmountInputPreservesConfiguredTokenPrecision() {
+        var amount = CheckoutAmountInput.cleared
+        amount = CheckoutAmountInput.appending(digit: 1, to: amount, maximumFractionDigits: 6)
+        amount = CheckoutAmountInput.appendingDecimal(to: amount, maximumFractionDigits: 6)
+        for digit in [2, 3, 4, 5, 6, 7, 8] {
+            amount = CheckoutAmountInput.appending(
+                digit: digit,
+                to: amount,
+                maximumFractionDigits: 6
+            )
+        }
+
+        XCTAssertEqual(amount, "1.234567")
+        XCTAssertTrue(CheckoutAmountInput.isPayable(amount, decimals: 6))
+    }
+
+    func testCheckoutAmountInputRejectsZeroAndIncompleteDecimal() {
+        XCTAssertFalse(CheckoutAmountInput.isPayable("", decimals: 18))
+        XCTAssertFalse(CheckoutAmountInput.isPayable("0", decimals: 18))
+        XCTAssertFalse(CheckoutAmountInput.isPayable("1.", decimals: 18))
+        XCTAssertTrue(CheckoutAmountInput.isPayable("0.000000000000000001", decimals: 18))
+    }
+
+    func testCheckoutAmountInputSupportsClearBackspaceAndZeroDecimalTokens() {
+        var normalized = CheckoutAmountInput.appending(
+            digit: 0,
+            to: "",
+            maximumFractionDigits: 18
+        )
+        normalized = CheckoutAmountInput.appending(
+            digit: 0,
+            to: normalized,
+            maximumFractionDigits: 18
+        )
+        normalized = CheckoutAmountInput.appending(
+            digit: 5,
+            to: normalized,
+            maximumFractionDigits: 18
+        )
+
+        XCTAssertEqual(normalized, "5")
+        XCTAssertEqual(
+            CheckoutAmountInput.appendingDecimal(to: "12", maximumFractionDigits: 0),
+            "12"
+        )
+        XCTAssertEqual(CheckoutAmountInput.deletingLast(from: "12.3"), "12.")
+        XCTAssertEqual(CheckoutAmountInput.deletingLast(from: ""), "")
+        XCTAssertEqual(CheckoutAmountInput.cleared, "")
+        XCTAssertTrue(CheckoutAmountInput.isPayable("12", decimals: 0))
+        XCTAssertEqual(CheckoutAmountInput.displayText(for: "", decimals: 0), "0")
+        XCTAssertEqual(CheckoutAmountInput.displayText(for: "", decimals: 1), "0.0")
+        XCTAssertEqual(CheckoutAmountInput.displayText(for: "", decimals: 18), "0.00")
+    }
+
+    func testCheckoutAmountInputStopsAtUInt256Capacity() {
+        let maximum = "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+        var amount = ""
+        for character in maximum {
+            amount = CheckoutAmountInput.appending(
+                digit: Int(String(character))!,
+                to: amount,
+                maximumFractionDigits: 0
+            )
+        }
+
+        XCTAssertEqual(amount, maximum)
+        XCTAssertEqual(
+            CheckoutAmountInput.appending(
+                digit: 0,
+                to: amount,
+                maximumFractionDigits: 0
+            ),
+            maximum
+        )
+        XCTAssertEqual(
+            CheckoutAmountInput.exactReviewText(
+                for: maximum,
+                decimals: 0,
+                symbol: "MAX"
+            ),
+            "\(maximum) MAX"
+        )
+    }
+
     func testProvisionedSettingsAreBuiltDetachedAndPreserveConfirmationPolicy() throws {
         var original = AppSettings()
         original.rpcURL = "https://example-rpc.invalid"
@@ -1328,6 +1543,74 @@ private final class UnconfiguredAdminPINStore: AdminPINManaging, @unchecked Send
     }
 
     func secondsUntilNextAttempt() throws -> Int { 0 }
+}
+
+private actor BlockingReadinessRefreshProbe {
+    private let status: OperatorChainStatus
+    private var validationStarted = false
+    private var validationReleased = false
+    private var statusReadStarted = false
+    private var statusReadReleased = false
+    private var validationStartWaiters = [CheckedContinuation<Void, Never>]()
+    private var validationReleaseContinuation: CheckedContinuation<Void, Never>?
+    private var statusStartWaiters = [CheckedContinuation<Void, Never>]()
+    private var statusReleaseContinuation: CheckedContinuation<Void, Never>?
+
+    init(status: OperatorChainStatus) {
+        self.status = status
+    }
+
+    func validate(_ configuration: TerminalConfiguration) async throws {
+        validationStarted = true
+        validationStartWaiters.forEach { $0.resume() }
+        validationStartWaiters.removeAll()
+        if !validationReleased {
+            await withCheckedContinuation { continuation in
+                validationReleaseContinuation = continuation
+            }
+        }
+    }
+
+    func readStatus(
+        configuration: TerminalConfiguration,
+        address: EthereumAddress
+    ) async throws -> OperatorChainStatus {
+        statusReadStarted = true
+        statusStartWaiters.forEach { $0.resume() }
+        statusStartWaiters.removeAll()
+        if !statusReadReleased {
+            await withCheckedContinuation { continuation in
+                statusReleaseContinuation = continuation
+            }
+        }
+        return status
+    }
+
+    func waitUntilValidationStarts() async {
+        guard !validationStarted else { return }
+        await withCheckedContinuation { continuation in
+            validationStartWaiters.append(continuation)
+        }
+    }
+
+    func finishValidation() {
+        validationReleased = true
+        validationReleaseContinuation?.resume()
+        validationReleaseContinuation = nil
+    }
+
+    func waitUntilStatusReadStarts() async {
+        guard !statusReadStarted else { return }
+        await withCheckedContinuation { continuation in
+            statusStartWaiters.append(continuation)
+        }
+    }
+
+    func finishStatusRead() {
+        statusReadReleased = true
+        statusReleaseContinuation?.resume()
+        statusReleaseContinuation = nil
+    }
 }
 
 private actor BlockingProvisioningValidator: TerminalProvisioningValidating {

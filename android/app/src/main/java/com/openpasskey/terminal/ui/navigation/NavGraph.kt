@@ -2,8 +2,8 @@ package com.openpasskey.terminal.ui.navigation
 
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.PointOfSale
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SyncAlt
 import androidx.compose.material3.Icon
@@ -31,7 +31,6 @@ import com.openpasskey.terminal.ui.screens.SettlementScreen
 import com.openpasskey.terminal.viewmodel.InvoiceViewModel
 import com.openpasskey.terminal.viewmodel.SettingsViewModel
 import com.openpasskey.terminal.viewmodel.SettlementViewModel
-import com.openpasskey.terminal.viewmodel.TerminalSetupStatus
 
 private object Routes {
     const val INVOICE = "invoice"
@@ -44,7 +43,7 @@ private object Routes {
 
 private data class NavItem(val label: String, val icon: ImageVector, val route: String)
 private val navItems = listOf(
-    NavItem("New", Icons.Default.Add, Routes.INVOICE),
+    NavItem("Checkout", Icons.Default.PointOfSale, Routes.INVOICE),
     NavItem("History", Icons.Default.History, Routes.HISTORY),
     NavItem("Settle", Icons.Default.SyncAlt, Routes.SETTLEMENT),
     NavItem("Settings", Icons.Default.Settings, Routes.SETTINGS)
@@ -75,8 +74,25 @@ fun AppNavigation(
             composable(Routes.INVOICE) {
                 InvoiceScreen(
                     viewModel = invoiceViewModel,
-                    terminalReady = settingsState.setupStatus == TerminalSetupStatus.READY,
-                    onRefreshTerminalStatus = settingsViewModel::refreshOperatorStatus,
+                    terminalStatus = settingsState.setupStatus,
+                    terminalNetworkName = settingsState.networkName,
+                    terminalChainId = settingsState.chainId,
+                    terminalStatusMessage = settingsState.message,
+                    terminalRefreshing = settingsState.refreshingOperator,
+                    terminalConfigurationValidated = settingsState.configurationValidated,
+                    onRefreshTerminalStatus = {
+                        settingsViewModel.refreshOperatorStatus(
+                            invoiceViewModel::completeReadinessRefresh,
+                        )
+                    },
+                    onRecoverFromInvoiceFailure = {
+                        settingsViewModel.refreshOperatorStatusAfterInvoiceFailure(
+                            invoiceViewModel::completeReadinessRefresh,
+                        )
+                    },
+                    onOpenSettings = {
+                        controller.navigate(Routes.SETTINGS) { launchSingleTop = true }
+                    },
                 ) { controller.navigate(Routes.payment(it)) }
             }
             composable(Routes.HISTORY) {

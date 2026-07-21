@@ -41,6 +41,16 @@ enum class TerminalSetupStatus {
     ERROR,
 }
 
+internal enum class ReadinessRefreshTrigger {
+    NORMAL,
+    INVOICE_FAILURE,
+}
+
+internal fun shouldRestartActiveReadinessRefresh(
+    trigger: ReadinessRefreshTrigger,
+    refreshActive: Boolean,
+): Boolean = refreshActive && trigger == ReadinessRefreshTrigger.INVOICE_FAILURE
+
 data class SettingsState(
     val networkName: String = "",
     val rpcUrl: String = "",
@@ -60,6 +70,7 @@ data class SettingsState(
     val operatorFundingPayload: String? = null,
     val operatorBalanceWei: String? = null,
     val operatorAuthorized: Boolean? = null,
+    val configurationValidated: Boolean = false,
     val settlementTargetVerified: Boolean = false,
     val walletHardwareBacked: Boolean = false,
     val walletStrongBoxBacked: Boolean = false,
@@ -147,6 +158,8 @@ class SettingsViewModel(
     private var provisioningJob: Job? = null
     private var provisioningGeneration = 0L
     private var walletCreationAuthorizationEpoch: Long? = null
+    private var validatedConfiguration: TerminalConfigSnapshot? = null
+    private val refreshCompletionCallbacks = mutableListOf<(Boolean) -> Unit>()
     private val _state = MutableStateFlow(load())
     val state: StateFlow<SettingsState> = _state.asStateFlow()
 
@@ -194,6 +207,7 @@ class SettingsViewModel(
             operatorWalletAddress = wallet.address,
             operatorPairingPayload = pairing,
             operatorFundingPayload = operatorFundingPayload(config, wallet),
+            configurationValidated = validatedConfiguration == config,
             settlementTargetVerified = operatorBindingMatches && wallet.isVerifiedFor(
                 config.chainId,
                 config.vaultAddress,
@@ -445,14 +459,33 @@ class SettingsViewModel(
         provision(payload)
     }
 
-    fun refreshOperatorStatus() {
+    fun refreshOperatorStatus() = refreshOperatorStatusInternal()
+
+    fun refreshOperatorStatus(onComplete: (Boolean) -> Unit) =
+        refreshOperatorStatusInternal(onComplete)
+
+    fun refreshOperatorStatusAfterInvoiceFailure(onComplete: (Boolean) -> Unit) {
+        if (shouldRestartActiveReadinessRefresh(
+                ReadinessRefreshTrigger.INVOICE_FAILURE,
+                refreshJob?.isActive == true,
+            )
+        ) {
+            invalidateReadinessRefresh()
+        }
+        refreshOperatorStatusInternal(onComplete)
+    }
+
+    private fun refreshOperatorStatusInternal(onComplete: ((Boolean) -> Unit)? = null) {
+        onComplete?.let(refreshCompletionCallbacks::add)
         if (refreshJob?.isActive == true) return
         val generation = ++refreshGeneration
         val wallet = walletStore.snapshot()
         val address = wallet.address
         val config = chainConfig.snapshot()
+        validatedConfiguration = null
         if (wallet.availability != OperatorWalletAvailability.READY || address == null || !config.provisioned) {
             _state.value = load()
+            completeReadinessCallbacks(ready = false)
             return
         }
         if (config.provisionedOperatorAddress?.equals(address, true) != true) {
@@ -460,9 +493,15 @@ class SettingsViewModel(
                 "Provisioned operator does not match the local terminal wallet",
                 isError = true,
             )
+            completeReadinessCallbacks(ready = false)
             return
         }
-        _state.value = _state.value.copy(refreshingOperator = true, message = null, isError = false)
+        _state.value = _state.value.copy(
+            configurationValidated = false,
+            refreshingOperator = true,
+            message = null,
+            isError = false,
+        )
         refreshJob = viewModelScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
@@ -512,6 +551,7 @@ class SettingsViewModel(
                     else -> TerminalSetupStatus.READY
                 }
                 if (generation != refreshGeneration) return@launch
+                validatedConfiguration = config
                 _state.value = load().copy(
                     setupStatus = status,
                     operatorBalanceWei = result.balance.toString(),
@@ -532,11 +572,13 @@ class SettingsViewModel(
                     },
                     isError = false,
                 )
+                completeReadinessCallbacks(ready = status == TerminalSetupStatus.READY)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
                 if (generation != refreshGeneration) return@launch
                 _state.value = load(error.message ?: "Unable to validate terminal readiness", isError = true)
+                completeReadinessCallbacks(ready = false)
             } finally {
                 if (generation == refreshGeneration) refreshJob = null
             }
@@ -600,8 +642,18 @@ class SettingsViewModel(
 
     private fun invalidateReadinessRefresh() {
         refreshGeneration += 1
+        validatedConfiguration = null
+        _state.value = _state.value.copy(configurationValidated = false)
+        completeReadinessCallbacks(ready = false)
         refreshJob?.cancel()
         refreshJob = null
+    }
+
+    private fun completeReadinessCallbacks(ready: Boolean) {
+        if (refreshCompletionCallbacks.isEmpty()) return
+        val callbacks = refreshCompletionCallbacks.toList()
+        refreshCompletionCallbacks.clear()
+        callbacks.forEach { callback -> callback(ready) }
     }
 
     class Factory(

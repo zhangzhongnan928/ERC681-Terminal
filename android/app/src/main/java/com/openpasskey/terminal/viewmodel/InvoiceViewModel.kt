@@ -23,7 +23,10 @@ data class CreateInvoiceState(
     val operatorWalletReady: Boolean = false,
     val isCreating: Boolean = false,
     val createdInvoice: Invoice? = null,
-    val error: String? = null
+    val error: String? = null,
+    val repositoryFailure: String? = null,
+    val readinessInvalidated: Boolean = false,
+    val readinessFailureSequence: Long = 0,
 )
 
 data class PaymentUiState(val invoice: Invoice? = null, val error: String? = null)
@@ -80,28 +83,40 @@ class InvoiceViewModel(
         val selected = _createState.value.selectedToken?.let { current ->
             tokens.firstOrNull { it.address.equals(current.address, ignoreCase = true) }
         }
-        _createState.value = _createState.value.copy(
+        val current = _createState.value
+        _createState.value = current.copy(
             tokens = tokens,
             selectedToken = selected ?: tokens.firstOrNull(),
             operatorWalletReady = repository.hasReadyOperatorWallet(),
-            error = null
+            error = current.repositoryFailure,
         )
     }
 
     fun updateAmount(value: String) {
-        if (value.isEmpty() || value.matches(Regex("^(0|[1-9][0-9]*)(\\.[0-9]*)?$"))) {
-            _createState.value = _createState.value.copy(amount = value, error = null)
+        val decimals = _createState.value.selectedToken?.decimals ?: return
+        if (isPotentialCheckoutAmount(value, decimals)) {
+            _createState.value = _createState.value.withEditedAmount(value)
         }
     }
 
     fun selectToken(token: PaymentToken) {
-        _createState.value = _createState.value.copy(selectedToken = token, error = null)
+        val current = _createState.value
+        _createState.value = current.copy(
+            selectedToken = token,
+            error = current.repositoryFailure,
+        )
     }
 
     fun createInvoice() {
         val state = _createState.value
         val token = state.selectedToken ?: run {
             _createState.value = state.copy(error = "Select a payment token.")
+            return
+        }
+        if (!isSubmittableCheckoutAmount(state.amount, token.decimals)) {
+            _createState.value = state.copy(
+                error = "Enter an amount greater than zero with no more than ${token.decimals} decimal places.",
+            )
             return
         }
         if (!chainConfig.isConfigured()) {
@@ -115,7 +130,11 @@ class InvoiceViewModel(
             )
             return
         }
-        _createState.value = state.copy(isCreating = true, error = null)
+        _createState.value = state.copy(
+            isCreating = true,
+            error = null,
+            repositoryFailure = null,
+        )
         viewModelScope.launch {
             try {
                 val invoice = repository.createInvoice(state.amount, token)
@@ -124,16 +143,24 @@ class InvoiceViewModel(
                     createdInvoice = invoice
                 )
             } catch (error: Exception) {
-                _createState.value = _createState.value.copy(
-                    isCreating = false,
-                    error = error.message ?: "Invoice validation failed."
+                _createState.value = _createState.value.withRepositoryFailure(
+                    error.message ?: "Invoice validation failed.",
                 )
             }
         }
     }
 
+    fun completeReadinessRefresh(ready: Boolean) {
+        _createState.value = _createState.value.afterReadinessRefresh(ready)
+    }
+
     fun consumeCreatedInvoice() {
-        _createState.value = _createState.value.copy(amount = "", createdInvoice = null)
+        _createState.value = _createState.value.copy(
+            amount = "",
+            createdInvoice = null,
+            repositoryFailure = null,
+            readinessInvalidated = false,
+        )
     }
 
     fun startPaymentMonitoring(invoiceId: String) {
@@ -182,3 +209,27 @@ class InvoiceViewModel(
         const val RECOVERY_INTERVAL_MILLIS = 30_000L
     }
 }
+
+internal fun CreateInvoiceState.withEditedAmount(value: String): CreateInvoiceState = copy(
+    amount = value,
+    error = repositoryFailure,
+)
+
+internal fun CreateInvoiceState.withRepositoryFailure(message: String): CreateInvoiceState = copy(
+    isCreating = false,
+    error = message,
+    repositoryFailure = message,
+    readinessInvalidated = true,
+    readinessFailureSequence = readinessFailureSequence + 1,
+)
+
+internal fun CreateInvoiceState.afterReadinessRefresh(ready: Boolean): CreateInvoiceState =
+    if (readinessInvalidated && ready) {
+        copy(
+            error = null,
+            repositoryFailure = null,
+            readinessInvalidated = false,
+        )
+    } else {
+        this
+    }
