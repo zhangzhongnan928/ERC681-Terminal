@@ -25,6 +25,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -54,23 +55,34 @@ fun SettlementScreen(viewModel: SettlementViewModel) {
         .flatMap { it.chunked(SettlementAbi.MAX_BATCH_SIZE) }
 
     state.prepared?.let { prepared ->
-        SettlementReviewDialog(
-            prepared = prepared,
-            submitting = state.submitting,
-            onDismiss = viewModel::dismissReview,
-            onConfirm = {
-                if (activity == null) {
-                    viewModel.authenticationFailed("Unable to access the system authentication prompt")
-                } else {
+        LaunchedEffect(state.authenticationRequestSequence) {
+            if (!viewModel.beginAuthenticationPrompt(state.authenticationRequestSequence)) {
+                return@LaunchedEffect
+            }
+            if (activity == null) {
+                viewModel.authenticationFailed("Unable to access the system authentication prompt")
+            } else {
+                runCatching {
                     DeviceAuthentication.authenticate(
                         activity = activity,
                         title = "Authorize settlement",
                         subtitle = "Confirm the sweep transaction you just reviewed",
                         onAuthenticated = viewModel::submitAuthenticated,
-                        onError = viewModel::authenticationFailed
+                        onError = viewModel::authenticationFailed,
+                    )
+                }.onFailure { error ->
+                    viewModel.authenticationFailed(
+                        error.message ?: "Unable to open the system authentication prompt",
                     )
                 }
             }
+        }
+        SettlementReviewDialog(
+            prepared = prepared,
+            busy = state.submitting || state.preparingAuthentication,
+            preparingAuthentication = state.preparingAuthentication,
+            onDismiss = viewModel::dismissReview,
+            onConfirm = viewModel::prepareForAuthentication,
         )
     }
 
@@ -88,7 +100,7 @@ fun SettlementScreen(viewModel: SettlementViewModel) {
                 )
                 OutlinedButton(
                     onClick = viewModel::refreshPending,
-                    enabled = !state.preparing && !state.submitting,
+                    enabled = !state.preparing && !state.preparingAuthentication && !state.submitting,
                 ) {
                     androidx.compose.material3.Icon(Icons.Default.Refresh, contentDescription = null)
                     Text(" Refresh settlement status")
@@ -107,7 +119,7 @@ fun SettlementScreen(viewModel: SettlementViewModel) {
             items(groups, key = { group -> group.joinToString(":") { it.invoiceId } }) { group ->
                 SettlementGroupCard(
                     invoices = group,
-                    busy = state.preparing || state.submitting,
+                    busy = state.preparing || state.preparingAuthentication || state.submitting,
                     onPrepare = viewModel::prepare
                 )
             }
@@ -198,7 +210,8 @@ private fun SettlementGroupCard(
 @Composable
 private fun SettlementReviewDialog(
     prepared: PreparedSettlement,
-    submitting: Boolean,
+    busy: Boolean,
+    preparingAuthentication: Boolean,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit
 ) {
@@ -206,7 +219,7 @@ private fun SettlementReviewDialog(
         runCatching { KnownChainPolicy.requireProfile(prepared.chainId) }.getOrNull()
     }
     AlertDialog(
-        onDismissRequest = { if (!submitting) onDismiss() },
+        onDismissRequest = { if (!busy) onDismiss() },
         title = { Text("Confirm settlement") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -235,12 +248,17 @@ private fun SettlementReviewDialog(
             }
         },
         confirmButton = {
-            Button(onClick = onConfirm, enabled = !submitting) {
-                if (submitting) CircularProgressIndicator() else Text("Authenticate & settle")
+            Button(onClick = onConfirm, enabled = !busy) {
+                if (busy) {
+                    CircularProgressIndicator()
+                    Text(if (preparingAuthentication) " Rechecking…" else " Submitting…")
+                } else {
+                    Text("Authenticate & settle")
+                }
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !submitting) { Text("Cancel") }
+            TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") }
         }
     )
 }

@@ -23,6 +23,13 @@ protocol OperatorWalletLifecycleManaging: Sendable {
 
 extension KeychainOperatorWallet: OperatorWalletLifecycleManaging {}
 
+typealias PaymentObservationSampling = @Sendable (
+    _ request: PaymentRequest,
+    _ configuration: TerminalConfiguration,
+    _ paymentCursor: PaymentConfirmationCursor?,
+    _ sweepableCursors: [PaymentConfirmationCursor]
+) async throws -> PaymentObservation
+
 enum AdminPINConfigurationState: Equatable {
     case configured
     case notConfigured
@@ -41,6 +48,8 @@ final class AppModel: ObservableObject {
             }
             guard !settings.hasSamePaymentConfiguration(as: oldValue) else { return }
             validatedConfigurationFingerprint = nil
+            configurationValidationProof = nil
+            preparedSettlementValidationProof = nil
             validationMessage = "On-chain validation required"
             settlementCoordinator = nil
             settlementCoordinatorKey = nil
@@ -91,6 +100,15 @@ final class AppModel: ObservableObject {
     private var preparedConfirmationSnapshots: [SweepableConfirmationSnapshot]?
     private let lifecycleOperationGate = AppModelOperationGate()
     private let foregroundInvoiceReconciliationGate = ForegroundInvoiceReconciliationGate()
+    private let backgroundRPCWorkGate: BackgroundRPCWorkGate
+    private let backgroundRPCUnitDeadline: Duration
+    private let paymentObservationSampler: PaymentObservationSampling
+    private let paymentMonitorPollIntervalNanoseconds: UInt64
+    private let validationNow: @Sendable () -> Date
+    private let configurationValidationTTL: TimeInterval
+    private let preparedSettlementValidationTTL: TimeInterval
+    private var configurationValidationProof: ConfigurationValidationProof?
+    private var preparedSettlementValidationProof: PreparedSettlementValidationProof?
 
     init(
         container: ModelContainer,
@@ -103,7 +121,9 @@ final class AppModel: ObservableObject {
         currentConfigurationValidation: @escaping @Sendable (
             TerminalConfiguration
         ) async throws -> Void = { configuration in
-            let rpc = try JSONRPCEthereumClient(endpoint: configuration.rpcEndpoints[0])
+            let rpc = try EthereumRPCClientPool.shared.client(
+                for: configuration.rpcEndpoints[0]
+            )
             _ = try await ConfigurationValidator(rpc: rpc).validate(configuration)
         },
         operatorStatusReader: (@Sendable (
@@ -113,8 +133,19 @@ final class AppModel: ObservableObject {
         operatorResetBalanceReader: (@Sendable (
             TerminalConfiguration,
             EthereumAddress
-        ) async throws -> OperatorNativeBalanceSnapshot)? = nil
+        ) async throws -> OperatorNativeBalanceSnapshot)? = nil,
+        validationNow: @escaping @Sendable () -> Date = Date.init,
+        configurationValidationTTL: TimeInterval = 5 * 60,
+        preparedSettlementValidationTTL: TimeInterval = 60,
+        interactiveBackgroundDrainTimeout: Duration = .seconds(5),
+        backgroundRPCUnitDeadline: Duration = .seconds(5),
+        paymentObservationSampler: PaymentObservationSampling? = nil,
+        paymentMonitorPollIntervalNanoseconds: UInt64 =
+            PaymentMonitor.defaultPollIntervalNanoseconds
     ) {
+        precondition(interactiveBackgroundDrainTimeout > .zero)
+        precondition(backgroundRPCUnitDeadline > .zero)
+        precondition(paymentMonitorPollIntervalNanoseconds > 0)
         self.container = container
         self.operatorWallet = operatorWallet
         self.operatorWalletLifecycle = operatorWalletLifecycle ?? operatorWallet
@@ -125,6 +156,29 @@ final class AppModel: ObservableObject {
         self.currentConfigurationValidation = currentConfigurationValidation
         self.operatorStatusReader = operatorStatusReader
         self.operatorResetBalanceReader = operatorResetBalanceReader
+        self.validationNow = validationNow
+        self.configurationValidationTTL = max(0, configurationValidationTTL)
+        self.preparedSettlementValidationTTL = max(0, preparedSettlementValidationTTL)
+        backgroundRPCWorkGate = BackgroundRPCWorkGate(
+            maximumInteractiveDrainWait: interactiveBackgroundDrainTimeout
+        )
+        self.backgroundRPCUnitDeadline = backgroundRPCUnitDeadline
+        self.paymentObservationSampler = paymentObservationSampler
+            ?? { request, configuration, paymentCursor, sweepableCursors in
+                let rpc = try EthereumRPCClientPool.shared.client(
+                    for: configuration.rpcEndpoints[0]
+                )
+                return try await PaymentMonitor(
+                    rpc: rpc,
+                    confirmationPolicy: configuration.confirmationPolicy
+                ).sample(
+                    request,
+                    previousThresholdCursor: paymentCursor,
+                    additionalCursors: sweepableCursors,
+                    expectedChainID: configuration.chainID
+                )
+            }
+        self.paymentMonitorPollIntervalNanoseconds = paymentMonitorPollIntervalNanoseconds
         let settingsLoadResult = AppPreferences.loadSettingsResult()
         settings = settingsLoadResult.settings
         settingsRecoveryRequired = settingsLoadResult.recoveryRequired
@@ -387,6 +441,7 @@ final class AppModel: ObservableObject {
         }
         let original = settings
         do {
+            await backgroundRPCWorkGate.waitUntilIdle()
             guard let knownNetwork = TerminalKnownChainProfile.profile(for: payload.chainID) else {
                 throw AppSettingsError.unsupportedChain
             }
@@ -410,12 +465,17 @@ final class AppModel: ObservableObject {
 
             // This is the provisioning flow's single settings mutation and persistence point.
             settings = candidate
+            configurationValidationProof = ConfigurationValidationProof(
+                configuration: derived.configuration,
+                fingerprint: candidate.validationFingerprint,
+                validatedAt: validationNow()
+            )
             validatedConfigurationFingerprint = candidate.validationFingerprint
             validationMessage = "On-chain validation passed"
             provisioningMessage = "Payment profile validated and saved. Existing profiles were preserved."
             errorMessage = nil
             lockAdmin()
-            await refreshOperatorStatus()
+            await refreshOperatorStatusWithinInteractiveOperation()
         } catch {
             provisioningMessage = "Provisioning rejected. Existing settings were not changed."
             errorMessage = error.localizedDescription
@@ -423,17 +483,25 @@ final class AppModel: ObservableObject {
     }
 
     func refreshReadiness() async {
-        guard !isRefreshingReadiness else { return }
+        guard !isRefreshingReadiness, !operationBusy, !isProvisioning else { return }
+        guard let backgroundToken = backgroundRPCWorkGate.acquire(
+            interactiveOperationBusy: operationBusy
+        ) else { return }
         isRefreshingReadiness = true
-        defer { isRefreshingReadiness = false }
-
-        guard settings.isProvisioned else {
-            validatedConfigurationFingerprint = nil
-            await refreshOperatorStatus()
-            return
+        defer {
+            isRefreshingReadiness = false
+            backgroundRPCWorkGate.release(backgroundToken)
         }
-        _ = await validateConfiguration()
-        await refreshOperatorStatus()
+
+        await RPCRequestDeadline.withDeadline(after: backgroundRPCUnitDeadline) {
+            guard settings.isProvisioned else {
+                validatedConfigurationFingerprint = nil
+                await refreshOperatorStatusWithoutRPCGate()
+                return
+            }
+            _ = await validateConfiguration()
+            await refreshOperatorStatusWithoutRPCGate()
+        }
     }
 
     func validateConfiguration() async -> Bool {
@@ -442,7 +510,11 @@ final class AppModel: ObservableObject {
         let snapshot = settings
         do {
             let configuration = try snapshot.configuration()
-            try await validate(configuration)
+            try await validate(
+                configuration,
+                fingerprint: snapshot.validationFingerprint,
+                allowCachedBackgroundProof: true
+            )
             guard settings == snapshot else { throw AppSafetyError.configurationChanged }
             validatedConfigurationFingerprint = snapshot.validationFingerprint
             errorMessage = nil
@@ -466,6 +538,7 @@ final class AppModel: ObservableObject {
             endExclusiveOperation()
         }
         do {
+            await backgroundRPCWorkGate.waitUntilIdle()
             // Capture once so the exact configuration used for derivation is the one validated.
             let settingsSnapshot = settings
             guard settingsSnapshot.isProvisioned else {
@@ -478,16 +551,56 @@ final class AppModel: ObservableObject {
             guard settingsSnapshot.provisionedOperatorAddress?.lowercased()
                 == operatorAddress.hex.lowercased()
             else { throw AppSafetyError.operatorBindingMismatch }
-            validatedConfigurationFingerprint = nil
-            try await validate(configuration)
-            guard settings == settingsSnapshot else { throw AppSafetyError.configurationChanged }
-            validatedConfigurationFingerprint = settingsSnapshot.validationFingerprint
-            operatorStatus = nil
-            let liveStatus = try await fetchOperatorStatus(
+            let paymentProfile = try TerminalPaymentProfile(configuration: configuration)
+            let token = paymentProfile.token
+            let amount = try TokenAmount(display: displayAmount, decimals: token.decimals)
+            let request = try InvoiceFactory.create(
+                terminalIdentifier: TerminalIdentifier(address: operatorAddress),
+                amount: amount,
+                profile: paymentProfile,
+                expiresAt: Date().addingTimeInterval(15 * 60)
+            )
+            let rpc = try EthereumRPCClientPool.shared.client(
+                for: configuration.rpcEndpoints[0]
+            )
+            // These proofs are independent read-only operations. Launch them together so the
+            // slowest fixed-head proof, rather than their sum, controls checkout latency. Every
+            // result remains mandatory and the settings/operator snapshot is checked before any
+            // invoice is persisted or shown.
+            async let configurationProof: Void = validate(
+                configuration,
+                fingerprint: settingsSnapshot.validationFingerprint,
+                allowCachedBackgroundProof: false
+            )
+            async let statusProof = fetchOperatorStatus(
                 configuration: configuration,
                 operatorAddress: operatorAddress
             )
-            guard settings == settingsSnapshot else { throw AppSafetyError.configurationChanged }
+            async let freshnessProof = ReceiverFreshnessValidator(rpc: rpc).validate(
+                receiver: request.receiver,
+                token: token.address,
+                expectedChainID: configuration.chainID
+            )
+            let concurrentProofs: (Void, OperatorChainStatus, ReceiverFreshnessProof)
+            do {
+                concurrentProofs = try await (
+                    configurationProof,
+                    statusProof,
+                    freshnessProof
+                )
+            } catch {
+                // A concurrently failing endpoint must not hide a settings/operator mutation
+                // that invalidated the entire locally derived request while proofs were running.
+                guard settings == settingsSnapshot,
+                      self.operatorAddress == operatorAddress
+                else { throw AppSafetyError.configurationChanged }
+                throw error
+            }
+            let (_, liveStatus, freshness) = concurrentProofs
+            guard settings == settingsSnapshot,
+                  self.operatorAddress == operatorAddress
+            else { throw AppSafetyError.configurationChanged }
+            validatedConfigurationFingerprint = settingsSnapshot.validationFingerprint
             operatorStatus = liveStatus
             operatorStatusMessage = nil
             let readiness = TerminalReadiness.evaluate(
@@ -499,28 +612,10 @@ final class AppModel: ObservableObject {
             guard readiness.isReady else {
                 throw AppSafetyError.terminalNotReady(readiness.detail)
             }
-            let paymentProfile = try TerminalPaymentProfile(configuration: configuration)
-            let token = paymentProfile.token
-            let amount = try TokenAmount(display: displayAmount, decimals: token.decimals)
-            let request = try InvoiceFactory.create(
-                terminalIdentifier: TerminalIdentifier(address: operatorAddress),
-                amount: amount,
-                profile: paymentProfile,
-                expiresAt: Date().addingTimeInterval(15 * 60)
-            )
-            let rpc = try JSONRPCEthereumClient(endpoint: configuration.rpcEndpoints[0])
-            let observationBlock = try await rpc.blockNumber()
-            let receiverCode = try await rpc.code(at: request.receiver, block: .number(observationBlock))
-            guard receiverCode.isEmpty else { throw AppSafetyError.receiverAlreadyDeployed }
-            let existingBalanceData = try await rpc.call(
-                to: token.address,
-                data: ABI.encodeCall(
-                    selector: ABI.balanceOfSelector,
-                    words: [ABI.word(request.receiver)]
-                ),
-                block: .number(observationBlock)
-            )
-            guard try ABI.decodeUInt256(existingBalanceData).isZero else {
+            guard freshness.receiverCode.isEmpty else {
+                throw AppSafetyError.receiverAlreadyDeployed
+            }
+            guard freshness.tokenBalance.isZero else {
                 throw AppSafetyError.receiverAlreadyFunded
             }
             guard settings == settingsSnapshot,
@@ -608,14 +703,49 @@ final class AppModel: ObservableObject {
         guard let reconciliationToken else { return }
         defer { foregroundInvoiceReconciliationGate.release(reconciliationToken) }
 
-        await withTaskGroup(of: ForegroundInvoiceReconciliationOutcome.self) { group in
-            for candidate in candidates {
+        await withTaskGroup(
+            of: (UUID, ForegroundInvoiceReconciliationOutcome).self
+        ) { group in
+            var nextIndex = 0
+            let backgroundDeadline = backgroundRPCUnitDeadline
+            func enqueue(_ candidate: ForegroundInvoiceReconciliationCandidate, token: UUID) {
                 group.addTask {
-                    await Self.sampleForegroundInvoice(candidate, now: now)
+                    let outcome = await RPCRequestDeadline.withDeadline(
+                        after: backgroundDeadline
+                    ) {
+                        await Self.sampleForegroundInvoice(candidate, now: now)
+                    }
+                    return (token, outcome)
                 }
             }
-            for await outcome in group {
+            while nextIndex < candidates.count,
+                  let token = backgroundRPCWorkGate.acquire(
+                      interactiveOperationBusy: operationBusy
+                  ) {
+                enqueue(candidates[nextIndex], token: token)
+                nextIndex += 1
+            }
+            for await (token, outcome) in group {
+                backgroundRPCWorkGate.release(token)
                 persistForegroundInvoiceReconciliation(outcome, at: Date())
+                if nextIndex < candidates.count,
+                   let nextToken = backgroundRPCWorkGate.acquire(
+                       interactiveOperationBusy: operationBusy
+                   ) {
+                    let candidate = candidates[nextIndex]
+                    nextIndex += 1
+                    enqueue(candidate, token: nextToken)
+                }
+            }
+            // An interactive operation may have started while a background sample was in
+            // flight. Release the durable reservation for every unit that was not launched so
+            // the next foreground pass can retry it promptly.
+            while nextIndex < candidates.count {
+                persistForegroundInvoiceReconciliation(
+                    .cancelled(invoiceID: candidates[nextIndex].invoiceID),
+                    at: Date()
+                )
+                nextIndex += 1
             }
         }
     }
@@ -643,6 +773,7 @@ final class AppModel: ObservableObject {
         }
         defer { endExclusiveOperation() }
         do {
+            await backgroundRPCWorkGate.waitUntilIdle()
             let sessionGate = adminSessionGate
             let address = try await operatorWalletLifecycle.create(
                 reason: "Create the settlement operator wallet on this device",
@@ -660,7 +791,7 @@ final class AppModel: ObservableObject {
             settlementCoordinator = nil
             settlementCoordinatorKey = nil
             errorMessage = nil
-            await refreshOperatorStatus()
+            await refreshOperatorStatusWithinInteractiveOperation()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -689,6 +820,7 @@ final class AppModel: ObservableObject {
             return
         }
         do {
+            await backgroundRPCWorkGate.waitUntilIdle()
             guard let operatorAddress else { throw OperatorWalletError.walletNotCreated }
             var invoiceDescriptor = FetchDescriptor<StoredInvoice>()
             invoiceDescriptor.fetchLimit = 1
@@ -827,6 +959,26 @@ final class AppModel: ObservableObject {
     }
 
     func refreshOperatorStatus() async {
+        // UI and other independent callers must never infer that another task's lifecycle lock
+        // means background work was drained on their behalf. Either acquire a background token
+        // atomically while the terminal is idle or defer this nonessential refresh.
+        guard !operationBusy,
+              let backgroundToken = backgroundRPCWorkGate.acquire(
+                  interactiveOperationBusy: operationBusy
+              )
+        else { return }
+        defer { backgroundRPCWorkGate.release(backgroundToken) }
+        await RPCRequestDeadline.withDeadline(after: backgroundRPCUnitDeadline) {
+            await refreshOperatorStatusWithoutRPCGate()
+        }
+    }
+
+    private func refreshOperatorStatusWithinInteractiveOperation() async {
+        assert(operationBusy)
+        await refreshOperatorStatusWithoutRPCGate()
+    }
+
+    private func refreshOperatorStatusWithoutRPCGate() async {
         guard let operatorAddress else {
             operatorStatus = nil
             operatorStatusMessage = "Create the operator wallet to enable native settlement."
@@ -862,7 +1014,9 @@ final class AppModel: ObservableObject {
             return
         }
         defer { endExclusiveOperation() }
+        preparedSettlementValidationProof = nil
         do {
+            await backgroundRPCWorkGate.waitUntilIdle()
             guard invoices.count <= 20 else { throw AppSettlementError.invalidSelection }
             guard settlementBatchSnapshotsMatch(invoices) else {
                 throw AppSettlementError.mixedSnapshots
@@ -891,10 +1045,6 @@ final class AppModel: ObservableObject {
                 operatorAddress: operatorAddress,
                 chainID: configuration.chainID
             )
-            _ = try await historicalConfigurationValidator.validateHistoricalConfiguration(
-                configuration
-            )
-
             let cumulative = try currentCumulativeTotals(for: invoices)
             let confirmationSnapshots = try invoices.map { invoice in
                 let key = try invoice.cumulativeSettlementKey()
@@ -927,9 +1077,26 @@ final class AppModel: ObservableObject {
                 configuration: configuration,
                 operatorAddress: operatorAddress
             )
-            try await revalidateSweepableConfirmations(
+            let confirmationSamples = try sweepableConfirmationSamples(
                 invoices: invoices,
+                expectedSnapshots: confirmationSnapshots
+            )
+            // Historical provenance and payment confirmations are independent, read-only
+            // fixed-head proofs. Run their three-wave brackets together; both must complete
+            // before any transaction preparation can begin.
+            async let historicalProof = historicalConfigurationValidator
+                .validateHistoricalConfiguration(configuration)
+            async let confirmationProof: Void = Self.validateSweepableConfirmationSamples(
+                confirmationSamples,
                 configuration: configuration,
+                expectedSnapshots: confirmationSnapshots
+            )
+            _ = try await (historicalProof, confirmationProof)
+            // Age the reusable proof from the moment its last on-chain validation completed,
+            // not from the end of potentially slow gas estimation/simulation in `prepare`.
+            let preparedValidationTimestamp = validationNow()
+            try requireSweepableConfirmationSnapshotsUnchanged(
+                invoices: invoices,
                 expectedSnapshots: confirmationSnapshots
             )
             let prepared = try await coordinator.prepare(intent)
@@ -953,11 +1120,15 @@ final class AppModel: ObservableObject {
             preparedSettlement = prepared
             preparedConfiguration = configuration
             preparedConfirmationSnapshots = confirmationSnapshots
+            preparedSettlementValidationProof = PreparedSettlementValidationProof(
+                configuration: configuration,
+                intent: prepared.intent,
+                confirmationSnapshots: confirmationSnapshots,
+                validatedAt: preparedValidationTimestamp
+            )
             errorMessage = nil
         } catch {
-            preparedSettlement = nil
-            preparedConfiguration = nil
-            preparedConfirmationSnapshots = nil
+            clearPreparedSettlementState()
             errorMessage = error.localizedDescription
         }
     }
@@ -968,9 +1139,7 @@ final class AppModel: ObservableObject {
             return
         }
         defer { endExclusiveOperation() }
-        preparedSettlement = nil
-        preparedConfiguration = nil
-        preparedConfirmationSnapshots = nil
+        clearPreparedSettlementState()
     }
 
     func confirmPreparedSettlement() async {
@@ -986,9 +1155,22 @@ final class AppModel: ObservableObject {
         defer { endExclusiveOperation() }
 
         do {
-            _ = try await historicalConfigurationValidator.validateHistoricalConfiguration(
-                configuration
-            )
+            await backgroundRPCWorkGate.waitUntilIdle()
+            let reusablePreparedValidationProof = preparedSettlementValidationProof
+            let canReusePreparedValidation = reusablePreparedValidationProof?.isReusable(
+                configuration: configuration,
+                intent: preparedSettlement.intent,
+                confirmationSnapshots: expectedSnapshots,
+                at: validationNow(),
+                maximumAge: preparedSettlementValidationTTL
+            ) == true
+            var historicalValidationCompletedAt = canReusePreparedValidation
+                ? reusablePreparedValidationProof?.validatedAt
+                : nil
+            // Single-use: any failed, cancelled, or completed signing attempt must perform a full
+            // fresh pre-prompt proof on the next attempt. The authenticated callback below always
+            // repeats live balances and canonical confirmation cursors regardless of this reuse.
+            preparedSettlementValidationProof = nil
             let coordinator = try coordinator(
                 configuration: configuration,
                 operatorAddress: operatorAddress
@@ -1005,11 +1187,30 @@ final class AppModel: ObservableObject {
             guard currentSnapshots == expectedSnapshots else {
                 throw AppSettlementError.confirmedBalanceChanged
             }
-            try await revalidateSweepableConfirmations(
-                invoices: invoices,
-                configuration: configuration,
-                expectedSnapshots: expectedSnapshots
-            )
+            if !canReusePreparedValidation {
+                let confirmationSamples = try sweepableConfirmationSamples(
+                    invoices: invoices,
+                    expectedSnapshots: expectedSnapshots
+                )
+                async let historicalProof = historicalConfigurationValidator
+                    .validateHistoricalConfiguration(configuration)
+                async let confirmationProof: Void = Self.validateSweepableConfirmationSamples(
+                    confirmationSamples,
+                    configuration: configuration,
+                    expectedSnapshots: expectedSnapshots
+                )
+                _ = try await (historicalProof, confirmationProof)
+                historicalValidationCompletedAt = validationNow()
+                try requireSweepableConfirmationSnapshotsUnchanged(
+                    invoices: invoices,
+                    expectedSnapshots: expectedSnapshots
+                )
+            }
+            guard let finalHistoricalValidationCompletedAt = historicalValidationCompletedAt else {
+                throw AppSettlementError.validationProofExpired
+            }
+            let validationClock = validationNow
+            let validationTTL = preparedSettlementValidationTTL
             let count = preparedSettlement.intent.sessions.count
             let signed = try await coordinator.sign(
                 preparedSettlement,
@@ -1021,6 +1222,13 @@ final class AppModel: ObservableObject {
                         configuration: configuration,
                         expectedSnapshots: expectedSnapshots
                     )
+                },
+                postAuthenticationFinalValidation: {
+                    let now = validationClock()
+                    guard validationTTL > 0,
+                          now >= finalHistoricalValidationCompletedAt,
+                          now.timeIntervalSince(finalHistoricalValidationCompletedAt) <= validationTTL
+                    else { throw AppSettlementError.validationProofExpired }
                 }
             )
 
@@ -1044,22 +1252,56 @@ final class AppModel: ObservableObject {
             let submission = await coordinator.broadcast(signed)
             try stored.apply(submission)
             try saveMainContextOrRollback()
-            self.preparedSettlement = nil
-            preparedConfiguration = nil
-            preparedConfirmationSnapshots = nil
+            clearPreparedSettlementState()
             errorMessage = submission.broadcastError
-            await refreshOperatorStatus()
+            await refreshOperatorStatusWithinInteractiveOperation()
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    func reconcileSettlements() async {
-        guard beginExclusiveOperation() else { return }
-        defer { endExclusiveOperation() }
+    /// Automatic screen appearance is background maintenance, not an interactive cashier action.
+    /// Keep it to the periodic one-record budget; explicit pull-to-refresh can still request the
+    /// full interactive pass through `reconcileSettlements()`.
+    func reconcileSettlementsOnAppearance() async {
+        await reconcileSettlements(mode: .periodic)
+    }
+
+    func reconcileSettlements(mode: SettlementReconciliationRunMode = .interactive) async {
+        let backgroundToken: UUID?
+        switch mode {
+        case .interactive:
+            guard beginExclusiveOperation() else { return }
+            backgroundToken = nil
+        case .periodic:
+            guard let token = backgroundRPCWorkGate.acquire(
+                interactiveOperationBusy: operationBusy
+            ) else { return }
+            backgroundToken = token
+        }
+        defer {
+            if let backgroundToken {
+                backgroundRPCWorkGate.release(backgroundToken)
+            } else {
+                endExclusiveOperation()
+            }
+        }
+        if mode == .interactive {
+            await backgroundRPCWorkGate.waitUntilIdle()
+            await reconcileSettlementRecords(mode: mode)
+        } else {
+            await RPCRequestDeadline.withDeadline(after: backgroundRPCUnitDeadline) {
+                await reconcileSettlementRecords(mode: mode)
+            }
+        }
+    }
+
+    private func reconcileSettlementRecords(mode: SettlementReconciliationRunMode) async {
         do {
             let records = try container.mainContext.fetch(
-                SettlementReconciliationPolicy.activeFetchDescriptor()
+                SettlementReconciliationPolicy.activeFetchDescriptor(
+                    limit: mode == .periodic ? 1 : SettlementReconciliationPolicy.activeBatchLimit
+                )
             )
             for record in records {
                 do {
@@ -1070,7 +1312,7 @@ final class AppModel: ObservableObject {
                           let required = UInt64(exactly: record.requiredConfirmations),
                           let nonce = UInt64(exactly: record.nonce)
                     else { throw AppSettlementError.walletMismatch }
-                    let rpc = try OperatorRPCClient(endpoint: endpoint)
+                    let rpc = try OperatorRPCClientPool.shared.client(for: endpoint)
                     let coordinator = SettlementCoordinator(
                         rpc: rpc,
                         wallet: operatorWallet,
@@ -1094,6 +1336,10 @@ final class AppModel: ObservableObject {
                             intent: intent,
                             nonce: nonce
                         )
+                        // retryPersistedBroadcast intentionally converts ambiguous network
+                        // errors into an unknown submission. A scheduling deadline is different:
+                        // defer this maintenance row without recording a synthetic RPC failure.
+                        try RPCRequestDeadline.check()
                         try Task.checkCancellation()
                         try record.apply(retry)
                         try saveMainContextOrRollback()
@@ -1109,7 +1355,12 @@ final class AppModel: ObservableObject {
                     try saveMainContextOrRollback()
                 } catch is CancellationError {
                     return
+                } catch is RPCRequestDeadlineError {
+                    return
                 } catch let error as URLError where error.code == .cancelled {
+                    return
+                } catch let error as URLError where
+                    mode == .periodic && error.code == .timedOut {
                     return
                 } catch {
                     record.phase = .unknown
@@ -1123,7 +1374,12 @@ final class AppModel: ObservableObject {
             try healCumulativeSettlementEvidence()
         } catch is CancellationError {
             return
+        } catch is RPCRequestDeadlineError {
+            return
         } catch let error as URLError where error.code == .cancelled {
+            return
+        } catch let error as URLError where
+            mode == .periodic && error.code == .timedOut {
             return
         } catch {
             errorMessage = error.localizedDescription
@@ -1369,15 +1625,9 @@ final class AppModel: ObservableObject {
         do {
             try Task.checkCancellation()
             let configuration = candidate.configuration
-            let rpc = try JSONRPCEthereumClient(endpoint: configuration.rpcEndpoints[0])
-            let actualChainID = try await rpc.chainID()
-            try Task.checkCancellation()
-            guard actualChainID == configuration.chainID else {
-                throw AppSafetyError.snapshotChainMismatch(
-                    expected: configuration.chainID,
-                    actual: actualChainID
-                )
-            }
+            let rpc = try EthereumRPCClientPool.shared.client(
+                for: configuration.rpcEndpoints[0]
+            )
             let monitor = PaymentMonitor(
                 rpc: rpc,
                 confirmationPolicy: configuration.confirmationPolicy
@@ -1386,13 +1636,18 @@ final class AppModel: ObservableObject {
                 candidate.request,
                 previousThresholdCursor: candidate.previousThresholdCursor,
                 additionalCursors: candidate.additionalCursors,
+                expectedChainID: configuration.chainID,
                 now: now
             )
             try Task.checkCancellation()
             return .success(invoiceID: candidate.invoiceID, observation: observation)
         } catch is CancellationError {
             return .cancelled(invoiceID: candidate.invoiceID)
+        } catch is RPCRequestDeadlineError {
+            return .cancelled(invoiceID: candidate.invoiceID)
         } catch let error as URLError where error.code == .cancelled {
+            return .cancelled(invoiceID: candidate.invoiceID)
+        } catch let error as URLError where error.code == .timedOut {
             return .cancelled(invoiceID: candidate.invoiceID)
         } catch {
             return .failure(
@@ -1511,36 +1766,74 @@ final class AppModel: ObservableObject {
         configuration: TerminalConfiguration,
         expectedSnapshots: [SweepableConfirmationSnapshot]
     ) async throws {
+        let samples = try sweepableConfirmationSamples(
+            invoices: invoices,
+            expectedSnapshots: expectedSnapshots
+        )
+        try await Self.validateSweepableConfirmationSamples(
+            samples,
+            configuration: configuration,
+            expectedSnapshots: expectedSnapshots
+        )
+        try requireSweepableConfirmationSnapshotsUnchanged(
+            invoices: invoices,
+            expectedSnapshots: expectedSnapshots
+        )
+    }
+
+    private func sweepableConfirmationSamples(
+        invoices: [StoredInvoice],
+        expectedSnapshots: [SweepableConfirmationSnapshot]
+    ) throws -> [PaymentSampleInput] {
         guard invoices.count == expectedSnapshots.count else {
             throw AppSettlementError.mixedSnapshots
         }
-        let rpc = try JSONRPCEthereumClient(endpoint: configuration.rpcEndpoints[0])
-        let actualChainID = try await rpc.chainID()
-        guard actualChainID == configuration.chainID else {
-            throw AppSafetyError.snapshotChainMismatch(
-                expected: configuration.chainID,
-                actual: actualChainID
-            )
+        var samples = [PaymentSampleInput]()
+        samples.reserveCapacity(invoices.count)
+        for (invoice, snapshot) in zip(invoices, expectedSnapshots) {
+            guard invoice.invoiceID == snapshot.invoiceID,
+                  let cursor = snapshot.confirmationCursor
+            else { throw AppSettlementError.unconfirmedSweepableBalance }
+            samples.append(PaymentSampleInput(
+                request: try invoice.paymentRequest(),
+                previousThresholdCursor: invoice.paymentThresholdCursor,
+                additionalCursors: [cursor]
+            ))
         }
+        return samples
+    }
+
+    private nonisolated static func validateSweepableConfirmationSamples(
+        _ samples: [PaymentSampleInput],
+        configuration: TerminalConfiguration,
+        expectedSnapshots: [SweepableConfirmationSnapshot]
+    ) async throws {
+        let rpc = try EthereumRPCClientPool.shared.client(
+            for: configuration.rpcEndpoints[0]
+        )
         let monitor = PaymentMonitor(
             rpc: rpc,
             confirmationPolicy: configuration.confirmationPolicy
         )
-        for (invoice, snapshot) in zip(invoices, expectedSnapshots) {
-            try Task.checkCancellation()
-            guard invoice.invoiceID == snapshot.invoiceID,
-                  let cursor = snapshot.confirmationCursor
-            else { throw AppSettlementError.unconfirmedSweepableBalance }
-            let observation = try await monitor.sample(
-                invoice.paymentRequest(),
-                previousThresholdCursor: invoice.paymentThresholdCursor,
-                additionalCursors: [cursor]
-            )
+        try Task.checkCancellation()
+        let observations = try await monitor.sampleBatch(
+            samples,
+            expectedChainID: configuration.chainID
+        )
+        guard observations.count == expectedSnapshots.count else {
+            throw AppSettlementError.confirmedBalanceChanged
+        }
+        for (snapshot, observation) in zip(expectedSnapshots, observations) {
             guard snapshot.isRevalidated(by: observation) else {
                 throw AppSettlementError.confirmedBalanceChanged
             }
         }
+    }
 
+    private func requireSweepableConfirmationSnapshotsUnchanged(
+        invoices: [StoredInvoice],
+        expectedSnapshots: [SweepableConfirmationSnapshot]
+    ) throws {
         // No observer/proof-index update may replace the selected snapshot while RPC validation
         // was in flight. This also binds the exact cumulative-proof baseline used by the intent.
         let cumulative = try currentCumulativeTotals(for: invoices)
@@ -1648,7 +1941,7 @@ final class AppModel: ObservableObject {
         if settlementCoordinatorKey == key, let settlementCoordinator {
             return settlementCoordinator
         }
-        let rpc = try OperatorRPCClient(endpoint: endpoint)
+        let rpc = try OperatorRPCClientPool.shared.client(for: endpoint)
         let value = SettlementCoordinator(
             rpc: rpc,
             wallet: operatorWallet,
@@ -1659,14 +1952,41 @@ final class AppModel: ObservableObject {
         return value
     }
 
-    private func validate(_ configuration: TerminalConfiguration) async throws {
+    private func validate(
+        _ configuration: TerminalConfiguration,
+        fingerprint: String,
+        allowCachedBackgroundProof: Bool
+    ) async throws {
+        if allowCachedBackgroundProof,
+           configurationValidationProof?.isReusable(
+               configuration: configuration,
+               fingerprint: fingerprint,
+               at: validationNow(),
+               maximumAge: configurationValidationTTL
+           ) == true {
+            validationMessage = "On-chain validation passed"
+            return
+        }
         do {
             try await currentConfigurationValidation(configuration)
+            configurationValidationProof = ConfigurationValidationProof(
+                configuration: configuration,
+                fingerprint: fingerprint,
+                validatedAt: validationNow()
+            )
             validationMessage = "On-chain validation passed"
         } catch {
+            configurationValidationProof = nil
             validationMessage = "Validation failed"
             throw error
         }
+    }
+
+    private func clearPreparedSettlementState() {
+        preparedSettlement = nil
+        preparedConfiguration = nil
+        preparedConfirmationSnapshots = nil
+        preparedSettlementValidationProof = nil
     }
 
     private func validateSnapshot(
@@ -1688,22 +2008,41 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func startMonitoring(_ request: PaymentRequest, configuration: TerminalConfiguration) {
+    func startMonitoring(_ request: PaymentRequest, configuration: TerminalConfiguration) {
         monitoringTask?.cancel()
         monitoringTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let rpc = try JSONRPCEthereumClient(endpoint: configuration.rpcEndpoints[0])
-                let monitor = PaymentMonitor(rpc: rpc, confirmationPolicy: configuration.confirmationPolicy)
                 while !Task.isCancelled {
                     let cursors = try self.confirmationCursors(
                         for: request.invoiceID.hex
                     )
-                    let observation = try await monitor.sample(
-                        request,
-                        previousThresholdCursor: cursors.payment,
-                        additionalCursors: cursors.sweepable.map { [$0] } ?? []
-                    )
+                    let token = try await self.acquireBackgroundRPCWork()
+                    let observation: PaymentObservation
+                    do {
+                        observation = try await RPCRequestDeadline.withDeadline(
+                            after: self.backgroundRPCUnitDeadline
+                        ) {
+                            try await self.paymentObservationSampler(
+                                request,
+                                configuration,
+                                cursors.payment,
+                                cursors.sweepable.map { [$0] } ?? []
+                            )
+                        }
+                    } catch {
+                        self.backgroundRPCWorkGate.release(token)
+                        if PaymentMonitorRetryPolicy.shouldRetry(error) {
+                            // Leave activeObservation and the persisted confirmation cursor at
+                            // their last verified values. A transient read is not evidence.
+                            try await Task.sleep(
+                                nanoseconds: self.paymentMonitorPollIntervalNanoseconds
+                            )
+                            continue
+                        }
+                        throw error
+                    }
+                    self.backgroundRPCWorkGate.release(token)
                     guard !Task.isCancelled else { return }
                     self.activeObservation = observation
                     try self.persist(observation)
@@ -1714,15 +2053,39 @@ final class AppModel: ObservableObject {
                         break
                     }
                     try await Task.sleep(
-                        nanoseconds: monitor.pollIntervalNanoseconds
+                        nanoseconds: self.paymentMonitorPollIntervalNanoseconds
                     )
                 }
             } catch is CancellationError {
+                return
+            } catch let error as URLError where error.code == .cancelled {
+                // URLSession reports task cancellation through URLError rather than
+                // CancellationError on some paths. This is intentional shutdown, not a sale
+                // failure to surface to the cashier.
                 return
             } catch {
                 self.errorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// Internal lifecycle seam used by deterministic app tests and future orderly shutdown paths.
+    /// Capturing the task first ensures a later monitor replacement cannot change what is awaited.
+    func waitForMonitoringToFinish() async {
+        let task = monitoringTask
+        await task?.value
+    }
+
+    private func acquireBackgroundRPCWork() async throws -> UUID {
+        while !Task.isCancelled {
+            if let token = backgroundRPCWorkGate.acquire(
+                interactiveOperationBusy: operationBusy
+            ) {
+                return token
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw CancellationError()
     }
 
     private func persist(_ observation: PaymentObservation) throws {
@@ -1757,6 +2120,50 @@ final class AppModel: ObservableObject {
             sweepable: invoice.sweepableConfirmationCursor
         )
     }
+}
+
+struct ConfigurationValidationProof: Equatable, Sendable {
+    let configuration: TerminalConfiguration
+    let fingerprint: String
+    let validatedAt: Date
+
+    func isReusable(
+        configuration: TerminalConfiguration,
+        fingerprint: String,
+        at now: Date,
+        maximumAge: TimeInterval
+    ) -> Bool {
+        guard maximumAge > 0, now >= validatedAt else { return false }
+        return self.configuration == configuration
+            && self.fingerprint == fingerprint
+            && now.timeIntervalSince(validatedAt) <= maximumAge
+    }
+}
+
+struct PreparedSettlementValidationProof: Equatable, Sendable {
+    let configuration: TerminalConfiguration
+    let intent: SettlementIntent
+    let confirmationSnapshots: [SweepableConfirmationSnapshot]
+    let validatedAt: Date
+
+    func isReusable(
+        configuration: TerminalConfiguration,
+        intent: SettlementIntent,
+        confirmationSnapshots: [SweepableConfirmationSnapshot],
+        at now: Date,
+        maximumAge: TimeInterval
+    ) -> Bool {
+        guard maximumAge > 0, now >= validatedAt else { return false }
+        return self.configuration == configuration
+            && self.intent == intent
+            && self.confirmationSnapshots == confirmationSnapshots
+            && now.timeIntervalSince(validatedAt) <= maximumAge
+    }
+}
+
+enum SettlementReconciliationRunMode: Equatable, Sendable {
+    case interactive
+    case periodic
 }
 
 /// A selected batch may be settled only by the device EOA that derived every invoice identifier.
@@ -1904,6 +2311,7 @@ private enum AppSettlementError: LocalizedError {
     case operationInProgress
     case unconfirmedSweepableBalance
     case confirmedBalanceChanged
+    case validationProofExpired
 
     var errorDescription: String? {
         switch self {
@@ -1923,6 +2331,8 @@ private enum AppSettlementError: LocalizedError {
             "The currently sweepable receiver balance has not reached the invoice's saved confirmation requirement, or its cumulative proof baseline changed. Refresh and wait for confirmation."
         case .confirmedBalanceChanged:
             "A receiver balance changed after it was confirmed. Refresh and wait for the current amount to reach the saved confirmation requirement before settling."
+        case .validationProofExpired:
+            "The settlement review expired during device authentication. Review the live settlement details and confirm again."
         }
     }
 }

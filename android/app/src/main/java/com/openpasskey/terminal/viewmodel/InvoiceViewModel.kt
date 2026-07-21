@@ -57,6 +57,7 @@ class InvoiceViewModel(
             repository.observeRecent(100).collect { _recentInvoices.value = it }
         }
         viewModelScope.launch {
+            delay(RECOVERY_STAGGER_MILLIS)
             while (true) {
                 try {
                     repository.reconcileLateInvoices()
@@ -234,7 +235,8 @@ class InvoiceViewModel(
     }
 
     private companion object {
-        const val RECOVERY_INTERVAL_MILLIS = 30_000L
+        const val RECOVERY_INTERVAL_MILLIS = 60_000L
+        const val RECOVERY_STAGGER_MILLIS = 30_000L
     }
 }
 

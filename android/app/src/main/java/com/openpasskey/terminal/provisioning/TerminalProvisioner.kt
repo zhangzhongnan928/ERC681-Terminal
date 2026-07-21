@@ -34,7 +34,29 @@ interface ProvisioningChainReader : Closeable {
     fun isPaymentToken(vault: EvmAddress, token: EvmAddress): Boolean
     fun tokenDecimals(token: EvmAddress): Int
     fun tokenSymbol(token: EvmAddress): String
+    fun validate(token: EvmAddress): NetworkValidation {
+        val decimals = tokenDecimals(token)
+        val symbol = tokenSymbol(token)
+        return validate(token, decimals, symbol)
+    }
+    fun validateWithEvidence(token: EvmAddress): ProvisioningValidationEvidence {
+        val validation = validate(token)
+        return ProvisioningValidationEvidence(
+            validation = validation,
+            vaultRuntimeCode = vaultRuntimeCode(validation.vault),
+        )
+    }
     fun validate(token: EvmAddress, expectedDecimals: Int, expectedSymbol: String): NetworkValidation
+}
+
+/** Validation plus the exact vault bytes returned by the same provenance proof. */
+class ProvisioningValidationEvidence(
+    val validation: NetworkValidation,
+    vaultRuntimeCode: ByteArray,
+) {
+    private val retainedVaultRuntimeCode = vaultRuntimeCode.copyOf()
+    val vaultRuntimeCode: ByteArray
+        get() = retainedVaultRuntimeCode.copyOf()
 }
 
 fun interface ProvisioningChainReaderFactory {
@@ -55,6 +77,14 @@ private class RpcProvisioningChainReader(
 
     override fun tokenDecimals(token: EvmAddress): Int = client.tokenDecimals(token)
     override fun tokenSymbol(token: EvmAddress): String = client.tokenSymbol(token)
+    override fun validate(token: EvmAddress): NetworkValidation = client.validate(token)
+    override fun validateWithEvidence(token: EvmAddress): ProvisioningValidationEvidence {
+        val evidence = client.validateWithEvidence(token)
+        return ProvisioningValidationEvidence(
+            validation = evidence.validation,
+            vaultRuntimeCode = evidence.vaultRuntimeCode,
+        )
+    }
     override fun validate(
         token: EvmAddress,
         expectedDecimals: Int,
@@ -110,7 +140,8 @@ class TerminalProvisioner(
 
         val token = if (rpcUrl == profile.rpcUrl) {
             clientFactory.create(trustedNetwork).use { trusted ->
-                require(trusted.chainId() == profile.chainId) { "Trusted RPC chain ID mismatch" }
+                // validateWithEvidence anchors and verifies the trusted chain before provenance
+                // reads, so a standalone chainId round trip here would be redundant.
                 validateTrustedProvenance(trusted, profile, payload)
             }
         } else {
@@ -122,7 +153,6 @@ class TerminalProvisioner(
                 }
             }
             clientFactory.create(trustedNetwork).use { trusted ->
-                require(trusted.chainId() == profile.chainId) { "Trusted RPC chain ID mismatch" }
                 validateTrustedProvenance(trusted, profile, payload)
             }
         }
@@ -170,8 +200,9 @@ class TerminalProvisioner(
         profile: KnownChainProfile,
         payload: TerminalProvisioningPayload,
     ): PaymentToken {
+        val evidence = client.validateWithEvidence(payload.token)
         val actualVaultRuntimeCodeHash = Numeric.toHexString(
-            Hash.sha3(client.vaultRuntimeCode(payload.vault)),
+            Hash.sha3(evidence.vaultRuntimeCode),
         )
         if (actualVaultRuntimeCodeHash != profile.vaultRuntimeCodeHash) {
             throw VaultRuntimeCodeHashMismatchException(
@@ -179,25 +210,19 @@ class TerminalProvisioner(
                 actual = actualVaultRuntimeCodeHash,
             )
         }
-        val actualFactory = client.vaultFactory(payload.vault)
-        require(actualFactory == profile.factory) { "Vault factory does not match the built-in chain pin" }
-        val actualImplementation = client.factoryImplementation(actualFactory)
-        require(actualImplementation == profile.receiverImplementation) {
-            "Factory implementation does not match the built-in chain pin"
-        }
-        require(client.isPaymentToken(payload.vault, payload.token)) {
-            "Selected token is not whitelisted by the provisioned vault"
-        }
-        val decimals = client.tokenDecimals(payload.token)
-        val symbol = client.tokenSymbol(payload.token)
-        val validation = client.validate(payload.token, decimals, symbol)
+        // The validation evidence already contains the vault bytes used above, so provisioning
+        // never repeats eth_getCode(vault) after checking the trusted runtime hash.
+        val validation = evidence.validation
         require(validation.chainId == profile.chainId)
         require(validation.factory == profile.factory)
         require(validation.receiverImplementation == profile.receiverImplementation)
         require(validation.vault == payload.vault)
         require(validation.token == payload.token && validation.tokenWhitelisted)
-        require(validation.tokenDecimals == decimals && validation.tokenSymbol == symbol)
-        return PaymentToken(payload.token.value, symbol, decimals)
+        return PaymentToken(
+            payload.token.value,
+            validation.tokenSymbol,
+            validation.tokenDecimals,
+        )
     }
 
     private fun selectRpcUrl(

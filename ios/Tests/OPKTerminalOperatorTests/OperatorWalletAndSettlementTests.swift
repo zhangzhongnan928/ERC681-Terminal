@@ -3,8 +3,257 @@ import Foundation
 import XCTest
 @testable import OPKTerminalCore
 @testable import OPKTerminalOperator
+@testable import OPKTerminalRPC
+
+private actor OperatorQueueTransport: RPCTransport {
+    private var responses: [RPCTransportResponse]
+    private(set) var requestBodies = [Data]()
+    private(set) var requestTimeouts = [TimeInterval]()
+
+    init(_ bodies: [String]) {
+        responses = bodies.map {
+            RPCTransportResponse(statusCode: 200, body: Data($0.utf8))
+        }
+    }
+
+    func send(_ request: URLRequest) async throws -> RPCTransportResponse {
+        requestBodies.append(request.httpBody ?? Data())
+        requestTimeouts.append(request.timeoutInterval)
+        guard !responses.isEmpty else { throw URLError(.badServerResponse) }
+        return responses.removeFirst()
+    }
+}
+
+private actor ConcurrentBalanceBatchTransport: RPCTransport {
+    private(set) var batchSizes = [Int]()
+    private(set) var maximumInFlight = 0
+    private var inFlight = 0
+
+    func send(_ request: URLRequest) async throws -> RPCTransportResponse {
+        guard let body = request.httpBody,
+              let payload = try JSONSerialization.jsonObject(with: body) as? [[String: Any]]
+        else { throw URLError(.badServerResponse) }
+        batchSizes.append(payload.count)
+        inFlight += 1
+        maximumInFlight = max(maximumInFlight, inFlight)
+        try await Task.sleep(for: .milliseconds(10))
+        inFlight -= 1
+        let result = ABI.word(UInt64(1)).hexString
+        let responses: [[String: Any]] = payload.reversed().map { item in
+            [
+                "jsonrpc": "2.0",
+                "id": item["id"]!,
+                "result": result,
+            ]
+        }
+        return RPCTransportResponse(
+            statusCode: 200,
+            body: try JSONSerialization.data(withJSONObject: responses)
+        )
+    }
+}
+
+private actor SharedOriginConcurrencyTransport: RPCTransport {
+    private(set) var maximumInFlight = 0
+    private var inFlight = 0
+
+    func send(_ request: URLRequest) async throws -> RPCTransportResponse {
+        guard let body = request.httpBody,
+              let payload = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let id = payload["id"]
+        else { throw URLError(.badServerResponse) }
+        inFlight += 1
+        maximumInFlight = max(maximumInFlight, inFlight)
+        try await Task.sleep(for: .milliseconds(20))
+        inFlight -= 1
+        return RPCTransportResponse(
+            statusCode: 200,
+            body: try JSONSerialization.data(withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": "0x14a34",
+            ])
+        )
+    }
+}
 
 final class OperatorWalletAndSettlementTests: XCTestCase {
+    func testOperatorTaskLocalDeadlineBoundsPhysicalRequestTimeout() async throws {
+        let transport = OperatorQueueTransport([
+            #"{"jsonrpc":"2.0","id":1,"result":"0x14a34"}"#,
+        ])
+        let client = try OperatorRPCClient(
+            endpoint: URL(string: "https://rpc.example")!,
+            transport: transport
+        )
+
+        let chainID = try await RPCRequestDeadline.withDeadline(after: .seconds(5)) {
+            try await client.chainID()
+        }
+
+        XCTAssertEqual(chainID, 84_532)
+        let timeouts = await transport.requestTimeouts
+        let timeout = try XCTUnwrap(timeouts.first)
+        XCTAssertGreaterThan(timeout, 0)
+        XCTAssertLessThanOrEqual(timeout, 5)
+        XCTAssertLessThan(timeout, 20)
+    }
+
+    func testReadAndOperatorClientsShareSixRequestPerOriginTransportLimit() async throws {
+        let transport = SharedOriginConcurrencyTransport()
+        let origin = "https://shared-limit.example"
+        let readClients = try (0..<6).map { index in
+            try JSONRPCEthereumClient(
+                endpoint: URL(string: "\(origin)/read/\(index)")!,
+                transport: transport
+            )
+        }
+        let operatorClients = try (0..<6).map { index in
+            try OperatorRPCClient(
+                endpoint: URL(string: "\(origin)/operator/\(index)")!,
+                transport: transport
+            )
+        }
+
+        try await withThrowingTaskGroup(of: UInt64.self) { group in
+            for client in readClients {
+                group.addTask { try await client.chainID() }
+            }
+            for client in operatorClients {
+                group.addTask { try await client.chainID() }
+            }
+            var values = [UInt64]()
+            for try await value in group { values.append(value) }
+            XCTAssertEqual(values, Array(repeating: 84_532, count: 12))
+        }
+
+        let peak = await transport.maximumInFlight
+        XCTAssertEqual(peak, 6)
+    }
+
+    func testProductionFeeQuoteUsesOneStrictThreeReadBatch() async throws {
+        let transport = OperatorQueueTransport([
+            #"[{"jsonrpc":"2.0","id":3,"result":"0xa"},{"jsonrpc":"2.0","id":2,"result":{"baseFeePerGas":"0x64"}},{"jsonrpc":"2.0","id":1,"result":"0x78"}]"#,
+        ])
+        let client = try OperatorRPCClient(
+            endpoint: URL(string: "https://rpc.example")!,
+            transport: transport
+        )
+
+        let quote = try await client.feeQuote()
+
+        XCTAssertEqual(quote.maxPriorityFeePerGas, 10)
+        XCTAssertEqual(quote.maxFeePerGas, 210)
+        XCTAssertEqual(quote.source, .eip1559)
+        let bodies = await transport.requestBodies
+        XCTAssertEqual(bodies.count, 1)
+        let batch = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: bodies[0]) as? [[String: Any]]
+        )
+        XCTAssertEqual(batch.count, 3)
+    }
+
+    func testProductionAuthorizationBatchesOwnerAndOperatorWithSafeOwnerFallback() async throws {
+        let transport = OperatorQueueTransport([
+            #"[{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"owner unavailable"}},{"jsonrpc":"2.0","id":1,"result":"0x0000000000000000000000000000000000000000000000000000000000000001"}]"#,
+        ])
+        let client = try OperatorRPCClient(
+            endpoint: URL(string: "https://rpc.example")!,
+            transport: transport
+        )
+        let address = try EthereumAddress(
+            hex: "0x1111111111111111111111111111111111111111"
+        )
+
+        let authorization = try await client.vaultAuthorization(
+            vault: address,
+            operatorAddress: address
+        )
+
+        XCTAssertTrue(authorization.isAuthorized)
+        XCTAssertFalse(authorization.isOwner)
+        let bodies = await transport.requestBodies
+        XCTAssertEqual(bodies.count, 1)
+    }
+
+    func testProductionTokenBalancesUseParallelStrictTenItemBatches() async throws {
+        let transport = ConcurrentBalanceBatchTransport()
+        let client = try OperatorRPCClient(
+            endpoint: URL(string: "https://rpc.example")!,
+            transport: transport
+        )
+        let token = try EthereumAddress(
+            hex: "0x1111111111111111111111111111111111111111"
+        )
+        let accounts = try (1...20).map { index in
+            try EthereumAddress(
+                hex: "0x" + String(format: "%040llx", index)
+            )
+        }
+
+        let balances = try await client.tokenBalances(token: token, accounts: accounts)
+
+        XCTAssertEqual(balances, Array(repeating: UInt256(1), count: 20))
+        let batchSizes = await transport.batchSizes.sorted()
+        XCTAssertEqual(batchSizes, [10, 10])
+        let maximumInFlight = await transport.maximumInFlight
+        XCTAssertEqual(maximumInFlight, 2)
+    }
+
+    func testOperatorEndpointPoolReusesClientIdentity() throws {
+        let pool = OperatorRPCClientPool(transport: OperatorQueueTransport([]))
+        let endpoint = URL(string: "https://rpc.example")!
+        XCTAssertTrue(try pool.client(for: endpoint) === pool.client(for: endpoint))
+    }
+
+    func testOperatorCanonicalBlockHashRejectsMismatchedReturnedBlockNumber() async throws {
+        let transport = OperatorQueueTransport([
+            #"{"jsonrpc":"2.0","id":1,"result":{"number":"0x11","hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
+        ])
+        let client = try OperatorRPCClient(
+            endpoint: URL(string: "https://rpc.example")!,
+            transport: transport
+        )
+
+        do {
+            _ = try await client.canonicalBlockHash(at: 16)
+            XCTFail("Expected a mismatched block number to be rejected")
+        } catch SettlementOperatorError.malformedRPCResponse {
+            // Expected: the hash is not proof of the requested canonical block.
+        }
+    }
+
+    func testOperatorResponseIDsRejectDecimalExponentStringAndBooleanForms() async throws {
+        let invalidIDs = ["1.0", "1e0", "\"1\"", "true"]
+        for invalidID in invalidIDs {
+            let single = OperatorQueueTransport([
+                "{\"jsonrpc\":\"2.0\",\"id\":\(invalidID),\"result\":\"0x14a34\"}",
+            ])
+            let singleClient = try OperatorRPCClient(
+                endpoint: URL(string: "https://rpc.example")!,
+                transport: single
+            )
+            do {
+                _ = try await singleClient.chainID()
+                XCTFail("Expected strict single-response ID rejection for \(invalidID)")
+            } catch {}
+
+            let batch = OperatorQueueTransport([
+                "[{\"jsonrpc\":\"2.0\",\"id\":\(invalidID),\"result\":\"0x78\"},"
+                    + "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"baseFeePerGas\":\"0x64\"}},"
+                    + "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":\"0xa\"}]",
+            ])
+            let batchClient = try OperatorRPCClient(
+                endpoint: URL(string: "https://rpc.example")!,
+                transport: batch
+            )
+            do {
+                _ = try await batchClient.feeQuote()
+                XCTFail("Expected strict batch-response ID rejection for \(invalidID)")
+            } catch {}
+        }
+    }
+
     func testPrivateKeyOneDerivesCanonicalEthereumAddress() throws {
         let privateKey = Data(repeating: 0, count: 31) + Data([1])
         XCTAssertEqual(
@@ -620,6 +869,46 @@ final class OperatorWalletAndSettlementTests: XCTestCase {
         XCTAssertEqual(privateKeyUses, 0)
     }
 
+    func testPostAuthenticationFinalValidationFailureProducesNoSignature() async throws {
+        let intent = try makeIntent()
+        let confirmed = intent.sessions[0].expectedAmount
+        let rpc = MockOperatorRPC(
+            receipt: nil,
+            head: 100,
+            tokenBalances: [confirmed, confirmed, confirmed, confirmed]
+        )
+        let signer = SuspendedAuthenticationSigner()
+        let coordinator = SettlementCoordinator(
+            rpc: rpc,
+            signer: signer,
+            operatorAddress: try EthereumAddress(
+                hex: "0x2222222222222222222222222222222222222222"
+            )
+        )
+        let prepared = try await coordinator.prepare(intent)
+        let signing = Task {
+            try await coordinator.sign(
+                prepared,
+                authenticationReason: "test",
+                postAuthenticationFinalValidation: {
+                    throw PostAuthenticationTestError.validationProofExpired
+                }
+            )
+        }
+
+        await signer.waitUntilAuthenticationIsPending()
+        await signer.completeAuthentication()
+
+        do {
+            _ = try await signing.value
+            XCTFail("Expected the final post-authentication proof-age check to reject signing")
+        } catch let error as PostAuthenticationTestError {
+            XCTAssertEqual(error, .validationProofExpired)
+        }
+        let privateKeyUses = await signer.privateKeyUseCount()
+        XCTAssertEqual(privateKeyUses, 0)
+    }
+
     func testResetSafetyReadsLatestAndPendingBalancesSeparately() async throws {
         let operatorAddress = try EthereumAddress(
             hex: "0x2222222222222222222222222222222222222222"
@@ -903,6 +1192,7 @@ private actor MutableConfirmationHashState {
 
 private enum PostAuthenticationTestError: Error, Equatable {
     case confirmationHashChanged
+    case validationProofExpired
 }
 
 private func XCTAssertThrowsErrorAsync(

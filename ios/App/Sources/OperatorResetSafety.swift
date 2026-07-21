@@ -292,6 +292,94 @@ final class ForegroundInvoiceReconciliationGate {
     }
 }
 
+/// Coordinates read-only background RPC samples with interactive lifecycle RPC work. A
+/// background unit acquires a token synchronously on the main actor only while no interactive
+/// operation is active. Interactive code sets `operationBusy` first and then waits for existing
+/// tokens through a bounded cooperative drain window, closing the check-then-sample race without
+/// letting a stalled endpoint hold the cashier UI. The global limit also bounds active-sale plus
+/// foreground-repair traffic; an old timed-out unit remains accounted for until it really exits.
+@MainActor
+final class BackgroundRPCWorkGate {
+    private struct IdleWaiter {
+        let continuation: CheckedContinuation<Bool, Never>
+        let timeoutTask: Task<Void, Never>
+    }
+
+    private let maximumConcurrentWork: Int
+    private let maximumInteractiveDrainWait: Duration
+    private var activeTokens = Set<UUID>()
+    private var idleWaiters = [UUID: IdleWaiter]()
+
+    init(
+        maximumConcurrentWork: Int = 4,
+        maximumInteractiveDrainWait: Duration = .seconds(5)
+    ) {
+        precondition(maximumInteractiveDrainWait > .zero)
+        self.maximumConcurrentWork = max(1, maximumConcurrentWork)
+        self.maximumInteractiveDrainWait = maximumInteractiveDrainWait
+    }
+
+    var isInFlight: Bool { !activeTokens.isEmpty }
+    var activeCount: Int { activeTokens.count }
+
+    func acquire(interactiveOperationBusy: Bool) -> UUID? {
+        guard !interactiveOperationBusy,
+              activeTokens.count < maximumConcurrentWork
+        else { return nil }
+        let token = UUID()
+        activeTokens.insert(token)
+        return token
+    }
+
+    func release(_ token: UUID) {
+        guard activeTokens.remove(token) != nil,
+              activeTokens.isEmpty
+        else { return }
+        let waiters = idleWaiters.values
+        idleWaiters.removeAll(keepingCapacity: true)
+        for waiter in waiters {
+            waiter.timeoutTask.cancel()
+            waiter.continuation.resume(returning: true)
+        }
+    }
+
+    /// Gives an already-started background unit a short cooperative drain window. Interactive
+    /// intent is published before this call, so no new background token can start. When the
+    /// deadline wins, the cashier proceeds and the old unit may overlap safely under the shared
+    /// six-request per-origin transport limit.
+    @discardableResult
+    func waitUntilIdle() async -> Bool {
+        guard !activeTokens.isEmpty else { return true }
+        let waiterID = UUID()
+        if Task.isCancelled { return false }
+        return await withCheckedContinuation { continuation in
+            guard !activeTokens.isEmpty else {
+                continuation.resume(returning: true)
+                return
+            }
+            let timeoutTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: self?.maximumInteractiveDrainWait ?? .zero)
+                } catch {
+                    return
+                }
+                self?.expireIdleWaiter(waiterID)
+            }
+            idleWaiters[waiterID] = IdleWaiter(
+                continuation: continuation,
+                timeoutTask: timeoutTask
+            )
+            if Task.isCancelled { expireIdleWaiter(waiterID) }
+        }
+    }
+
+    private func expireIdleWaiter(_ waiterID: UUID) {
+        guard let waiter = idleWaiters.removeValue(forKey: waiterID) else { return }
+        waiter.timeoutTask.cancel()
+        waiter.continuation.resume(returning: false)
+    }
+}
+
 enum SettlementReconciliationPolicy {
     static let activeBatchLimit = 4
     static let evidenceBatchLimit = 4
@@ -300,7 +388,9 @@ enum SettlementReconciliationPolicy {
     static let evidenceMaximumFailureDelay: TimeInterval = 60 * 60
     static let cumulativeReviewRotationDelay: TimeInterval = 10
 
-    static func activeFetchDescriptor() -> FetchDescriptor<StoredSettlement> {
+    static func activeFetchDescriptor(
+        limit: Int = activeBatchLimit
+    ) -> FetchDescriptor<StoredSettlement> {
         var descriptor = FetchDescriptor<StoredSettlement>(
             predicate: #Predicate { record in
                 record.phaseRaw == "pending"
@@ -312,7 +402,7 @@ enum SettlementReconciliationPolicy {
                 SortDescriptor(\.createdAt, order: .forward),
             ]
         )
-        descriptor.fetchLimit = activeBatchLimit
+        descriptor.fetchLimit = max(1, min(limit, activeBatchLimit))
         return descriptor
     }
 

@@ -28,6 +28,24 @@ import java.util.concurrent.TimeUnit
 
 class TerminalProvisionerTest {
     @Test
+    fun trustedProvisioningReusesValidationEvidenceWithoutStandaloneVaultCodeRead() = runBlocking {
+        val reader = FakeReader()
+        val provisioner = TerminalProvisioner(
+            snapshot = { previous() },
+            compareAndCommit = { _, _ -> true },
+            currentWalletSnapshot = ::wallet,
+            lifecycleGate = TerminalLifecycleGate(),
+            clientFactory = ProvisioningChainReaderFactory { reader },
+        )
+
+        provisioner.provision(CANONICAL, wallet()) { commit -> commit() }
+
+        assertEquals(0, reader.chainIdCalls)
+        assertEquals(1, reader.validationEvidenceCalls)
+        assertEquals(0, reader.vaultRuntimeCalls)
+    }
+
+    @Test
     fun newProfileUsesKnownNetworkDefaultWithoutLeakingLegacyFallbackFinality() = runBlocking {
         val committed = mutableListOf<TerminalConfigSnapshot>()
         val operational = FakeReader().apply {
@@ -69,8 +87,11 @@ class TerminalProvisionerTest {
             opened,
         )
         assertEquals(1, operational.chainIdCalls)
+        assertEquals(0, trusted.chainIdCalls)
         assertEquals(0, operational.provenanceCalls)
         assertTrue(trusted.provenanceCalls > 0)
+        assertEquals(1, trusted.validationEvidenceCalls)
+        assertEquals(0, trusted.vaultRuntimeCalls)
         assertTrue(operational.closed)
         assertTrue(trusted.closed)
     }
@@ -149,8 +170,10 @@ class TerminalProvisionerTest {
             opened,
         )
         assertEquals(1, operational.chainIdCalls)
+        assertEquals(0, trusted.chainIdCalls)
         assertEquals(0, operational.provenanceCalls)
-        assertEquals(1, trusted.vaultRuntimeCalls)
+        assertEquals(1, trusted.validationEvidenceCalls)
+        assertEquals(0, trusted.vaultRuntimeCalls)
         assertEquals(0, writes)
         assertTrue(operational.closed)
         assertTrue(trusted.closed)
@@ -264,6 +287,8 @@ class TerminalProvisionerTest {
             error.localizedMessage,
         )
         assertEquals(0, reader.getterCalls)
+        assertEquals(1, reader.validationEvidenceCalls)
+        assertEquals(0, reader.vaultRuntimeCalls)
         assertEquals(0, writes)
         assertTrue(reader.closed)
     }
@@ -405,6 +430,7 @@ class TerminalProvisionerTest {
         var chainIdCalls = 0
         var provenanceCalls = 0
         var vaultRuntimeCalls = 0
+        var validationEvidenceCalls = 0
 
         override fun chainId(): Long {
             chainIdCalls += 1
@@ -435,6 +461,44 @@ class TerminalProvisionerTest {
         override fun tokenSymbol(token: EvmAddress): String {
             provenanceCall()
             return symbolFailure?.let { throw it } ?: "AUD"
+        }
+        override fun validate(token: EvmAddress): NetworkValidation {
+            provenanceCall()
+            validationFailure?.let { throw it }
+            validationHook?.invoke()
+            val decimals = tokenDecimals(token)
+            val symbol = tokenSymbol(token)
+            return NetworkValidation(
+                chainId = remoteChainId,
+                factory = factory,
+                receiverImplementation = implementation,
+                vault = VAULT,
+                token = token,
+                tokenWhitelisted = whitelisted,
+                tokenDecimals = decimals,
+                tokenSymbol = symbol,
+            )
+        }
+        override fun validateWithEvidence(token: EvmAddress): ProvisioningValidationEvidence {
+            provenanceCall()
+            validationEvidenceCalls += 1
+            validationFailure?.let { throw it }
+            validationHook?.invoke()
+            val decimals = decimalsFailure?.let { throw it } ?: 18
+            val symbol = symbolFailure?.let { throw it } ?: "AUD"
+            return ProvisioningValidationEvidence(
+                validation = NetworkValidation(
+                    chainId = remoteChainId,
+                    factory = factory,
+                    receiverImplementation = implementation,
+                    vault = VAULT,
+                    token = token,
+                    tokenWhitelisted = whitelisted,
+                    tokenDecimals = decimals,
+                    tokenSymbol = symbol,
+                ),
+                vaultRuntimeCode = vaultRuntime,
+            )
         }
         override fun validate(
             token: EvmAddress,

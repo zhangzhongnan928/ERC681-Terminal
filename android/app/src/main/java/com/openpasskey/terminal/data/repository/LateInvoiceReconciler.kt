@@ -239,8 +239,11 @@ internal class LateInvoiceReconciler(
             vault = EvmAddress.parse(vaultAddress),
         )
 
-        private const val RPC_CONNECT_TIMEOUT_MILLIS = 2_500
-        private const val RPC_READ_TIMEOUT_MILLIS = 4_000
+        // A worst-case recovery sample performs eight bounded reads. It is retryable best-effort
+        // work, so use a tight 550ms socket budget per read: at most 4.4s for the whole sample.
+        internal const val MAX_RPC_READS_PER_SAMPLE = 8
+        internal const val RPC_CONNECT_TIMEOUT_MILLIS = 250
+        internal const val RPC_READ_TIMEOUT_MILLIS = 300
     }
 }
 

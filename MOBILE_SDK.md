@@ -60,6 +60,30 @@ Addresses are emitted in lower-case hexadecimal. The chain ID and positive `uint
 
 The amount in an ERC-681 URI is a wallet suggestion. The observer measures the actual token balance, keeps partial payments open, waits for the configured block count, and reports overpayment separately.
 
+### Public-RPC request scheduling
+
+Production clients reuse persistent connections within each native HTTP transport and collapse
+independent reads into strict JSON-RPC batches. Each physical batch contains at most 10 calls; a
+larger settlement proof is split into bounded chunks rather than sent as one unbounded payload.
+Batch arrays may be returned out of order, so clients map only exact integer IDs and reject string,
+fractional, duplicate, missing, foreign, malformed, or failed-required responses. A specifically
+tolerated optional call is represented separately and cannot substitute for a required proof
+member. Batch support changes transport scheduling, not the validation boundary: chain identity is
+checked before dependent state is accepted, receiver balances use explicit block tags where
+confirmation depends on them, and canonical block hashes are checked before and after the proof
+window.
+
+Both SDK observers use three sequential network waves per payment sample: chain/head anchor,
+fixed-block balance plus saved-cursor identities, then a final canonical-head identity check. Once
+cashier work is requested, the native apps defer new background RPC units. One already-started
+bounded unit may finish or overlap without owning the cashier queue, while the shared concurrency
+limit prevents an RPC burst. Normal payment polling is five seconds and automatic recovery runs on
+a 60-second cadence. Settlement evidence can be reused only while its exact configuration, intent,
+invoice set, confirmed balances, and canonical cursors match and its original, non-rolling lifetime
+of at most 60 seconds remains valid. Live mutable signing checks and the evidence-age check run again around device
+authentication and immediately before key use. Do not replace these rules with a general-purpose
+RPC cache.
+
 ## Invoice lifecycle
 
 1. Require the device operator wallet and freshly validate the RPC chain, deployed code,

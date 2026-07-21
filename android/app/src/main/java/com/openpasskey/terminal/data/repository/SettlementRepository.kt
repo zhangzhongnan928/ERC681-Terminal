@@ -1,5 +1,6 @@
 package com.openpasskey.terminal.data.repository
 
+import android.os.SystemClock
 import androidx.room.withTransaction
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -12,6 +13,8 @@ import com.openpasskey.terminal.chain.ChainConfig
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
+import com.openpasskey.terminal.rpc.RpcWorkCoordinator
+import com.openpasskey.terminal.rpc.RpcInteractiveReservation
 import com.openpasskey.terminal.data.model.Invoice
 import com.openpasskey.terminal.data.model.InvoiceStatus
 import com.openpasskey.terminal.data.model.SettlementEvent
@@ -24,6 +27,8 @@ import com.openpasskey.terminal.settlement.SettlementChainClient
 import com.openpasskey.terminal.settlement.SettlementFeePolicy
 import com.openpasskey.terminal.settlement.SettlementFeeQuote
 import com.openpasskey.terminal.settlement.SettlementInvoiceIntent
+import com.openpasskey.terminal.settlement.SettlementPreflightRequest
+import com.openpasskey.terminal.settlement.SettlementReceiverSafetyRead
 import com.openpasskey.terminal.settlement.SettlementReceipt
 import com.openpasskey.terminal.settlement.SweepProofClassification
 import com.openpasskey.terminal.settlement.VerifiedSweep
@@ -66,7 +71,13 @@ data class PreparedSettlement(
     val safetyReserve: BigInteger,
     val requiredBalance: BigInteger,
     val currentBalance: BigInteger,
-    val requiredConfirmations: Int
+    val requiredConfirmations: Int,
+    val confirmedRequiredBalance: BigInteger,
+    val historicalProofFingerprint: String,
+    val historicalProofAtElapsedRealtimeMillis: Long,
+    /** Original issuance time of gasLimit; never refreshed when that estimate is reused. */
+    val gasEstimateAtElapsedRealtimeMillis: Long,
+    val preparedAtElapsedRealtimeMillis: Long,
 )
 
 data class PersistedSweepEvidence(
@@ -79,18 +90,73 @@ data class PersistedSweepEvidence(
     val logIndex: Long
 )
 
+/** Narrow repository boundary that keeps wallet key use replaceable in local regression tests. */
+internal interface SettlementWalletAccess {
+    fun snapshot(): OperatorWalletSnapshot
+
+    fun activateAndSignSettlementTransaction(
+        transaction: RawTransaction,
+        chainId: Long,
+        vaultAddress: String,
+        operatorAddress: String,
+        eip1559: Boolean,
+    ): ByteArray
+}
+
+private class StoredSettlementWalletAccess(
+    private val walletStore: OperatorWalletStore,
+) : SettlementWalletAccess {
+    override fun snapshot(): OperatorWalletSnapshot = walletStore.snapshot()
+
+    override fun activateAndSignSettlementTransaction(
+        transaction: RawTransaction,
+        chainId: Long,
+        vaultAddress: String,
+        operatorAddress: String,
+        eip1559: Boolean,
+    ): ByteArray = walletStore.activateAndSignSettlementTransaction(
+        transaction = transaction,
+        chainId = chainId,
+        vaultAddress = vaultAddress,
+        operatorAddress = operatorAddress,
+        eip1559 = eip1559,
+    )
+}
+
 /**
  * App-layer write path. The reusable ERC-681 SDK remains read-only. A single process-wide mutex,
  * pending nonces, and durable pre-broadcast records prevent concurrent nonce reuse.
  */
-class SettlementRepository(
+class SettlementRepository internal constructor(
     private val database: InvoiceDatabase,
-    private val walletStore: OperatorWalletStore,
-    private val chainConfig: ChainConfig,
+    private val walletAccess: SettlementWalletAccess,
+    private val chainConfigSnapshot: () -> TerminalConfigSnapshot,
     private val lifecycleGate: TerminalLifecycleGate,
+    private val rpcWorkCoordinator: RpcWorkCoordinator = RpcWorkCoordinator(),
     private val clientFactory: (String) -> SettlementChainClient = ::Web3jSettlementChainClient,
-    private val gson: Gson = Gson()
+    private val gson: Gson = Gson(),
+    private val elapsedRealtimeMillis: () -> Long = SystemClock::elapsedRealtime,
 ) {
+    constructor(
+        database: InvoiceDatabase,
+        walletStore: OperatorWalletStore,
+        chainConfig: ChainConfig,
+        lifecycleGate: TerminalLifecycleGate,
+        rpcWorkCoordinator: RpcWorkCoordinator = RpcWorkCoordinator(),
+        clientFactory: (String) -> SettlementChainClient = ::Web3jSettlementChainClient,
+        gson: Gson = Gson(),
+        elapsedRealtimeMillis: () -> Long = SystemClock::elapsedRealtime,
+    ) : this(
+        database = database,
+        walletAccess = StoredSettlementWalletAccess(walletStore),
+        chainConfigSnapshot = chainConfig::snapshot,
+        lifecycleGate = lifecycleGate,
+        rpcWorkCoordinator = rpcWorkCoordinator,
+        clientFactory = clientFactory,
+        gson = gson,
+        elapsedRealtimeMillis = elapsedRealtimeMillis,
+    )
+
     private val invoiceDao = database.invoiceDao()
     private val settlementDao = database.settlementDao()
     private val eventDao = database.settlementEventDao()
@@ -99,143 +165,186 @@ class SettlementRepository(
     fun observeRecentTransactions(limit: Int = 50): Flow<List<SettlementTransaction>> =
         settlementDao.observeRecent(limit)
 
+    /** Reserves background priority from pre-auth revalidation through prompt completion. */
+    fun reserveAuthenticationWindow(): RpcInteractiveReservation =
+        rpcWorkCoordinator.reserveInteractiveWindow()
+
     suspend fun prepare(invoiceIds: List<String>): PreparedSettlement = withContext(Dispatchers.IO) {
-        prepareInternal(invoiceIds)
+        rpcWorkCoordinator.withInteractiveOperation { prepareInternal(invoiceIds) }
     }
+
+    /** Completes slow live revalidation before the UI opens the system authentication prompt. */
+    suspend fun prepareForAuthentication(reviewed: PreparedSettlement): PreparedSettlement =
+        withContext(Dispatchers.IO) {
+            rpcWorkCoordinator.withInteractiveOperation {
+                submissionMutex.withLock {
+                    val fresh = prepareInternal(
+                        invoiceIds = reviewed.invoiceIds,
+                        reusableHistoricalProof = reviewed,
+                        reusableGasEstimate = reviewed,
+                    )
+                    requireSameReviewedSettlement(reviewed, fresh)
+                    require(
+                        !SettlementFeePolicy.exceedsConfirmedCost(
+                            reviewed.confirmedRequiredBalance,
+                            fresh.requiredBalance,
+                        ),
+                    ) { "Network fees increased by more than 20%; review the new maximum before signing" }
+                    requireNoActiveOperatorTransaction(fresh)
+                    fresh.copy(confirmedRequiredBalance = reviewed.confirmedRequiredBalance)
+                }
+            }
+        }
 
     /** Must only be invoked after a fresh system biometric/device-credential prompt. */
     suspend fun submit(
         reviewed: PreparedSettlement,
-        userExplicitlyConfirmed: Boolean
+        userExplicitlyConfirmed: Boolean,
+        authenticatedAtElapsedRealtimeMillis: Long,
     ): SettlementTransaction = withContext(Dispatchers.IO) {
         require(userExplicitlyConfirmed) { "Settlement requires explicit operator confirmation" }
-        submissionMutex.withLock {
-            val fresh = prepareInternal(reviewed.invoiceIds)
-            require(fresh.chainId == reviewed.chainId &&
-                fresh.vaultAddress.equals(reviewed.vaultAddress, ignoreCase = true) &&
-                fresh.tokenAddress.equals(reviewed.tokenAddress, ignoreCase = true) &&
-                fresh.invoiceIds == reviewed.invoiceIds &&
-                fresh.confirmedObservedAmounts == reviewed.confirmedObservedAmounts
-            ) { "Settlement configuration changed; review it again" }
-            require(!SettlementFeePolicy.exceedsConfirmedCost(
-                reviewed.requiredBalance,
-                fresh.requiredBalance
-            )) { "Network fees increased by more than 20%; review the new maximum before signing" }
-
-            val active = settlementDao.getActiveForOperator(
-                fresh.chainId,
-                fresh.operatorAddress,
-                ACTIVE_STATUSES
+        rpcWorkCoordinator.withInteractiveOperation {
+            requireFreshAuthenticatedPreparedSettlement(
+                prepared = reviewed,
+                authenticatedAtElapsedRealtimeMillis = authenticatedAtElapsedRealtimeMillis,
+                nowElapsedRealtimeMillis = elapsedRealtimeMillis(),
             )
-            require(active.isEmpty()) {
-                "Another operator transaction is pending; recover it before assigning a new nonce"
-            }
+            submissionMutex.withLock {
+                requireNoActiveOperatorTransaction(reviewed)
+                // Post-authentication work is intentionally only the live, mutable safety core.
+                // The pre-prompt proof supplied provenance and fees moments ago.
+                val fresh = requirePreparedBalancesStillExact(reviewed)
+                requireFreshAuthenticatedPreparedSettlement(
+                    prepared = fresh,
+                    authenticatedAtElapsedRealtimeMillis = authenticatedAtElapsedRealtimeMillis,
+                    nowElapsedRealtimeMillis = elapsedRealtimeMillis(),
+                )
 
-            val raw = when (fresh.feeQuote.mode) {
-                SettlementFeeMode.LEGACY -> RawTransaction.createTransaction(
-                    fresh.nonce,
-                    requireNotNull(fresh.feeQuote.gasPrice),
-                    fresh.gasLimit,
-                    fresh.vaultAddress,
-                    BigInteger.ZERO,
-                    fresh.callData
-                )
-                SettlementFeeMode.EIP1559 -> RawTransaction.createTransaction(
-                    fresh.chainId,
-                    fresh.nonce,
-                    fresh.gasLimit,
-                    fresh.vaultAddress,
-                    BigInteger.ZERO,
-                    fresh.callData,
-                    requireNotNull(fresh.feeQuote.maxPriorityFeePerGas),
-                    requireNotNull(fresh.feeQuote.maxFeePerGas)
-                )
-            }
-            // The contract sweeps each receiver's entire live balance. Re-read the exact amounts
-            // immediately before signing so value that arrived after confirmation/review cannot be
-            // swept under an older approval.
-            requirePreparedBalancesStillExact(fresh)
-            val transaction = lifecycleGate.withExclusiveMutation {
-                requireCurrentOperatorBinding(fresh.operatorAddress)
-                val invoices = requireEligibleInvoices(fresh.invoiceIds)
-                require(
-                    invoices.map(Invoice::settlementObservedAmount) ==
-                        fresh.confirmedObservedAmounts,
-                ) { "Confirmed invoice observations changed immediately before signing" }
-                // Activate only the exact historical target just revalidated above, then invoke
-                // the constrained signer in the same local mutation critical section.
-                val signedBytes = walletStore.activateAndSignSettlementTransaction(
-                    transaction = raw,
-                    chainId = fresh.chainId,
-                    vaultAddress = fresh.vaultAddress,
-                    operatorAddress = fresh.operatorAddress,
-                    eip1559 = fresh.feeQuote.mode == SettlementFeeMode.EIP1559,
-                )
-                val signedHex = Numeric.toHexString(signedBytes)
-                signedBytes.fill(0)
-                val localHash = Numeric.toHexString(Hash.sha3(Numeric.hexStringToByteArray(signedHex)))
-                val now = nowSeconds()
-                val persisted = SettlementTransaction(
-                id = UUID.randomUUID().toString(),
-                chainId = fresh.chainId,
-                networkName = fresh.networkName,
-                rpcUrl = fresh.rpcUrl,
-                vaultAddress = fresh.vaultAddress,
-                tokenAddress = fresh.tokenAddress,
-                tokenSymbol = fresh.tokenSymbol,
-                operatorAddress = fresh.operatorAddress,
-                invoiceIdsJson = gson.toJson(invoices.map(Invoice::invoiceId)),
-                expectedAmountsJson = gson.toJson(invoices.map(Invoice::expectedAmount)),
-                receiverAddressesJson = gson.toJson(invoices.map(Invoice::receiver)),
-                requiredConfirmations = fresh.requiredConfirmations,
-                callData = fresh.callData,
-                nonce = fresh.nonce.toString(),
-                gasLimit = fresh.gasLimit.toString(),
-                feeMode = fresh.feeQuote.mode,
-                gasPrice = fresh.feeQuote.gasPrice?.toString(),
-                maxPriorityFeePerGas = fresh.feeQuote.maxPriorityFeePerGas?.toString(),
-                maxFeePerGas = fresh.feeQuote.maxFeePerGas?.toString(),
-                maxGasCostWei = fresh.maximumGasCost.toString(),
-                feeReserveWei = fresh.safetyReserve.toString(),
-                requiredBalanceWei = fresh.requiredBalance.toString(),
-                txHash = localHash,
-                signedRawTransaction = signedHex,
-                status = SettlementTransactionStatus.SIGNED,
-                createdAt = now,
-                updatedAt = now
-                )
-                database.withTransaction {
-                    settlementDao.insert(persisted)
-                    val attached = invoiceDao.attachSettlement(fresh.invoiceIds, persisted.id)
-                    check(attached == fresh.invoiceIds.size) {
-                        "One or more invoices became unavailable before signing was persisted"
-                    }
+                val raw = when (fresh.feeQuote.mode) {
+                    SettlementFeeMode.LEGACY -> RawTransaction.createTransaction(
+                        fresh.nonce,
+                        requireNotNull(fresh.feeQuote.gasPrice),
+                        fresh.gasLimit,
+                        fresh.vaultAddress,
+                        BigInteger.ZERO,
+                        fresh.callData,
+                    )
+                    SettlementFeeMode.EIP1559 -> RawTransaction.createTransaction(
+                        fresh.chainId,
+                        fresh.nonce,
+                        fresh.gasLimit,
+                        fresh.vaultAddress,
+                        BigInteger.ZERO,
+                        fresh.callData,
+                        requireNotNull(fresh.feeQuote.maxPriorityFeePerGas),
+                        requireNotNull(fresh.feeQuote.maxFeePerGas),
+                    )
                 }
-                persisted
+                val transaction = lifecycleGate.withExclusiveMutation {
+                    requireCurrentOperatorBinding(fresh.operatorAddress)
+                    val invoices = requireEligibleInvoices(fresh.invoiceIds)
+                    require(
+                        invoices.map(Invoice::settlementObservedAmount) ==
+                            fresh.confirmedObservedAmounts,
+                    ) { "Confirmed invoice observations changed immediately before signing" }
+                    // DB/lifecycle checks above may cross the proof boundary. Recheck every proof
+                    // clock at the final key-use boundary, not only device authentication.
+                    requireFreshAuthenticatedPreparedSettlement(
+                        prepared = fresh,
+                        authenticatedAtElapsedRealtimeMillis = authenticatedAtElapsedRealtimeMillis,
+                        nowElapsedRealtimeMillis = elapsedRealtimeMillis(),
+                    )
+                    // Activate only the exact historical target just revalidated above, then use
+                    // the constrained signer in the same local mutation critical section.
+                    val signedBytes = walletAccess.activateAndSignSettlementTransaction(
+                        transaction = raw,
+                        chainId = fresh.chainId,
+                        vaultAddress = fresh.vaultAddress,
+                        operatorAddress = fresh.operatorAddress,
+                        eip1559 = fresh.feeQuote.mode == SettlementFeeMode.EIP1559,
+                    )
+                    val signedHex = Numeric.toHexString(signedBytes)
+                    signedBytes.fill(0)
+                    val localHash = Numeric.toHexString(
+                        Hash.sha3(Numeric.hexStringToByteArray(signedHex)),
+                    )
+                    val now = nowSeconds()
+                    val persisted = SettlementTransaction(
+                        id = UUID.randomUUID().toString(),
+                        chainId = fresh.chainId,
+                        networkName = fresh.networkName,
+                        rpcUrl = fresh.rpcUrl,
+                        vaultAddress = fresh.vaultAddress,
+                        tokenAddress = fresh.tokenAddress,
+                        tokenSymbol = fresh.tokenSymbol,
+                        operatorAddress = fresh.operatorAddress,
+                        invoiceIdsJson = gson.toJson(invoices.map(Invoice::invoiceId)),
+                        expectedAmountsJson = gson.toJson(invoices.map(Invoice::expectedAmount)),
+                        receiverAddressesJson = gson.toJson(invoices.map(Invoice::receiver)),
+                        requiredConfirmations = fresh.requiredConfirmations,
+                        callData = fresh.callData,
+                        nonce = fresh.nonce.toString(),
+                        gasLimit = fresh.gasLimit.toString(),
+                        feeMode = fresh.feeQuote.mode,
+                        gasPrice = fresh.feeQuote.gasPrice?.toString(),
+                        maxPriorityFeePerGas = fresh.feeQuote.maxPriorityFeePerGas?.toString(),
+                        maxFeePerGas = fresh.feeQuote.maxFeePerGas?.toString(),
+                        maxGasCostWei = fresh.maximumGasCost.toString(),
+                        feeReserveWei = fresh.safetyReserve.toString(),
+                        requiredBalanceWei = fresh.requiredBalance.toString(),
+                        txHash = localHash,
+                        signedRawTransaction = signedHex,
+                        status = SettlementTransactionStatus.SIGNED,
+                        createdAt = now,
+                        updatedAt = now,
+                    )
+                    database.withTransaction {
+                        settlementDao.insert(persisted)
+                        val attached = invoiceDao.attachSettlement(fresh.invoiceIds, persisted.id)
+                        check(attached == fresh.invoiceIds.size) {
+                            "One or more invoices became unavailable before signing was persisted"
+                        }
+                    }
+                    persisted
+                }
+                // The post-authentication path performs exactly one side-effecting RPC and
+                // returns. Receipt/finality polling belongs to scheduled or explicit recovery.
+                broadcastSignedTransaction(transaction.id)
             }
-            broadcastAndRecover(transaction.id)
         }
     }
 
     suspend fun recoverPending() = withContext(Dispatchers.IO) {
-        submissionMutex.withLock {
-            settlementDao.getByStatuses(ACTIVE_STATUSES).forEach { transaction ->
+        if (rpcWorkCoordinator.interactive) return@withContext
+        settlementDao.getByStatuses(ACTIVE_STATUSES).forEach { transaction ->
+            // Lock ordering matches every interactive settlement path: endpoint budget first,
+            // then nonce/submission serialization. Each automatic record is non-polling.
+            val completed = rpcWorkCoordinator.withBackgroundOperation {
                 try {
-                    broadcastAndRecover(transaction.id)
+                    submissionMutex.withLock {
+                        recoverOneBackgroundStep(transaction.id)
+                    }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
                     recordRecoverableError(transaction, error)
                 }
             }
+            if (completed == null) return@withContext
         }
     }
 
     suspend fun refreshTransaction(id: String): SettlementTransaction = withContext(Dispatchers.IO) {
-        submissionMutex.withLock { broadcastAndRecover(id) }
+        rpcWorkCoordinator.withInteractiveOperation {
+            submissionMutex.withLock { broadcastAndRecover(id) }
+        }
     }
 
-    private suspend fun prepareInternal(invoiceIds: List<String>): PreparedSettlement {
+    private suspend fun prepareInternal(
+        invoiceIds: List<String>,
+        reusableHistoricalProof: PreparedSettlement? = null,
+        reusableGasEstimate: PreparedSettlement? = null,
+    ): PreparedSettlement {
         require(invoiceIds.isNotEmpty()) { "Choose at least one invoice" }
         require(invoiceIds.size <= SettlementAbi.MAX_BATCH_SIZE) {
             "Choose at most ${SettlementAbi.MAX_BATCH_SIZE} invoices"
@@ -256,8 +365,23 @@ class SettlementRepository(
             require(!EvmAddress.parse(invoice.vaultAddress).isZero) { "Settlement vault must not be zero" }
             requirePinnedHistoricalInvoiceSnapshot(invoice)
         }
-        validateHistoricalSettlementSnapshot(first)
-        val wallet = walletStore.snapshot()
+        val proofFingerprint = historicalSettlementProofFingerprint(first)
+        val proofNow = elapsedRealtimeMillis()
+        val reusableProofIsFresh = reusableHistoricalProof?.let { proof ->
+            proof.historicalProofFingerprint == proofFingerprint &&
+                isElapsedProofFresh(
+                    proof.historicalProofAtElapsedRealtimeMillis,
+                    proofNow,
+                    HISTORICAL_PROOF_TTL_MILLIS,
+                )
+        } == true
+        val historicalProofAt = if (reusableProofIsFresh) {
+            requireNotNull(reusableHistoricalProof).historicalProofAtElapsedRealtimeMillis
+        } else {
+            validateHistoricalSettlementSnapshot(first)
+            proofNow
+        }
+        val wallet = walletAccess.snapshot()
         require(wallet.availability == OperatorWalletAvailability.READY) {
             wallet.error ?: "Create the terminal operator wallet first"
         }
@@ -271,11 +395,50 @@ class SettlementRepository(
         val confirmedObservedAmounts = invoices.map(Invoice::settlementObservedAmount)
 
         clientFactory(first.rpcUrl).use { client ->
-            require(client.chainId() == first.chainId) { "RPC chain ID does not match the invoice snapshot" }
-            requireOperatorAuthorization(client, first.vaultAddress, operator)
+            val cursors = invoices.map(Invoice::settlementConfirmationCursor)
+            val request = SettlementPreflightRequest(
+                operatorAddress = operator,
+                vaultAddress = first.vaultAddress,
+                callData = callData,
+                receivers = invoices.zip(cursors).map { (invoice, cursor) ->
+                    SettlementReceiverSafetyRead(
+                        tokenAddress = invoice.token,
+                        receiverAddress = invoice.receiver,
+                        canonicalBlockNumber = cursor.first,
+                    )
+                },
+            )
+            val canReuseGasEstimate = reusableGasEstimate.canReuseGasEstimateFor(
+                chainId = first.chainId,
+                rpcUrl = first.rpcUrl,
+                vaultAddress = first.vaultAddress,
+                tokenAddress = first.token,
+                operatorAddress = operator,
+                invoiceIds = invoices.map(Invoice::invoiceId),
+                confirmedObservedAmounts = confirmedObservedAmounts,
+                callData = callData,
+                // Historical revalidation can itself take several seconds; check the gas-proof
+                // TTL at the actual reuse decision rather than at the start of prepare().
+                nowElapsedRealtimeMillis = elapsedRealtimeMillis(),
+            )
+            val live = client.settlementPreflight(
+                request = request,
+                includeGasEstimate = !canReuseGasEstimate,
+            )
+            require(live.chainId == first.chainId) {
+                "RPC chain ID does not match the invoice snapshot"
+            }
+            requireLiveOperatorAuthorization(live.ownerAddress, live.operatorListed, operator)
+            require(live.canonicalBlockHashes.size == invoices.size &&
+                live.canonicalBlockHashesAfter.size == invoices.size &&
+                live.receiverBalances.size == invoices.size
+            ) { "Settlement safety batch returned incomplete receiver results" }
             invoices.forEachIndexed { index, invoice ->
-                requireCanonicalSettlementCursor(invoice, client::canonicalBlockHash)
-                val liveBalance = client.tokenBalance(invoice.token, invoice.receiver)
+                requireCanonicalSettlementCursor(
+                    invoice,
+                    live.canonicalBlockHashes[index],
+                )
+                val liveBalance = live.receiverBalances[index]
                 val previouslyProven = previouslyProvenByInvoice.getValue(invoice.invoiceId.lowercase())
                 if (invoice.status == InvoiceStatus.LATE_PAYMENT_READY) {
                     require(previouslyProven.signum() > 0 || invoice.settlementAmbiguous) {
@@ -295,12 +458,36 @@ class SettlementRepository(
                         "wait for the exact current balance to confirm before settlement"
                 }
             }
-            client.simulate(operator, first.vaultAddress, callData)
-            val nonce = client.pendingNonce(operator)
-            val gasLimit = client.estimateGas(operator, first.vaultAddress, callData, nonce)
-            val quote = client.feeQuote()
+            invoices.forEachIndexed { index, invoice ->
+                requireCanonicalSettlementCursor(invoice, live.canonicalBlockHashesAfter[index])
+            }
+            val nonce = live.nonce
+            val reusableGasStillFresh = canReuseGasEstimate && isElapsedProofFresh(
+                requireNotNull(reusableGasEstimate).gasEstimateAtElapsedRealtimeMillis,
+                elapsedRealtimeMillis(),
+                PREPARED_PROOF_TTL_MILLIS,
+            )
+            val gasLimit = if (reusableGasStillFresh) {
+                val reusable = requireNotNull(reusableGasEstimate)
+                require(nonce == reusable.nonce) {
+                    "Operator nonce changed after settlement review; review it again"
+                }
+                reusable.gasLimit
+            } else if (canReuseGasEstimate) {
+                // The three-wave live proof crossed the TTL boundary. Refresh only the dependent
+                // estimate instead of returning a newly timestamped wrapper around stale gas.
+                client.estimateGas(operator, first.vaultAddress, callData, nonce)
+            } else {
+                requireNotNull(live.gasLimit) { "Settlement gas estimate is unavailable" }
+            }
+            val gasEstimateAt = if (reusableGasStillFresh) {
+                requireNotNull(reusableGasEstimate).gasEstimateAtElapsedRealtimeMillis
+            } else {
+                elapsedRealtimeMillis()
+            }
+            val quote = live.feeQuote
             val requirement = SettlementBalancePolicy.requirement(gasLimit, quote)
-            val balance = client.nativeBalance(operator)
+            val balance = live.nativeBalance
             require(balance >= requirement.requiredBalance) {
                 "Low gas balance: requires ${requirement.requiredBalance} wei including reserve; has $balance wei"
             }
@@ -325,33 +512,220 @@ class SettlementRepository(
                 safetyReserve = requirement.safetyReserve,
                 requiredBalance = requirement.requiredBalance,
                 currentBalance = balance,
-                requiredConfirmations = invoices.maxOf { it.confirmationBlocks.coerceAtLeast(1) }
+                requiredConfirmations = invoices.maxOf { it.confirmationBlocks.coerceAtLeast(1) },
+                confirmedRequiredBalance = reusableGasEstimate?.confirmedRequiredBalance
+                    ?: requirement.requiredBalance,
+                historicalProofFingerprint = proofFingerprint,
+                historicalProofAtElapsedRealtimeMillis = historicalProofAt,
+                gasEstimateAtElapsedRealtimeMillis = gasEstimateAt,
+                preparedAtElapsedRealtimeMillis = elapsedRealtimeMillis(),
             )
         }
     }
 
-    private suspend fun broadcastAndRecover(id: String): SettlementTransaction {
+    private suspend fun broadcastSignedTransaction(id: String): SettlementTransaction {
+        var transaction = requireNotNull(settlementDao.getById(id)) {
+            "Settlement transaction not found"
+        }
+        require(transaction.status == SettlementTransactionStatus.SIGNED) {
+            "Fresh settlement transaction is not ready for broadcast"
+        }
+        val raw = requireNotNull(transaction.signedRawTransaction) {
+            "Signed transaction bytes are unavailable"
+        }
+        clientFactory(transaction.rpcUrl).use { client ->
+            val outcome = broadcastFreshSignedTransaction(client, raw, transaction.txHash)
+            transaction = transaction.copy(
+                status = if (outcome.accepted) SettlementTransactionStatus.SUBMITTED
+                else SettlementTransactionStatus.SIGNED,
+                error = outcome.error,
+                updatedAt = nowSeconds(),
+            )
+            settlementDao.update(transaction)
+            return transaction
+        }
+    }
+
+    /**
+     * Advances one durable recovery state without polling. Most states require one transport
+     * call; a receipt that appears final in the bounded snapshot requires one ordered head read
+     * before terminalization. Each call retains the shared OkHttp deadline, and background work
+     * uses a separate coordinator queue so it cannot hold the cashier's interactive queue.
+     */
+    private suspend fun recoverOneBackgroundStep(id: String): SettlementTransaction {
+        var transaction = requireNotNull(settlementDao.getById(id)) {
+            "Settlement transaction not found"
+        }
+        if (transaction.status !in ACTIVE_STATUSES) return transaction
+        clientFactory(transaction.rpcUrl).use { client ->
+            when (transaction.status) {
+                SettlementTransactionStatus.SIGNED -> {
+                    val raw = requireNotNull(transaction.signedRawTransaction) {
+                        "Signed transaction bytes are unavailable"
+                    }
+                    val outcome = broadcastFreshSignedTransaction(client, raw, transaction.txHash)
+                    transaction = transaction.copy(
+                        status = if (outcome.accepted) SettlementTransactionStatus.SUBMITTED
+                        else SettlementTransactionStatus.SIGNED,
+                        error = outcome.error,
+                        updatedAt = nowSeconds(),
+                    )
+                    settlementDao.update(transaction)
+                    return transaction
+                }
+                SettlementTransactionStatus.SUBMITTED -> {
+                    return observeBackgroundReceiptOnce(transaction, client)
+                }
+                SettlementTransactionStatus.CONFIRMING -> {
+                    val expectedBlock = transaction.receiptBlock
+                        ?: return observeBackgroundReceiptOnce(transaction, client)
+                    val snapshot = client.settlementRecoverySnapshot(
+                        transaction.txHash,
+                        expectedBlock,
+                    )
+                    val receipt = snapshot.receipt
+                    if (receipt == null ||
+                        !receipt.transactionHash.equals(transaction.txHash, ignoreCase = true) ||
+                        receipt.blockNumber != expectedBlock
+                    ) {
+                        transaction = transaction.copy(
+                            receiptBlock = null,
+                            error = "Receipt identity changed during confirmation; waiting for " +
+                                "canonical inclusion",
+                            updatedAt = nowSeconds(),
+                        )
+                        settlementDao.update(transaction)
+                        return transaction
+                    }
+                    val target = settlementConfirmationTarget(
+                        receipt.blockNumber,
+                        transaction.requiredConfirmations,
+                    )
+                    if (snapshot.latestBlockNumber < target) {
+                        transaction = transaction.copy(
+                            error = "Waiting for the canonical head to reach block $target",
+                            updatedAt = nowSeconds(),
+                        )
+                        settlementDao.update(transaction)
+                        return transaction
+                    }
+                    if (!receiptMatchesCanonicalBlock(
+                            receipt,
+                            snapshot.canonicalReceiptBlockHash,
+                        )
+                    ) {
+                        transaction = transaction.copy(
+                            receiptBlock = null,
+                            error = "Receipt block is missing or orphaned; waiting for canonical " +
+                                "inclusion",
+                            updatedAt = nowSeconds(),
+                        )
+                        settlementDao.update(transaction)
+                        return transaction
+                    }
+                    // A JSON-RPC batch is not an atomic snapshot. The head response in the batch
+                    // can be produced before the receipt and canonical-hash reads by a different
+                    // backend. Re-read the head after those identity checks and require finality
+                    // to still hold before performing an irreversible terminal transition.
+                    val finalHeadResult = try {
+                        Result.success(client.blockNumber())
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        Result.failure(error)
+                    }
+                    val finalHead = finalHeadResult.getOrNull()
+                    if (finalHead == null || finalHead < target) {
+                        transaction = transaction.copy(
+                            status = SettlementTransactionStatus.CONFIRMING,
+                            receiptBlock = receipt.blockNumber,
+                            error = finalHeadResult.exceptionOrNull()?.let { error ->
+                                "Unable to recheck final confirmation depth: " +
+                                    (error.message ?: "RPC read failed")
+                            } ?: "Confirmation depth changed during finality verification; " +
+                                "waiting for the canonical head to reach block $target",
+                            updatedAt = nowSeconds(),
+                        )
+                        settlementDao.update(transaction)
+                        return transaction
+                    }
+                    return if (receipt.successful) {
+                        verifyAndFinalize(transaction, receipt)
+                    } else {
+                        finalizeReverted(transaction, receipt)
+                    }
+                }
+                else -> return transaction
+            }
+        }
+    }
+
+    private suspend fun observeBackgroundReceiptOnce(
+        transaction: SettlementTransaction,
+        client: SettlementChainClient,
+    ): SettlementTransaction {
+        val receipt = client.transactionReceipt(transaction.txHash)
+        val updated = if (receipt == null) {
+            transaction.copy(
+                error = "Transaction is pending; recovery will continue automatically",
+                updatedAt = nowSeconds(),
+            )
+        } else if (!receipt.transactionHash.equals(transaction.txHash, ignoreCase = true)) {
+            transaction.copy(
+                status = SettlementTransactionStatus.CONFIRMING,
+                receiptBlock = null,
+                error = "RPC returned a receipt for a different transaction",
+                updatedAt = nowSeconds(),
+            )
+        } else {
+            transaction.copy(
+                status = SettlementTransactionStatus.CONFIRMING,
+                receiptBlock = receipt.blockNumber,
+                error = null,
+                updatedAt = nowSeconds(),
+            )
+        }
+        settlementDao.update(updated)
+        return updated
+    }
+
+    private suspend fun broadcastAndRecover(
+        id: String,
+        pollForProgress: Boolean = true,
+    ): SettlementTransaction {
         var transaction = requireNotNull(settlementDao.getById(id)) { "Settlement transaction not found" }
         if (transaction.status !in ACTIVE_STATUSES) return transaction
         clientFactory(transaction.rpcUrl).use { client ->
             require(client.chainId() == transaction.chainId) { "RPC chain changed during recovery" }
+            var receipt: SettlementReceipt? = null
+            var broadcastAttemptedThisPass = false
             if (transaction.status == SettlementTransactionStatus.SIGNED) {
                 val raw = requireNotNull(transaction.signedRawTransaction) {
                     "Signed transaction bytes are unavailable"
                 }
-                var alreadyMinedReceipt = client.transactionReceipt(transaction.txHash)
-                if (alreadyMinedReceipt == null) {
+                receipt = client.transactionReceipt(transaction.txHash)
+                if (receipt == null) {
                     try {
+                        broadcastAttemptedThisPass = true
                         val returnedHash = client.sendRawTransaction(raw)
                         require(returnedHash.equals(transaction.txHash, true)) {
                             "RPC returned a different transaction hash"
                         }
                     } catch (error: Exception) {
+                        if (!pollForProgress) {
+                            transaction = transaction.copy(
+                                status = SettlementTransactionStatus.SIGNED,
+                                error = error.message ?: "Broadcast result unknown",
+                                updatedAt = nowSeconds(),
+                            )
+                            settlementDao.update(transaction)
+                            return transaction
+                        }
                         // A response can be lost after acceptance. Always query the deterministic
                         // local hash, and treat an exact "already known" response as submitted.
-                        alreadyMinedReceipt = client.transactionReceipt(transaction.txHash)
+                        receipt = client.transactionReceipt(transaction.txHash)
                         val alreadyKnown = isKnownTransactionResponse(error.message)
-                        if (alreadyMinedReceipt == null && !alreadyKnown) {
+                        if (receipt == null && !alreadyKnown) {
                             transaction = transaction.copy(
                                 status = SettlementTransactionStatus.SIGNED,
                                 error = error.message ?: "Broadcast result unknown",
@@ -377,19 +751,20 @@ class SettlementRepository(
                 }
             }
 
-            var receipt: SettlementReceipt? = null
             var receiptAttempt = 0
-            while (receipt == null && receiptAttempt < RECEIPT_POLL_ATTEMPTS) {
+            val receiptPollAttempts = if (pollForProgress) RECEIPT_POLL_ATTEMPTS else 1
+            while (receipt == null && receiptAttempt < receiptPollAttempts) {
                 receipt = client.transactionReceipt(transaction.txHash)
                 receiptAttempt += 1
-                if (receipt == null && receiptAttempt < RECEIPT_POLL_ATTEMPTS) {
+                if (receipt == null && receiptAttempt < receiptPollAttempts) {
                     delay(RECEIPT_POLL_MILLIS)
                 }
             }
             val firstReceipt = receipt ?: run {
                 var rebroadcastError: String? = null
                 val retainedRaw = transaction.signedRawTransaction
-                if (retainedRaw != null) {
+                if (retainedRaw != null && (pollForProgress || !broadcastAttemptedThisPass)) {
+                    broadcastAttemptedThisPass = true
                     try {
                         val returnedHash = client.sendRawTransaction(retainedRaw)
                         require(returnedHash.equals(transaction.txHash, true)) {
@@ -400,7 +775,7 @@ class SettlementRepository(
                             rebroadcastError = error.message ?: "Identical transaction rebroadcast failed"
                         }
                     }
-                } else {
+                } else if (retainedRaw == null) {
                     rebroadcastError = "Signed transaction bytes are unavailable for recovery"
                 }
                 val wasConfirming = transaction.status == SettlementTransactionStatus.CONFIRMING
@@ -433,7 +808,8 @@ class SettlementRepository(
             )
             var latestBlock = client.blockNumber()
             var confirmationAttempt = 0
-            while (latestBlock < target && confirmationAttempt < CONFIRMATION_POLL_ATTEMPTS) {
+            val confirmationPollAttempts = if (pollForProgress) CONFIRMATION_POLL_ATTEMPTS else 0
+            while (latestBlock < target && confirmationAttempt < confirmationPollAttempts) {
                 delay(RECEIPT_POLL_MILLIS)
                 latestBlock = client.blockNumber()
                 confirmationAttempt += 1
@@ -660,7 +1036,9 @@ class SettlementRepository(
         return ordered
     }
 
-    private suspend fun requirePreparedBalancesStillExact(prepared: PreparedSettlement) {
+    private suspend fun requirePreparedBalancesStillExact(
+        prepared: PreparedSettlement,
+    ): PreparedSettlement {
         val invoices = requireEligibleInvoices(prepared.invoiceIds)
         require(invoices.map(Invoice::settlementObservedAmount) == prepared.confirmedObservedAmounts) {
             "Confirmed invoice observations changed; review settlement again"
@@ -677,20 +1055,65 @@ class SettlementRepository(
             ) { "Historical invoice snapshot changed after settlement review" }
             requirePinnedHistoricalInvoiceSnapshot(invoice)
         }
-        validateHistoricalSettlementSnapshot(invoices.first())
+        require(
+            historicalSettlementProofFingerprint(invoices.first()) ==
+                prepared.historicalProofFingerprint,
+        ) { "Historical settlement proof no longer matches the invoice snapshot" }
         clientFactory(prepared.rpcUrl).use { client ->
-            require(client.chainId() == prepared.chainId) {
+            val cursors = invoices.map(Invoice::settlementConfirmationCursor)
+            val live = client.settlementPreflight(
+                request = SettlementPreflightRequest(
+                    operatorAddress = prepared.operatorAddress,
+                    vaultAddress = prepared.vaultAddress,
+                    callData = prepared.callData,
+                    receivers = invoices.zip(cursors).map { (invoice, cursor) ->
+                        SettlementReceiverSafetyRead(
+                            tokenAddress = invoice.token,
+                            receiverAddress = invoice.receiver,
+                            canonicalBlockNumber = cursor.first,
+                        )
+                    },
+                ),
+                includeGasEstimate = false,
+            )
+            require(live.chainId == prepared.chainId) {
                 "RPC chain changed before settlement signing"
             }
-            requireOperatorAuthorization(client, prepared.vaultAddress, prepared.operatorAddress)
+            requireLiveOperatorAuthorization(
+                ownerAddress = live.ownerAddress,
+                operatorListed = live.operatorListed,
+                operatorAddress = prepared.operatorAddress,
+            )
+            require(live.nonce == prepared.nonce) {
+                "Operator nonce changed after authentication; review settlement again"
+            }
             invoices.forEachIndexed { index, invoice ->
-                requireCanonicalSettlementCursor(invoice, client::canonicalBlockHash)
-                val live = client.tokenBalance(invoice.token, invoice.receiver)
-                require(live == prepared.confirmedObservedAmounts[index]) {
+                requireCanonicalSettlementCursor(invoice, live.canonicalBlockHashes[index])
+                require(live.receiverBalances[index] == prepared.confirmedObservedAmounts[index]) {
                     "Receiver ${invoice.receiver} changed after review; refresh and wait for confirmation"
                 }
             }
-            client.simulate(prepared.operatorAddress, prepared.vaultAddress, prepared.callData)
+            invoices.forEachIndexed { index, invoice ->
+                requireCanonicalSettlementCursor(invoice, live.canonicalBlockHashesAfter[index])
+            }
+            val requirement = SettlementBalancePolicy.requirement(prepared.gasLimit, live.feeQuote)
+            require(
+                !SettlementFeePolicy.exceedsConfirmedCost(
+                    prepared.confirmedRequiredBalance,
+                    requirement.requiredBalance,
+                ),
+            ) { "Network fees increased by more than 20%; review the new maximum before signing" }
+            require(live.nativeBalance >= requirement.requiredBalance) {
+                "Low gas balance: requires ${requirement.requiredBalance} wei including reserve; " +
+                    "has ${live.nativeBalance} wei"
+            }
+            return prepared.copy(
+                feeQuote = live.feeQuote,
+                maximumGasCost = requirement.maximumGasCost,
+                safetyReserve = requirement.safetyReserve,
+                requiredBalance = requirement.requiredBalance,
+                currentBalance = live.nativeBalance,
+            )
         }
     }
 
@@ -711,8 +1134,9 @@ class SettlementRepository(
             connectTimeoutMillis = HISTORICAL_RPC_CONNECT_TIMEOUT_MILLIS,
             readTimeoutMillis = HISTORICAL_RPC_READ_TIMEOUT_MILLIS,
         )
-        val validation = rpc.validate(token, invoice.tokenDecimals, invoice.tokenSymbol)
-        val vaultRuntimeHash = Numeric.toHexString(Hash.sha3(rpc.codeAt(vault)))
+        val evidence = rpc.validateWithEvidence(token, invoice.tokenDecimals, invoice.tokenSymbol)
+        val validation = evidence.validation
+        val vaultRuntimeHash = Numeric.toHexString(Hash.sha3(evidence.vaultRuntimeCode))
         require(vaultRuntimeHash.equals(profile.vaultRuntimeCodeHash, true)) {
             "Historical vault runtime bytecode does not match the trusted chain pin"
         }
@@ -727,23 +1151,61 @@ class SettlementRepository(
         ) { "Historical settlement snapshot failed full network validation" }
     }
 
-    private fun requireOperatorAuthorization(
-        client: SettlementChainClient,
-        vaultAddress: String,
+    private fun requireLiveOperatorAuthorization(
+        ownerAddress: String?,
+        operatorListed: Boolean,
         operatorAddress: String,
     ) {
-        val ownerResult = runCatching { client.owner(vaultAddress) }
-        val operatorResult = runCatching { client.isOperator(vaultAddress, operatorAddress) }
-        val authorized = ownerResult.getOrNull()?.equals(operatorAddress, true) == true ||
-            operatorResult.getOrNull() == true
-        require(authorized) {
-            val failures = listOfNotNull(
-                ownerResult.exceptionOrNull()?.message,
-                operatorResult.exceptionOrNull()?.message,
-            ).joinToString("; ")
-            if (failures.isBlank()) "Operator is not authorized by the historical vault"
-            else "Unable to prove historical vault authorization: $failures"
+        require(operatorListed || ownerAddress?.equals(operatorAddress, true) == true) {
+            "Operator is not authorized by the historical vault"
         }
+    }
+
+    private suspend fun requireNoActiveOperatorTransaction(prepared: PreparedSettlement) {
+        val active = settlementDao.getActiveForOperator(
+            prepared.chainId,
+            prepared.operatorAddress,
+            ACTIVE_STATUSES,
+        )
+        require(active.isEmpty()) {
+            "Another operator transaction is pending; recover it before assigning a new nonce"
+        }
+    }
+
+    private fun requireSameReviewedSettlement(
+        reviewed: PreparedSettlement,
+        fresh: PreparedSettlement,
+    ) {
+        require(
+            fresh.chainId == reviewed.chainId &&
+                fresh.networkName == reviewed.networkName &&
+                fresh.rpcUrl == reviewed.rpcUrl &&
+                fresh.vaultAddress.equals(reviewed.vaultAddress, ignoreCase = true) &&
+                fresh.tokenAddress.equals(reviewed.tokenAddress, ignoreCase = true) &&
+                fresh.tokenSymbol == reviewed.tokenSymbol &&
+                fresh.tokenDecimals == reviewed.tokenDecimals &&
+                fresh.operatorAddress.equals(reviewed.operatorAddress, ignoreCase = true) &&
+                fresh.invoiceIds == reviewed.invoiceIds &&
+                fresh.totalExpectedAmount == reviewed.totalExpectedAmount &&
+                fresh.confirmedObservedAmounts == reviewed.confirmedObservedAmounts &&
+                fresh.callData == reviewed.callData &&
+                fresh.requiredConfirmations == reviewed.requiredConfirmations,
+        ) { "Settlement configuration changed; review it again" }
+    }
+
+    private fun historicalSettlementProofFingerprint(invoice: Invoice): String {
+        val profile = KnownChainPolicy.requireProfile(invoice.chainId)
+        return listOf(
+            invoice.chainId.toString(),
+            profile.rpcUrl,
+            profile.factory.value.lowercase(),
+            profile.receiverImplementation.value.lowercase(),
+            profile.vaultRuntimeCodeHash.lowercase(),
+            invoice.vaultAddress.lowercase(),
+            invoice.token.lowercase(),
+            invoice.tokenDecimals.toString(),
+            invoice.tokenSymbol,
+        ).joinToString("|")
     }
 
     private fun SettlementTransaction.invoiceIds(): List<String> =
@@ -792,8 +1254,8 @@ class SettlementRepository(
 
     private fun requireCurrentOperatorBinding(operatorAddress: String) {
         requireSettlementOperatorBinding(
-            config = chainConfig.snapshot(),
-            wallet = walletStore.snapshot(),
+            config = chainConfigSnapshot(),
+            wallet = walletAccess.snapshot(),
             operatorAddress = operatorAddress,
         )
     }
@@ -823,14 +1285,6 @@ class SettlementRepository(
 
     private fun nowSeconds(): Long = System.currentTimeMillis() / 1_000
 
-    private fun isKnownTransactionResponse(message: String?): Boolean =
-        message.orEmpty().lowercase().let { value ->
-            "already known" in value ||
-                "known transaction" in value ||
-                "already imported" in value ||
-                "nonce too low" in value
-        }
-
     companion object {
         private val submissionMutex = Mutex()
         private val STRING_LIST_TYPE = object : TypeToken<List<String>>() {}.type
@@ -844,8 +1298,129 @@ class SettlementRepository(
         private const val CONFIRMATION_POLL_ATTEMPTS = 20
         private const val HISTORICAL_RPC_CONNECT_TIMEOUT_MILLIS = 2_500
         private const val HISTORICAL_RPC_READ_TIMEOUT_MILLIS = 4_000
+        internal const val HISTORICAL_PROOF_TTL_MILLIS = 60_000L
+        internal const val PREPARED_PROOF_TTL_MILLIS = 60_000L
+        internal const val DEVICE_AUTH_MAX_AGE_MILLIS = 25_000L
     }
 }
+
+internal fun isElapsedProofFresh(
+    issuedAtElapsedRealtimeMillis: Long,
+    nowElapsedRealtimeMillis: Long,
+    ttlMillis: Long,
+): Boolean = issuedAtElapsedRealtimeMillis >= 0 &&
+    nowElapsedRealtimeMillis >= issuedAtElapsedRealtimeMillis &&
+    nowElapsedRealtimeMillis - issuedAtElapsedRealtimeMillis <= ttlMillis
+
+internal fun PreparedSettlement?.canReuseGasEstimateFor(
+    chainId: Long,
+    rpcUrl: String,
+    vaultAddress: String,
+    tokenAddress: String,
+    operatorAddress: String,
+    invoiceIds: List<String>,
+    confirmedObservedAmounts: List<BigInteger>,
+    callData: String,
+    nowElapsedRealtimeMillis: Long,
+): Boolean = this != null &&
+    this.chainId == chainId &&
+    this.rpcUrl == rpcUrl &&
+    this.vaultAddress.equals(vaultAddress, true) &&
+    this.tokenAddress.equals(tokenAddress, true) &&
+    this.operatorAddress.equals(operatorAddress, true) &&
+    this.invoiceIds == invoiceIds &&
+    this.confirmedObservedAmounts == confirmedObservedAmounts &&
+    this.callData == callData &&
+    isElapsedProofFresh(
+        this.gasEstimateAtElapsedRealtimeMillis,
+        nowElapsedRealtimeMillis,
+        SettlementRepository.PREPARED_PROOF_TTL_MILLIS,
+    )
+
+internal fun requireFreshPreparedSettlementProof(
+    prepared: PreparedSettlement,
+    nowElapsedRealtimeMillis: Long,
+) {
+    check(
+        isElapsedProofFresh(
+            prepared.preparedAtElapsedRealtimeMillis,
+            nowElapsedRealtimeMillis,
+            SettlementRepository.PREPARED_PROOF_TTL_MILLIS,
+        ),
+    ) { "Settlement preflight expired; review and authenticate again" }
+    check(
+        isElapsedProofFresh(
+            prepared.gasEstimateAtElapsedRealtimeMillis,
+            nowElapsedRealtimeMillis,
+            SettlementRepository.PREPARED_PROOF_TTL_MILLIS,
+        ),
+    ) { "Settlement gas estimate expired; review and authenticate again" }
+    check(
+        isElapsedProofFresh(
+            prepared.historicalProofAtElapsedRealtimeMillis,
+            nowElapsedRealtimeMillis,
+            SettlementRepository.HISTORICAL_PROOF_TTL_MILLIS,
+        ),
+    ) { "Historical settlement proof expired; review and authenticate again" }
+}
+
+internal fun requireFreshDeviceAuthentication(
+    authenticatedAtElapsedRealtimeMillis: Long,
+    nowElapsedRealtimeMillis: Long,
+) {
+    check(
+        isElapsedProofFresh(
+            authenticatedAtElapsedRealtimeMillis,
+            nowElapsedRealtimeMillis,
+            SettlementRepository.DEVICE_AUTH_MAX_AGE_MILLIS,
+        ),
+    ) { "Device authentication expired before signing; authenticate again" }
+}
+
+/** One clock sample closes every proof TTL at each post-authentication safety boundary. */
+internal fun requireFreshAuthenticatedPreparedSettlement(
+    prepared: PreparedSettlement,
+    authenticatedAtElapsedRealtimeMillis: Long,
+    nowElapsedRealtimeMillis: Long,
+) {
+    requireFreshPreparedSettlementProof(prepared, nowElapsedRealtimeMillis)
+    requireFreshDeviceAuthentication(
+        authenticatedAtElapsedRealtimeMillis,
+        nowElapsedRealtimeMillis,
+    )
+}
+
+internal data class FreshSettlementBroadcastOutcome(
+    val accepted: Boolean,
+    val error: String?,
+)
+
+/** Exactly one side-effecting RPC. Receipt and finality reads are recovery-only. */
+internal fun broadcastFreshSignedTransaction(
+    client: SettlementChainClient,
+    signedRawTransaction: String,
+    expectedTransactionHash: String,
+): FreshSettlementBroadcastOutcome = try {
+    val returnedHash = client.sendRawTransaction(signedRawTransaction)
+    require(returnedHash.equals(expectedTransactionHash, ignoreCase = true)) {
+        "RPC returned a different transaction hash"
+    }
+    FreshSettlementBroadcastOutcome(accepted = true, error = null)
+} catch (error: Exception) {
+    val accepted = isKnownTransactionResponse(error.message)
+    FreshSettlementBroadcastOutcome(
+        accepted = accepted,
+        error = if (accepted) null else error.message ?: "Broadcast result unknown",
+    )
+}
+
+private fun isKnownTransactionResponse(message: String?): Boolean =
+    message.orEmpty().lowercase().let { value ->
+        "already known" in value ||
+            "known transaction" in value ||
+            "already imported" in value ||
+            "nonce too low" in value
+    }
 
 /**
  * Historical invoice snapshots and fresh on-chain authorization are the settlement authority.
@@ -919,21 +1494,33 @@ internal fun requireCanonicalSettlementCursor(
     invoice: Invoice,
     canonicalBlockHash: (Long) -> String?,
 ) {
-    val (block, savedHash) = if (invoice.status == InvoiceStatus.LATE_PAYMENT_READY) {
-        invoice.lateFirstDetectedBlock to invoice.lateFirstDetectedBlockHash
-    } else {
-        invoice.firstDetectedBlock to invoice.firstDetectedBlockHash
-    }
-    val thresholdBlock = requireNotNull(block) {
-        "Invoice ${invoice.invoiceId} has no confirmation threshold block"
-    }
-    val thresholdHash = requireNotNull(savedHash) {
-        "Invoice ${invoice.invoiceId} has no canonical confirmation cursor; refresh confirmations"
-    }
-    val canonical = canonicalBlockHash(thresholdBlock)
-    require(canonical?.equals(thresholdHash, ignoreCase = true) == true) {
+    val (block, _) = invoice.settlementConfirmationCursor()
+    requireCanonicalSettlementCursor(invoice, canonicalBlockHash(block))
+}
+
+internal fun requireCanonicalSettlementCursor(
+    invoice: Invoice,
+    canonicalBlockHash: String?,
+) {
+    val (_, savedHash) = invoice.settlementConfirmationCursor()
+    require(canonicalBlockHash?.equals(savedHash, ignoreCase = true) == true) {
         "Invoice ${invoice.invoiceId} confirmation threshold was reorganized; refresh confirmations"
     }
+}
+
+private fun Invoice.settlementConfirmationCursor(): Pair<Long, String> {
+    val (block, savedHash) = if (status == InvoiceStatus.LATE_PAYMENT_READY) {
+        lateFirstDetectedBlock to lateFirstDetectedBlockHash
+    } else {
+        firstDetectedBlock to firstDetectedBlockHash
+    }
+    val thresholdBlock = requireNotNull(block) {
+        "Invoice $invoiceId has no confirmation threshold block"
+    }
+    val thresholdHash = requireNotNull(savedHash) {
+        "Invoice $invoiceId has no canonical confirmation cursor; refresh confirmations"
+    }
+    return thresholdBlock to thresholdHash
 }
 
 private fun Invoice.settlementObservedAmount(): BigInteger =

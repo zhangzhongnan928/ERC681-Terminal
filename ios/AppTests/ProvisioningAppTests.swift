@@ -137,6 +137,142 @@ final class ProvisioningAppTests: XCTestCase {
         XCTAssertTrue(model.terminalReadiness.isReady)
     }
 
+    @MainActor
+    func testActiveMonitorPreservesLastVerifiedObservationAcrossTransientFailure() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        AppPreferences.saveSettings(AppSettings())
+        let container = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let invoice = try storedInvoice()
+        container.mainContext.insert(invoice)
+        try container.mainContext.save()
+        let request = try invoice.paymentRequest()
+        let configuration = try invoice.configurationSnapshot()
+        let verified = observation(
+            invoiceID: request.invoiceID,
+            balance: UInt256(400),
+            block: 100
+        )
+        let probe = TransientPaymentObservationProbe(verified: verified)
+        let model = AppModel(
+            container: container,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.monitor-tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(
+                address: request.terminalIdentifier.address
+            ),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            paymentObservationSampler: { _, _, _, _ in
+                try await probe.sample()
+            },
+            paymentMonitorPollIntervalNanoseconds: 1_000_000
+        )
+
+        model.startMonitoring(request, configuration: configuration)
+        for _ in 0..<1_000 {
+            if await probe.calls >= 3 { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        let calls = await probe.calls
+        XCTAssertEqual(calls, 3, "The transient failure should enter a retry attempt")
+        XCTAssertEqual(model.activeObservation, verified)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(invoice.observedBlock, 100)
+        XCTAssertEqual(invoice.observedBalance, "400")
+
+        model.closeActiveSale()
+    }
+
+    @MainActor
+    func testActiveMonitorKeepsWrongChainTerminalAndCancellationSilent() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        AppPreferences.saveSettings(AppSettings())
+
+        let wrongChainInvoice = try storedInvoice()
+        let wrongChainContainer = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        wrongChainContainer.mainContext.insert(wrongChainInvoice)
+        try wrongChainContainer.mainContext.save()
+        let wrongChainRequest = try wrongChainInvoice.paymentRequest()
+        let wrongChainProbe = TerminalPaymentObservationProbe(failure: .wrongChain)
+        let wrongChainModel = AppModel(
+            container: wrongChainContainer,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.monitor-tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(
+                address: wrongChainRequest.terminalIdentifier.address
+            ),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            paymentObservationSampler: { _, _, _, _ in
+                try await wrongChainProbe.sample()
+            },
+            paymentMonitorPollIntervalNanoseconds: 1_000_000
+        )
+
+        wrongChainModel.startMonitoring(
+            wrongChainRequest,
+            configuration: try wrongChainInvoice.configurationSnapshot()
+        )
+        await wrongChainModel.waitForMonitoringToFinish()
+
+        let wrongChainCalls = await wrongChainProbe.calls
+        XCTAssertEqual(wrongChainCalls, 1)
+        XCTAssertNil(wrongChainModel.activeObservation)
+        XCTAssertTrue(wrongChainModel.errorMessage?.contains("Wrong network") == true)
+        wrongChainModel.closeActiveSale()
+
+        let cancelledInvoice = try storedInvoice()
+        let cancelledContainer = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        cancelledContainer.mainContext.insert(cancelledInvoice)
+        try cancelledContainer.mainContext.save()
+        let cancelledRequest = try cancelledInvoice.paymentRequest()
+        let cancelledProbe = TerminalPaymentObservationProbe(failure: .cancelled)
+        let cancelledModel = AppModel(
+            container: cancelledContainer,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.monitor-tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(
+                address: cancelledRequest.terminalIdentifier.address
+            ),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            paymentObservationSampler: { _, _, _, _ in
+                try await cancelledProbe.sample()
+            },
+            paymentMonitorPollIntervalNanoseconds: 1_000_000
+        )
+
+        cancelledModel.startMonitoring(
+            cancelledRequest,
+            configuration: try cancelledInvoice.configurationSnapshot()
+        )
+        await cancelledModel.waitForMonitoringToFinish()
+
+        let cancelledCalls = await cancelledProbe.calls
+        XCTAssertEqual(cancelledCalls, 1)
+        XCTAssertNil(cancelledModel.activeObservation)
+        XCTAssertNil(cancelledModel.errorMessage)
+        cancelledModel.closeActiveSale()
+    }
+
     func testCheckoutAmountInputPreservesConfiguredTokenPrecision() {
         var amount = CheckoutAmountInput.cleared
         amount = CheckoutAmountInput.appending(digit: 1, to: amount, maximumFractionDigits: 6)
@@ -1263,6 +1399,11 @@ final class ProvisioningAppTests: XCTestCase {
             SettlementReconciliationPolicy.activeBatchLimit
         )
         XCTAssertEqual(
+            SettlementReconciliationPolicy.activeFetchDescriptor(limit: 1).fetchLimit,
+            1,
+            "The periodic app-active loop reconciles only one record per background token"
+        )
+        XCTAssertEqual(
             SettlementReconciliationPolicy.evidenceFetchDescriptor().fetchLimit,
             SettlementReconciliationPolicy.evidenceBatchLimit
         )
@@ -1270,6 +1411,44 @@ final class ProvisioningAppTests: XCTestCase {
             SettlementReconciliationPolicy.cumulativeReviewFetchDescriptor().fetchLimit,
             SettlementReconciliationPolicy.cumulativeReviewBatchLimit
         )
+    }
+
+    @MainActor
+    func testSettlementAppearanceReconciliationUsesPeriodicOneRecordBudget() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        let container = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let first = try storedPendingSettlement(
+            transactionHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let second = try storedPendingSettlement(
+            transactionHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            createdAt: Date(timeIntervalSince1970: 2_000)
+        )
+        container.mainContext.insert(first)
+        container.mainContext.insert(second)
+        try container.mainContext.save()
+        let model = AppModel(
+            container: container,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.tests.\(UUID())"
+            ),
+            adminPINStore: UnconfiguredAdminPINStore()
+        )
+
+        await model.reconcileSettlementsOnAppearance()
+
+        let records = try container.mainContext.fetch(FetchDescriptor<StoredSettlement>())
+        XCTAssertEqual(records.filter { $0.failureReason != nil }.count, 1)
+        XCTAssertEqual(records.filter { $0.phase == .unknown }.count, 1)
+        XCTAssertEqual(records.filter { $0.phase == .pending }.count, 1)
+        XCTAssertFalse(model.operationBusy)
     }
 
     @MainActor
@@ -2139,6 +2318,357 @@ final class ProvisioningAppTests: XCTestCase {
         XCTAssertFalse(gate.isInFlight)
     }
 
+    @MainActor
+    func testBackgroundRPCGateAtomicallyBlocksNewSamplesAndDrainsBeforeInteractiveWork() async throws {
+        let gate = BackgroundRPCWorkGate(maximumConcurrentWork: 2)
+        let first = try XCTUnwrap(gate.acquire(interactiveOperationBusy: false))
+        let second = try XCTUnwrap(gate.acquire(interactiveOperationBusy: false))
+        XCTAssertEqual(gate.activeCount, 2)
+        XCTAssertNil(gate.acquire(interactiveOperationBusy: false))
+        XCTAssertNil(gate.acquire(interactiveOperationBusy: true))
+
+        let drain = Task { await gate.waitUntilIdle() }
+        gate.release(first)
+        await Task.yield()
+        XCTAssertTrue(gate.isInFlight)
+        gate.release(second)
+        let drained = await drain.value
+        XCTAssertTrue(drained)
+        XCTAssertFalse(gate.isInFlight)
+
+        // Once interactive work owns AppModel's lifecycle flag, the synchronous acquire cannot
+        // slip a new sample into the gap between the flag check and the interactive wait.
+        XCTAssertNil(gate.acquire(interactiveOperationBusy: true))
+        let resumed = try XCTUnwrap(gate.acquire(interactiveOperationBusy: false))
+        gate.release(resumed)
+    }
+
+    @MainActor
+    func testBackgroundRPCGateLetsInteractiveWorkProceedAfterBoundedDrainWindow() async throws {
+        let gate = BackgroundRPCWorkGate(
+            maximumConcurrentWork: 2,
+            maximumInteractiveDrainWait: .milliseconds(10)
+        )
+        let existingBackgroundUnit = try XCTUnwrap(
+            gate.acquire(interactiveOperationBusy: false)
+        )
+
+        // Interactive intent is already visible to the gate. A stuck unit gets only the bounded
+        // cooperative drain window; it remains accounted for, but cannot hold the cashier path.
+        let drained = await gate.waitUntilIdle()
+        XCTAssertFalse(drained)
+        XCTAssertTrue(gate.isInFlight)
+        XCTAssertEqual(gate.activeCount, 1)
+        XCTAssertNil(gate.acquire(interactiveOperationBusy: true))
+
+        gate.release(existingBackgroundUnit)
+        XCTAssertFalse(gate.isInFlight)
+    }
+
+    @MainActor
+    func testInteractiveWalletCreationDoesNotWaitForStuckReadinessRPC() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        let container = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let persistenceProbe = OperatorPersistenceProbe()
+        let lifecycle = BlockingCreateOperatorWalletLifecycle(
+            address: operatorAddress,
+            persistenceProbe: persistenceProbe,
+            startsBlocked: true
+        )
+        let readinessProbe = BlockingReadinessRefreshProbe(
+            status: OperatorChainStatus(
+                chainID: 84_532,
+                balance: .zero,
+                isAuthorizedOperator: true,
+                isVaultOwner: false,
+                isLowGas: true
+            )
+        )
+        let model = AppModel(
+            container: container,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: lifecycle,
+            adminPINStore: UnconfiguredAdminPINStore(),
+            currentConfigurationValidation: { configuration in
+                try await readinessProbe.validate(configuration)
+            },
+            operatorStatusReader: { configuration, _ in
+                OperatorChainStatus(
+                    chainID: configuration.chainID,
+                    balance: .zero,
+                    isAuthorizedOperator: true,
+                    isVaultOwner: false,
+                    isLowGas: true
+                )
+            },
+            interactiveBackgroundDrainTimeout: .milliseconds(10),
+            backgroundRPCUnitDeadline: .seconds(10)
+        )
+        var settings = AppSettings()
+        settings.provisionedOperatorAddress = operatorAddress.hex
+        model.settings = settings
+
+        let background = Task { await model.refreshReadiness() }
+        await readinessProbe.waitUntilValidationStarts()
+        XCTAssertTrue(model.isRefreshingReadiness)
+
+        let interactive = Task { await model.createOperatorWallet() }
+        var reachedPersistenceBoundary = false
+        for _ in 0..<100 {
+            if await lifecycle.didReachPersistenceBoundary() {
+                reachedPersistenceBoundary = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+
+        XCTAssertTrue(
+            reachedPersistenceBoundary,
+            "The already-running readiness RPC must not hold the interactive wallet flow."
+        )
+        XCTAssertTrue(model.operationBusy)
+        XCTAssertTrue(model.isRefreshingReadiness)
+
+        await lifecycle.continuePersistence()
+        await interactive.value
+        await readinessProbe.finishValidation()
+        await background.value
+
+        XCTAssertTrue(persistenceProbe.wasPersisted)
+        XCTAssertEqual(model.operatorAddress, operatorAddress)
+        XCTAssertFalse(model.operationBusy)
+    }
+
+    @MainActor
+    func testPublicOperatorStatusRefreshDefersDuringAnotherInteractiveOperation() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        let container = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let configuration = try AppSettings().configuration()
+        let configured = try AppSettings().applying(
+            configuration,
+            boundTo: operatorAddress
+        )
+        let validator = BlockingProvisioningValidator(
+            result: ProvisionedTerminalConfiguration(
+                profile: .baseSepolia,
+                configuration: configuration,
+                validationReport: ConfigurationValidationReport(
+                    chainID: configuration.chainID,
+                    checks: [ValidationCheck(name: "test", detail: "valid")]
+                )
+            )
+        )
+        let expectedStatus = OperatorChainStatus(
+            chainID: configuration.chainID,
+            balance: TerminalKnownChainProfile.baseSepolia.minimumOperatorNativeReserve,
+            isAuthorizedOperator: true,
+            isVaultOwner: false,
+            isLowGas: false
+        )
+        let statusProbe = OperatorStatusReadProbe(status: expectedStatus)
+        let model = AppModel(
+            container: container,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(address: operatorAddress),
+            provisioningValidator: validator,
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            operatorStatusReader: { configuration, address in
+                await statusProbe.read(configuration: configuration, address: address)
+            }
+        )
+        model.settings = configured
+        model.unlockAdmin(with: "123456")
+        let payload = try TerminalProvisioningPayload(
+            chainID: configuration.chainID,
+            vault: configuration.deployment.vault,
+            token: configuration.tokens[0].address,
+            operatorAddress: operatorAddress
+        )
+
+        let provisioning = Task { await model.provision(payload) }
+        await validator.waitUntilDerivationStarts()
+        XCTAssertTrue(model.operationBusy)
+
+        await model.refreshOperatorStatus()
+        var statusReads = await statusProbe.readCount()
+        XCTAssertEqual(statusReads, 0, "A UI refresh must not borrow another task's drained state")
+
+        await validator.finishDerivation()
+        await provisioning.value
+        statusReads = await statusProbe.readCount()
+        XCTAssertEqual(statusReads, 1, "Provisioning may refresh only through its private drained path")
+        XCTAssertEqual(model.operatorStatus, expectedStatus)
+
+        await model.refreshOperatorStatus()
+        statusReads = await statusProbe.readCount()
+        XCTAssertEqual(statusReads, 2, "An idle UI refresh should acquire a background token")
+    }
+
+    @MainActor
+    func testBackgroundConfigurationProofCacheExpiresAndConfigurationChangeInvalidates() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        let container = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let configured = try AppSettings().applying(
+            paymentConfiguration(
+                vault: "0x2222222222222222222222222222222222222222",
+                token: "0x3333333333333333333333333333333333333333",
+                symbol: "AUDM"
+            ),
+            boundTo: operatorAddress
+        )
+        let clock = ValidationClock(Date(timeIntervalSince1970: 1_000))
+        let probe = ConfigurationValidationCountProbe()
+        let model = AppModel(
+            container: container,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(address: operatorAddress),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            currentConfigurationValidation: { configuration in
+                await probe.validate(configuration)
+            },
+            validationNow: { clock.now },
+            configurationValidationTTL: 300
+        )
+        model.settings = configured
+
+        let firstValidation = await model.validateConfiguration()
+        let secondValidation = await model.validateConfiguration()
+        XCTAssertTrue(firstValidation)
+        XCTAssertTrue(secondValidation)
+        var calls = await probe.calls
+        XCTAssertEqual(calls, 1, "A background readiness refresh should reuse its fresh proof")
+
+        clock.advance(by: 301)
+        let expiredValidation = await model.validateConfiguration()
+        XCTAssertTrue(expiredValidation)
+        calls = await probe.calls
+        XCTAssertEqual(calls, 2, "An expired proof must be fetched again")
+
+        var changed = model.settings
+        changed.confirmationBlocks = "3"
+        model.settings = changed
+        let changedConfigurationValidation = await model.validateConfiguration()
+        XCTAssertTrue(changedConfigurationValidation)
+        calls = await probe.calls
+        XCTAssertEqual(calls, 3, "Any payment configuration change must invalidate the proof")
+    }
+
+    func testPreparedSettlementProofRequiresExactSnapshotAndSlowPrepareCannotExtendTTL() throws {
+        let configuration = try paymentConfiguration(
+            vault: "0x2222222222222222222222222222222222222222",
+            token: "0x3333333333333333333333333333333333333333",
+            symbol: "AUDM"
+        )
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: TerminalIdentifier(
+                address: address("0x1111111111111111111111111111111111111111")
+            ),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            nonce: Bytes32(hex: "0x" + String(repeating: "a", count: 64))
+        )
+        let intent = try SettlementIntent(
+            chainID: configuration.chainID,
+            vault: configuration.deployment.vault,
+            token: request.token.address,
+            sessions: [SettlementSession(
+                invoiceID: request.invoiceID,
+                receiver: request.receiver,
+                expectedAmount: request.expectedAmount
+            )]
+        )
+        let snapshot = SweepableConfirmationSnapshot(
+            invoiceID: request.invoiceID.hex,
+            observedBalance: "1000",
+            observedBlock: 100,
+            observedBlockHash: appBlockHash(100).hex,
+            cumulativeSweptAtObservation: "0",
+            sweepableThresholdBlock: 99,
+            sweepableThresholdBlockHash: appBlockHash(99).hex,
+            sweepableCandidateBalance: "1000",
+            sweepableCandidateCumulative: "0",
+            confirmationBlocks: 2
+        )
+        let validatedAt = Date(timeIntervalSince1970: 1_000)
+        let proof = PreparedSettlementValidationProof(
+            configuration: configuration,
+            intent: intent,
+            confirmationSnapshots: [snapshot],
+            validatedAt: validatedAt
+        )
+
+        XCTAssertTrue(proof.isReusable(
+            configuration: configuration,
+            intent: intent,
+            confirmationSnapshots: [snapshot],
+            at: validatedAt.addingTimeInterval(60),
+            maximumAge: 60
+        ))
+        XCTAssertFalse(proof.isReusable(
+            configuration: configuration,
+            intent: intent,
+            confirmationSnapshots: [snapshot],
+            at: validatedAt.addingTimeInterval(60.001),
+            maximumAge: 60
+        ))
+        let slowPrepareFinishedAt = validatedAt.addingTimeInterval(90)
+        XCTAssertFalse(proof.isReusable(
+            configuration: configuration,
+            intent: intent,
+            confirmationSnapshots: [snapshot],
+            at: slowPrepareFinishedAt,
+            maximumAge: 60
+        ), "A 90-second transaction preparation cannot make the on-chain proof look fresh")
+        var changedSnapshot = snapshot
+        changedSnapshot = SweepableConfirmationSnapshot(
+            invoiceID: changedSnapshot.invoiceID,
+            observedBalance: "1001",
+            observedBlock: changedSnapshot.observedBlock,
+            observedBlockHash: changedSnapshot.observedBlockHash,
+            cumulativeSweptAtObservation: changedSnapshot.cumulativeSweptAtObservation,
+            sweepableThresholdBlock: changedSnapshot.sweepableThresholdBlock,
+            sweepableThresholdBlockHash: changedSnapshot.sweepableThresholdBlockHash,
+            sweepableCandidateBalance: changedSnapshot.sweepableCandidateBalance,
+            sweepableCandidateCumulative: changedSnapshot.sweepableCandidateCumulative,
+            confirmationBlocks: changedSnapshot.confirmationBlocks
+        )
+        XCTAssertFalse(proof.isReusable(
+            configuration: configuration,
+            intent: intent,
+            confirmationSnapshots: [changedSnapshot],
+            at: validatedAt.addingTimeInterval(1),
+            maximumAge: 60
+        ))
+    }
+
     func testPersistedSettingsCannotOverrideImmutableDeploymentPins() throws {
         let profile = TerminalKnownChainProfile.baseSepolia
         var settings = AppSettings()
@@ -2262,6 +2792,59 @@ final class ProvisioningAppTests: XCTestCase {
         return try StoredInvoice(request: request, configuration: configuration)
     }
 
+    private func storedPendingSettlement(
+        transactionHash: String,
+        createdAt: Date
+    ) throws -> StoredSettlement {
+        let request = try storedInvoice().paymentRequest()
+        let intent = try SettlementIntent(
+            chainID: request.chainID,
+            vault: request.vault,
+            token: request.token.address,
+            sessions: [
+                SettlementSession(
+                    invoiceID: request.invoiceID,
+                    receiver: request.receiver,
+                    expectedAmount: request.expectedAmount
+                ),
+            ]
+        )
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let prepared = PreparedSettlement(
+            intent: intent,
+            operatorAddress: operatorAddress,
+            calldata: Data([0x01]),
+            gasLimit: 100_000,
+            feeQuote: EIP1559FeeQuote(
+                maxPriorityFeePerGas: 1,
+                maxFeePerGas: 2,
+                source: .eip1559
+            ),
+            l1DataFeeReserve: .zero,
+            maximumGasCost: UInt256(200_000),
+            operatorBalance: UInt256(200_000),
+            observedTokenBalances: [request.expectedAmount]
+        )
+        let signed = SignedSettlement(
+            intent: intent,
+            transactionHash: try Bytes32(hex: transactionHash),
+            nonce: 0,
+            rawTransaction: Data([0x02])
+        )
+        let record = try StoredSettlement(
+            signed: signed,
+            prepared: prepared,
+            rpcURL: URL(string: "https://example-rpc.invalid")!,
+            tokenSymbol: request.token.symbol,
+            tokenDecimals: request.token.decimals,
+            requiredConfirmations: 2
+        )
+        record.phase = .pending
+        record.createdAt = createdAt
+        record.updatedAt = createdAt
+        return record
+    }
+
     private func storedFinalSettlement(
         for invoice: StoredInvoice,
         transactionHash: String,
@@ -2354,6 +2937,27 @@ private final class InMemoryAdminPINStore: AdminPINManaging, @unchecked Sendable
     }
 
     func secondsUntilNextAttempt() throws -> Int { 0 }
+}
+
+private actor ConfigurationValidationCountProbe {
+    private(set) var calls = 0
+
+    func validate(_ configuration: TerminalConfiguration) {
+        calls += 1
+    }
+}
+
+private final class ValidationClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Date
+
+    init(_ value: Date) { self.value = value }
+
+    var now: Date { lock.withLock { value } }
+
+    func advance(by interval: TimeInterval) {
+        lock.withLock { value.addTimeInterval(interval) }
+    }
 }
 
 private final class UnconfiguredAdminPINStore: AdminPINManaging, @unchecked Sendable {
@@ -2454,6 +3058,25 @@ private actor BlockingReadinessRefreshProbe {
         statusReleaseContinuation?.resume()
         statusReleaseContinuation = nil
     }
+}
+
+private actor OperatorStatusReadProbe {
+    private let status: OperatorChainStatus
+    private var count = 0
+
+    init(status: OperatorChainStatus) {
+        self.status = status
+    }
+
+    func read(
+        configuration: TerminalConfiguration,
+        address: EthereumAddress
+    ) -> OperatorChainStatus {
+        count += 1
+        return status
+    }
+
+    func readCount() -> Int { count }
 }
 
 private actor BlockingProvisioningValidator: TerminalProvisioningValidating {
@@ -2589,6 +3212,10 @@ private actor BlockingCreateOperatorWalletLifecycle: OperatorWalletLifecycleMana
         }
     }
 
+    func didReachPersistenceBoundary() -> Bool {
+        persistenceBoundaryReached
+    }
+
     func continuePersistence() {
         persistenceReleased = true
         releaseContinuation?.resume()
@@ -2655,6 +3282,54 @@ private actor BlockingOperatorWalletLifecycle: OperatorWalletLifecycleManaging {
         deletionReleased = true
         releaseContinuation?.resume()
         releaseContinuation = nil
+    }
+}
+
+private actor TransientPaymentObservationProbe {
+    private let verified: PaymentObservation
+    private(set) var calls = 0
+
+    init(verified: PaymentObservation) {
+        self.verified = verified
+    }
+
+    func sample() async throws -> PaymentObservation {
+        calls += 1
+        switch calls {
+        case 1:
+            return verified
+        case 2:
+            throw URLError(.networkConnectionLost)
+        default:
+            // Keep the retry attempt open so the test can prove the transient failure did not
+            // erase or replace the last verified observation. App cancellation interrupts sleep.
+            try await Task.sleep(for: .seconds(60))
+            return verified
+        }
+    }
+}
+
+private enum TerminalPaymentObservationFailure: Sendable {
+    case wrongChain
+    case cancelled
+}
+
+private actor TerminalPaymentObservationProbe {
+    private let failure: TerminalPaymentObservationFailure
+    private(set) var calls = 0
+
+    init(failure: TerminalPaymentObservationFailure) {
+        self.failure = failure
+    }
+
+    func sample() async throws -> PaymentObservation {
+        calls += 1
+        switch failure {
+        case .wrongChain:
+            throw PaymentMonitorError.wrongChain(expected: 84_532, actual: 1)
+        case .cancelled:
+            throw URLError(.cancelled)
+        }
     }
 }
 

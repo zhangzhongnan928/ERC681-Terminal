@@ -44,52 +44,40 @@ class PaymentObserver(private val chain: ReadOnlyChainClient) {
         requiredConfirmations: Int = 1,
     ): PaymentObservation {
         require(requiredConfirmations > 0) { "Required confirmations must be greater than zero" }
-        val remoteChainId = chain.chainId()
-        if (remoteChainId != request.chainId) {
-            throw NetworkConfigurationException(
-                "RPC chain ID $remoteChainId does not match payment chain ID ${request.chainId}",
-            )
-        }
-
-        val block = chain.blockNumber()
-        val blockHashBefore = requireNotNull(chain.blockHash(block)) {
-            "Canonical block $block is unavailable"
-        }
-        val balance = chain.tokenBalance(request.token, request.receiver, block)
-        val blockHash = requireNotNull(chain.blockHash(block)) {
-            "Canonical block $block became unavailable while sampling payment balance"
-        }
-        if (!blockHash.equals(blockHashBefore, ignoreCase = true)) {
-            throw RpcException("Canonical block $block changed while sampling payment balance")
-        }
-        val expected = request.amount.rawUnits
         val identityMatches = previous != null &&
             previous.token == request.token &&
             previous.receiver == request.receiver &&
             previous.expectedAmount == request.amount &&
             previous.requiredConfirmations == requiredConfirmations
+        val savedCursor = previous?.fundedAtBlock?.takeIf { identityMatches }
+        val sample = if (chain is ReadOnlyRpcClient) {
+            chain.samplePaymentObservation(
+                expectedChainId = request.chainId,
+                token = request.token,
+                holder = request.receiver,
+                savedCursorBlock = savedCursor,
+            )
+        } else {
+            sampleWithCompatibleClient(request, savedCursor)
+        }
+        val block = sample.blockNumber
+        val blockHash = sample.blockHash
+        val balance = sample.balance
+        val expected = request.amount.rawUnits
 
         val preservedCursor = if (balance >= expected) {
             previous?.fundedAtBlock?.takeIf { cursor ->
                 val savedHash = previous.fundedAtBlockHash
-                val canonicalHash = if (cursor == block) blockHash else {
-                    runCatching { chain.blockHash(cursor) }.getOrNull()
-                }
+                val canonicalHash = if (cursor == block) blockHash else sample.savedCursorHash
                 identityMatches && previous.observedRawUnits == balance && cursor <= block &&
                     savedHash != null && canonicalHash?.equals(savedHash, ignoreCase = true) == true
             }
         } else {
             null
         }
-        val finalBlockHash = requireNotNull(chain.blockHash(block)) {
-            "Canonical block $block became unavailable after validating confirmation cursors"
-        }
-        if (!finalBlockHash.equals(blockHash, ignoreCase = true)) {
-            throw RpcException("Canonical block $block changed while validating confirmation cursors")
-        }
         val fundedAtBlock = if (balance >= expected) preservedCursor ?: block else null
         val fundedAtBlockHash = if (fundedAtBlock == null) null else {
-            if (preservedCursor != null) previous?.fundedAtBlockHash else finalBlockHash
+            if (preservedCursor != null) previous?.fundedAtBlockHash else blockHash
         }
         val confirmations = fundedAtBlock?.let { fundingBlock ->
             (block - fundingBlock + 1).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
@@ -114,4 +102,54 @@ class PaymentObserver(private val chain: ReadOnlyChainClient) {
             status = status,
         )
     }
+
+    /**
+     * Compatibility path for custom and test [ReadOnlyChainClient] implementations. Production
+     * [ReadOnlyRpcClient] instances use their narrow three-wave sampler instead.
+     */
+    private fun sampleWithCompatibleClient(
+        request: Erc681PaymentRequest,
+        savedCursorBlock: Long?,
+    ): PaymentReadSample {
+        val remoteChainId = chain.chainId()
+        if (remoteChainId != request.chainId) {
+            throw NetworkConfigurationException(
+                "RPC chain ID $remoteChainId does not match payment chain ID ${request.chainId}",
+            )
+        }
+
+        val block = chain.blockNumber()
+        val blockHashBefore = requireNotNull(chain.blockHash(block)) {
+            "Canonical block $block is unavailable"
+        }
+        val balance = chain.tokenBalance(request.token, request.receiver, block)
+        val blockHash = requireNotNull(chain.blockHash(block)) {
+            "Canonical block $block became unavailable while sampling payment balance"
+        }
+        if (!blockHash.equals(blockHashBefore, ignoreCase = true)) {
+            throw RpcException("Canonical block $block changed while sampling payment balance")
+        }
+        val savedCursorHash = savedCursorBlock?.takeIf { it < block }?.let { cursor ->
+            runCatching { chain.blockHash(cursor) }.getOrNull()
+        }
+        val finalBlockHash = requireNotNull(chain.blockHash(block)) {
+            "Canonical block $block became unavailable after validating confirmation cursors"
+        }
+        if (!finalBlockHash.equals(blockHash, ignoreCase = true)) {
+            throw RpcException("Canonical block $block changed while validating confirmation cursors")
+        }
+        return PaymentReadSample(
+            blockNumber = block,
+            blockHash = finalBlockHash,
+            balance = balance,
+            savedCursorHash = if (savedCursorBlock == block) finalBlockHash else savedCursorHash,
+        )
+    }
 }
+
+internal data class PaymentReadSample(
+    val blockNumber: Long,
+    val blockHash: String,
+    val balance: BigInteger,
+    val savedCursorHash: String?,
+)

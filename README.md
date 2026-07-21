@@ -57,6 +57,27 @@ vault; the terminal never chooses a payout destination.
 
 Native-asset `?value=` requests and non-transfer calls fail closed.
 
+## Public RPC performance policy
+
+The shipped apps are designed to operate directly against the compiled public RPC endpoint; they
+do not require a paid provider, proxy, backend, or Multicall deployment. Independent read-only
+calls are grouped into strict JSON-RPC batches of at most 10 items. Larger logical proofs are split
+into bounded chunks that may run concurrently, and each native transport reuses its own persistent
+connection pool. Every required response must contain the exact integer request ID, JSON-RPC
+version, and complete result set. Missing, duplicate, unexpected, malformed, failed-required, or
+wrong-block responses fail closed. A narrowly optional compatibility read, such as `owner()` after
+`isOperator` already proved authorization, is handled explicitly rather than weakening the batch.
+
+Checkout still performs fresh mutable chain validation before every customer QR. Only background
+readiness may reuse a short configuration proof. Settlement evidence is bound to the exact intent,
+configuration, balances, and canonical cursors; its original lifetime is never rolled forward and
+is capped at 60 seconds and checked again before key use. Payment polling runs every five seconds and automatic recovery is
+scheduled every 60 seconds. Once cashier work is requested, no new background unit starts; one
+already-started bounded unit may finish or briefly overlap under the global concurrency limit.
+These controls reduce latency and public-endpoint throttling without turning mutable authorization,
+balances, contract links, token metadata, simulation, nonce, fees, or canonical block identity into
+long-lived cache. Wall-clock time remains dependent on the public endpoint and network conditions.
+
 ## Payment flow
 
 1. Select one configured payment profile, then require the device operator wallet and freshly

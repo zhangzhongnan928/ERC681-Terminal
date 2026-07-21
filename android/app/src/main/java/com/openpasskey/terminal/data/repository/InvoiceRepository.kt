@@ -3,12 +3,14 @@ package com.openpasskey.terminal.data.repository
 import com.openpasskey.erc681.Erc681PaymentRequest
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.erc681.NetworkConfig
+import com.openpasskey.erc681.NetworkConfigurationException
 import com.openpasskey.erc681.PaymentInvoiceFactory
 import com.openpasskey.erc681.PaymentInvoice
 import com.openpasskey.erc681.PaymentObservation
 import com.openpasskey.erc681.PaymentObserver
 import com.openpasskey.erc681.PaymentStatus
 import com.openpasskey.erc681.ReadOnlyRpcClient
+import com.openpasskey.erc681.RpcException
 import com.openpasskey.erc681.TokenAmount
 import com.openpasskey.terminal.chain.ChainConfig
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
@@ -17,8 +19,7 @@ import com.openpasskey.terminal.chain.selectedPaymentProfile
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import com.openpasskey.terminal.provisioning.minimumOperatorNativeReserveDisplay
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
-import com.openpasskey.terminal.settlement.SettlementChainClient
-import com.openpasskey.terminal.settlement.Web3jSettlementChainClient
+import com.openpasskey.terminal.rpc.RpcWorkCoordinator
 import com.openpasskey.terminal.data.db.InvoiceDao
 import com.openpasskey.terminal.data.db.SettlementEventDao
 import com.openpasskey.terminal.data.model.Invoice
@@ -38,6 +39,45 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.math.BigInteger
 
+internal sealed interface VisibleRpcAttemptResult<out T, out S> {
+    data class Observed<T>(val value: T) : VisibleRpcAttemptResult<T, Nothing>
+    data class Retry<S>(val durableState: S) : VisibleRpcAttemptResult<Nothing, S>
+    data class Stop<S>(val durableState: S) : VisibleRpcAttemptResult<Nothing, S>
+    data object Deferred : VisibleRpcAttemptResult<Nothing, Nothing>
+}
+
+/** Retry transport/reorg failures, but never turn a proven wrong chain into an endless spinner. */
+internal suspend fun <T : Any, S : Any> runVisibleRpcAttempt(
+    boundedRpc: Boolean,
+    attempt: suspend () -> T?,
+    reloadDurableState: suspend () -> S?,
+    shouldContinue: (S) -> Boolean,
+    pauseBeforeRetry: suspend () -> Unit,
+): VisibleRpcAttemptResult<T, S> = try {
+    attempt()?.let { VisibleRpcAttemptResult.Observed(it) }
+        ?: VisibleRpcAttemptResult.Deferred
+} catch (error: NetworkConfigurationException) {
+    throw error
+} catch (error: RpcException) {
+    if (boundedRpc) throw error
+    val durable = reloadDurableState()
+        ?: throw IllegalStateException("Invoice disappeared while retrying payment monitoring")
+    if (!shouldContinue(durable)) {
+        VisibleRpcAttemptResult.Stop(durable)
+    } else {
+        pauseBeforeRetry()
+        // A cashier may close the invoice during the retry cadence. Re-read after the pause so no
+        // further RPC is issued from the stale open snapshot.
+        val afterPause = reloadDurableState()
+            ?: throw IllegalStateException("Invoice disappeared while retrying payment monitoring")
+        if (shouldContinue(afterPause)) {
+            VisibleRpcAttemptResult.Retry(afterPause)
+        } else {
+            VisibleRpcAttemptResult.Stop(afterPause)
+        }
+    }
+}
+
 /** Application persistence around the SDK's keyless, read-only payment API. */
 class InvoiceRepository(
     private val invoiceDao: InvoiceDao,
@@ -45,7 +85,7 @@ class InvoiceRepository(
     private val chainConfig: ChainConfig,
     private val operatorWalletStore: OperatorWalletStore,
     private val lifecycleGate: TerminalLifecycleGate,
-    private val settlementClientFactory: (String) -> SettlementChainClient = ::Web3jSettlementChainClient,
+    private val rpcWorkCoordinator: RpcWorkCoordinator = RpcWorkCoordinator(),
 ) {
     private val lateInvoiceReconciler = LateInvoiceReconciler(
         invoiceDao,
@@ -56,99 +96,109 @@ class InvoiceRepository(
     /** Serializes cashier profile changes with invoice publication and settlement mutations. */
     suspend fun selectPaymentProfile(profileId: String): TerminalConfigSnapshot =
         withContext(Dispatchers.IO) {
-            selectPaymentProfileExclusively(
-                lifecycleGate = lifecycleGate,
-                profileId = profileId,
-                selectProfile = chainConfig::selectProfile,
-                snapshot = chainConfig::snapshot,
-            )
+            rpcWorkCoordinator.withInteractiveOperation {
+                selectPaymentProfileExclusively(
+                    lifecycleGate = lifecycleGate,
+                    profileId = profileId,
+                    selectProfile = chainConfig::selectProfile,
+                    snapshot = chainConfig::snapshot,
+                )
+            }
         }
 
     suspend fun createInvoice(displayAmount: String, profileId: String): Invoice =
         withContext(Dispatchers.IO) {
-            lifecycleGate.withExclusiveMutation {
-            val settings = chainConfig.snapshot()
-            require(settings.provisioned) { "Provision this terminal from the merchant portal first" }
-            val selectedProfile = requireSelectedPaymentProfile(settings, profileId)
-            val token = selectedProfile.token
-            val profile = KnownChainPolicy.requireProfile(settings.chainId)
-            profile.requireValidCreate2Fixture()
-            require(settings.factoryAddress.equals(profile.factory.value, true)) { "Factory pin mismatch" }
-            require(
-                settings.receiverImplementationAddress.equals(
-                    profile.receiverImplementation.value,
-                    true,
-                ),
-            ) { "Receiver implementation pin mismatch" }
-            val network = settings.toNetworkConfig()
-            val tokenAddress = EvmAddress.parse(token.address)
-            val amount = TokenAmount.parse(displayAmount, token.decimals)
-            val rpc = ReadOnlyRpcClient(network)
-            val wallet = operatorWalletStore.snapshot()
-            val operatorIdentifier = requireOperatorInvoiceIdentifier(wallet)
-            require(settings.provisionedOperatorAddress?.equals(operatorIdentifier.value, true) == true) {
-                "Provisioned operator does not match the local terminal wallet"
-            }
+            rpcWorkCoordinator.withInteractiveOperation {
+                lifecycleGate.withExclusiveMutation {
+                    val settings = chainConfig.snapshot()
+                    require(settings.provisioned) {
+                        "Provision this terminal from the merchant portal first"
+                    }
+                    val selectedProfile = requireSelectedPaymentProfile(settings, profileId)
+                    val token = selectedProfile.token
+                    val profile = KnownChainPolicy.requireProfile(settings.chainId)
+                    profile.requireValidCreate2Fixture()
+                    require(settings.factoryAddress.equals(profile.factory.value, true)) {
+                        "Factory pin mismatch"
+                    }
+                    require(
+                        settings.receiverImplementationAddress.equals(
+                            profile.receiverImplementation.value,
+                            true,
+                        ),
+                    ) { "Receiver implementation pin mismatch" }
+                    val network = settings.toNetworkConfig()
+                    val tokenAddress = EvmAddress.parse(token.address)
+                    val amount = TokenAmount.parse(displayAmount, token.decimals)
+                    val rpc = ReadOnlyRpcClient(network)
+                    val wallet = operatorWalletStore.snapshot()
+                    val operatorIdentifier = requireOperatorInvoiceIdentifier(wallet)
+                    require(
+                        settings.provisionedOperatorAddress?.equals(
+                            operatorIdentifier.value,
+                            true,
+                        ) == true,
+                    ) { "Provisioned operator does not match the local terminal wallet" }
 
-            val validation = rpc.validate(tokenAddress, token.decimals, token.symbol)
-            require(validation.tokenWhitelisted) { "Token is not whitelisted by the configured vault" }
-            val readiness = settlementClientFactory(settings.rpcUrl).use { client ->
-                require(client.chainId() == settings.chainId) { "RPC chain ID mismatch" }
-                val listed = client.isOperator(settings.vaultAddress, operatorIdentifier.value)
-                val ownerMatches = if (listed) false else {
-                    client.owner(settings.vaultAddress).equals(operatorIdentifier.value, true)
+                    // Derive the receiver locally before touching RPC so configuration, operator
+                    // readiness, and receiver freshness can be proven at one canonical block in
+                    // three bounded network waves.
+                    val protocolInvoice = PaymentInvoiceFactory.create(
+                        network = network,
+                        token = tokenAddress,
+                        amount = amount,
+                        // The protocol calls this namespace a terminal identifier. New invoices
+                        // use the device settlement EOA; historical invoice IDs remain unchanged.
+                        terminalIdentifier = operatorIdentifier,
+                    )
+                    val receiver = protocolInvoice.request.receiver
+                    val checkoutProof = rpc.validateCheckout(
+                        token = tokenAddress,
+                        expectedDecimals = token.decimals,
+                        expectedSymbol = token.symbol,
+                        operator = operatorIdentifier,
+                        receiver = receiver,
+                    )
+                    val validation = checkoutProof.validation
+                    require(validation.tokenWhitelisted) {
+                        "Token is not whitelisted by the configured vault"
+                    }
+                    val liveReadiness = checkoutProof.operatorReadiness
+                    val readiness = InvoiceReadiness(
+                        authorized = liveReadiness.listedOperator ||
+                            liveReadiness.vaultOwner == operatorIdentifier,
+                        nativeBalance = liveReadiness.nativeBalance,
+                    )
+                    requireTerminalReadiness(settings, wallet, readiness)
+                    requireInvoiceStateUnchanged(
+                        expectedSettings = settings,
+                        currentSettings = chainConfig.snapshot(),
+                        expectedWallet = wallet,
+                        currentWallet = operatorWalletStore.snapshot(),
+                    )
+                    operatorWalletStore.recordVerifiedSettlementTarget(
+                        settings.chainId,
+                        settings.vaultAddress,
+                        requireNotNull(settings.provisionedOperatorAddress),
+                    )
+
+                    val receiverFreshness = checkoutProof.receiverFreshness
+                    require(receiverFreshness.deployedCode.isEmpty()) {
+                        "Derived receiver is already deployed; refusing to reuse an invoice receiver"
+                    }
+                    require(receiverFreshness.tokenBalance == BigInteger.ZERO) {
+                        "Derived receiver already has a token balance; refusing to reuse an invoice receiver"
+                    }
+                    val invoice = buildPublishedInvoiceSnapshot(
+                        protocolInvoice = protocolInvoice,
+                        selectedProfile = selectedProfile,
+                        operatorAddress = operatorIdentifier,
+                        createdAt = System.currentTimeMillis() / 1_000,
+                    )
+                    // Persist the complete request before the UI can display its QR.
+                    invoiceDao.insert(invoice)
+                    invoice
                 }
-                InvoiceReadiness(
-                    authorized = listed || ownerMatches,
-                    nativeBalance = client.nativeBalance(operatorIdentifier.value),
-                )
-            }
-            requireTerminalReadiness(settings, wallet, readiness)
-            requireInvoiceStateUnchanged(
-                expectedSettings = settings,
-                currentSettings = chainConfig.snapshot(),
-                expectedWallet = wallet,
-                currentWallet = operatorWalletStore.snapshot(),
-            )
-            operatorWalletStore.recordVerifiedSettlementTarget(
-                settings.chainId,
-                settings.vaultAddress,
-                requireNotNull(settings.provisionedOperatorAddress),
-            )
-
-            val protocolInvoice = PaymentInvoiceFactory.create(
-                network = network,
-                token = tokenAddress,
-                amount = amount,
-                // The protocol calls this namespace a terminal identifier. For every new invoice,
-                // the app uses the public address of the device's real settlement operator EOA.
-                // Historical invoices retain their already-persisted invoice IDs and receivers.
-                terminalIdentifier = operatorIdentifier
-            )
-            val receiver = protocolInvoice.request.receiver
-            require(rpc.codeAt(receiver).isEmpty()) {
-                "Derived receiver is already deployed; refusing to reuse an invoice receiver"
-            }
-            require(rpc.tokenBalance(tokenAddress, receiver) == BigInteger.ZERO) {
-                "Derived receiver already has a token balance; refusing to reuse an invoice receiver"
-            }
-            requireInvoiceStateUnchanged(
-                expectedSettings = settings,
-                currentSettings = chainConfig.snapshot(),
-                expectedWallet = wallet,
-                currentWallet = operatorWalletStore.snapshot(),
-            )
-
-            val createdAt = System.currentTimeMillis() / 1_000
-            val invoice = buildPublishedInvoiceSnapshot(
-                protocolInvoice = protocolInvoice,
-                selectedProfile = selectedProfile,
-                operatorAddress = operatorIdentifier,
-                createdAt = createdAt,
-            )
-            // Persist the complete request before the UI is allowed to display its QR.
-            invoiceDao.insert(invoice)
-            invoice
             }
         }
 
@@ -162,23 +212,72 @@ class InvoiceRepository(
 
         val request = invoice.toPaymentRequest()
         val observer = PaymentObserver(
-            if (boundedRpc) {
-                ReadOnlyRpcClient(
-                    invoice.toNetworkConfig(),
-                    connectTimeoutMillis = RECOVERY_RPC_CONNECT_TIMEOUT_MILLIS,
-                    readTimeoutMillis = RECOVERY_RPC_READ_TIMEOUT_MILLIS,
-                )
-            } else {
-                ReadOnlyRpcClient(invoice.toNetworkConfig())
-            },
+            ReadOnlyRpcClient(
+                invoice.toNetworkConfig(),
+                connectTimeoutMillis = if (boundedRpc) {
+                    RECOVERY_RPC_CONNECT_TIMEOUT_MILLIS
+                } else {
+                    MONITOR_RPC_CONNECT_TIMEOUT_MILLIS
+                },
+                readTimeoutMillis = if (boundedRpc) {
+                    RECOVERY_RPC_READ_TIMEOUT_MILLIS
+                } else {
+                    MONITOR_RPC_READ_TIMEOUT_MILLIS
+                },
+            ),
         )
         var previous = invoice.toPreviousObservation(request)
         while (invoice.canMonitor()) {
-            val observation = observer.observe(
-                request = request,
-                previous = previous,
-                requiredConfirmations = invoice.confirmationBlocks
+            val attempt = runVisibleRpcAttempt(
+                boundedRpc = boundedRpc,
+                attempt = {
+                    rpcWorkCoordinator.withBackgroundOperation {
+                        observer.observe(
+                            request = request,
+                            previous = previous,
+                            requiredConfirmations = invoice.confirmationBlocks,
+                        )
+                    }
+                },
+                reloadDurableState = { invoiceDao.getById(invoice.invoiceId) },
+                shouldContinue = { candidate -> candidate.canMonitor() },
+                pauseBeforeRetry = { delay(POLL_INTERVAL_MILLIS) },
             )
+            val observation = when (attempt) {
+                is VisibleRpcAttemptResult.Observed -> attempt.value
+                is VisibleRpcAttemptResult.Retry -> {
+                    invoice = attempt.durableState
+                    previous = invoice.toPreviousObservation(request)
+                    emit(invoice)
+                    continue
+                }
+                is VisibleRpcAttemptResult.Stop -> {
+                    invoice = attempt.durableState
+                    emit(invoice)
+                    break
+                }
+                VisibleRpcAttemptResult.Deferred -> {
+                    // A bounded automatic recovery pass must not linger behind cashier work. The
+                    // durable scheduler retries later. Visible monitoring also rechecks durable
+                    // cancellation before waiting for the cashier window.
+                    if (boundedRpc) throw BackgroundRpcDeferredException()
+                    val durable = invoiceDao.getById(invoice.invoiceId)
+                        ?: throw IllegalStateException("Invoice disappeared while monitoring")
+                    invoice = durable
+                    previous = invoice.toPreviousObservation(request)
+                    emit(invoice)
+                    if (!invoice.canMonitor()) break
+                    rpcWorkCoordinator.awaitBackgroundWindow()
+                    invoice = invoiceDao.getById(invoice.invoiceId)
+                        ?: throw IllegalStateException("Invoice disappeared while monitoring")
+                    previous = invoice.toPreviousObservation(request)
+                    if (!invoice.canMonitor()) {
+                        emit(invoice)
+                        break
+                    }
+                    continue
+                }
+            }
             val status = observation.toInvoiceStatus()
             val confirmedBlock = if (status == InvoiceStatus.PAID || status == InvoiceStatus.OVERPAID) {
                 observation.blockNumber
@@ -224,10 +323,15 @@ class InvoiceRepository(
     }.flowOn(Dispatchers.IO)
 
     suspend fun reconcileLateInvoices() = withContext(Dispatchers.IO) {
-        lateInvoiceReconciler.reconcileOnce()
+        // One record is one bounded background unit. This avoids both check-then-run overlap and
+        // a multi-record pass monopolizing the public endpoint ahead of a cashier tap.
+        rpcWorkCoordinator.withBackgroundOperation {
+            lateInvoiceReconciler.reconcileOnce(limit = 1)
+        }
     }
 
     suspend fun recoverOpenInvoices() = withContext(Dispatchers.IO) {
+        if (rpcWorkCoordinator.interactive) return@withContext
         recoverOpenInvoiceBatch(invoiceDao) { invoice ->
             // Initial emission is the stored value; the second is the fresh RPC observation. The
             // durable attempt timestamp was committed before this potentially slow RPC begins.
@@ -323,10 +427,18 @@ class InvoiceRepository(
         status in listOf(InvoiceStatus.WAITING, InvoiceStatus.PARTIAL, InvoiceStatus.CONFIRMING)
 
     companion object {
-        private const val POLL_INTERVAL_MILLIS = 2_000L
-        private const val RECOVERY_TIMEOUT_MILLIS = 15_000L
-        private const val RECOVERY_RPC_CONNECT_TIMEOUT_MILLIS = 2_500
-        private const val RECOVERY_RPC_READ_TIMEOUT_MILLIS = 4_000
+        // Base-family blocks are approximately two seconds and readiness requires at least two
+        // blocks, so a five-second cadence avoids self-throttling without increasing finality time.
+        internal const val POLL_INTERVAL_MILLIS = 5_000L
+        private const val RECOVERY_TIMEOUT_MILLIS = 5_000L
+        // One SDK observation is exactly three HTTP waves. Even though an already-started sample
+        // no longer owns the cashier mutex, cap its worst socket budget below the five-second
+        // coordinator lease so background overlap remains brief and bounded.
+        internal const val MONITOR_RPC_WAVES = 3
+        internal const val MONITOR_RPC_CONNECT_TIMEOUT_MILLIS = 500
+        internal const val MONITOR_RPC_READ_TIMEOUT_MILLIS = 1_000
+        internal const val RECOVERY_RPC_CONNECT_TIMEOUT_MILLIS = 500
+        internal const val RECOVERY_RPC_READ_TIMEOUT_MILLIS = 1_000
     }
 }
 
@@ -407,6 +519,10 @@ internal suspend fun recoverOpenInvoiceBatch(
         attempted += 1
         try {
             recover(invoice)
+        } catch (_: BackgroundRpcDeferredException) {
+            // Interactive work arrived after this durable attempt was claimed. Stop the pass now;
+            // later rows retain priority and the claimed row rotates on the next scheduled pass.
+            return attempted
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
@@ -416,6 +532,8 @@ internal suspend fun recoverOpenInvoiceBatch(
     }
     return attempted
 }
+
+private class BackgroundRpcDeferredException : RuntimeException()
 
 internal const val MAX_OPEN_RECOVERY_CANDIDATES_PER_PASS = 2
 

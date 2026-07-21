@@ -34,6 +34,10 @@ protocol EthereumOperatorRPC: Sendable {
     func balance(of address: EthereumAddress) async throws -> UInt256
     func latestBalance(of address: EthereumAddress) async throws -> UInt256
     func tokenBalance(token: EthereumAddress, account: EthereumAddress) async throws -> UInt256
+    func tokenBalances(
+        token: EthereumAddress,
+        accounts: [EthereumAddress]
+    ) async throws -> [UInt256]
     func vaultAuthorization(
         vault: EthereumAddress,
         operatorAddress: EthereumAddress
@@ -52,6 +56,20 @@ extension EthereumOperatorRPC {
     func latestBalance(of address: EthereumAddress) async throws -> UInt256 {
         try await balance(of: address)
     }
+
+    /// Alternate and test transports retain the simple single-read contract. The production
+    /// client overrides this with strict bounded JSON-RPC batching.
+    func tokenBalances(
+        token: EthereumAddress,
+        accounts: [EthereumAddress]
+    ) async throws -> [UInt256] {
+        var balances = [UInt256]()
+        balances.reserveCapacity(accounts.count)
+        for account in accounts {
+            balances.append(try await tokenBalance(token: token, account: account))
+        }
+        return balances
+    }
 }
 
 public actor OperatorRPCClient: EthereumOperatorRPC {
@@ -63,7 +81,7 @@ public actor OperatorRPCClient: EthereumOperatorRPC {
 
     public init(
         endpoint: URL,
-        transport: any RPCTransport = URLSessionRPCTransport()
+        transport: any RPCTransport = URLSessionRPCTransport.shared
     ) throws {
         try RPCURLPolicy.validate(endpoint)
         self.endpoint = endpoint
@@ -83,6 +101,9 @@ public actor OperatorRPCClient: EthereumOperatorRPC {
             "eth_getBlockByNumber",
             params: [.string("0x" + String(blockNumber, radix: 16)), .bool(false)]
         ), case let .object(object) = value else {
+            throw SettlementOperatorError.malformedRPCResponse
+        }
+        guard try decodeUInt64(requiredString(object["number"])) == blockNumber else {
             throw SettlementOperatorError.malformedRPCResponse
         }
         return try Bytes32(hex: requiredString(object["hash"]))
@@ -118,23 +139,98 @@ public actor OperatorRPCClient: EthereumOperatorRPC {
         return try ABI.decodeUInt256(result)
     }
 
+    func tokenBalances(
+        token: EthereumAddress,
+        accounts: [EthereumAddress]
+    ) async throws -> [UInt256] {
+        guard !accounts.isEmpty else { return [] }
+        let calls = accounts.map { account in
+            OperatorBatchCall(
+                method: "eth_call",
+                params: [
+                    transactionObject(
+                        from: nil,
+                        to: token,
+                        data: ABI.encodeCall(
+                            selector: ABI.balanceOfSelector,
+                            words: [ABI.word(account)]
+                        )
+                    ),
+                    .string("latest"),
+                ]
+            )
+        }
+        let chunks = stride(from: 0, to: calls.count, by: 10).map { start in
+            Array(calls[start..<min(start + 10, calls.count)])
+        }
+        let results = try await withThrowingTaskGroup(
+            of: (Int, [OperatorBatchResult]).self,
+            returning: [[OperatorBatchResult]].self
+        ) { group in
+            var nextChunk = 0
+            let maximumConcurrentBatches = min(4, chunks.count)
+            func enqueue(_ index: Int) {
+                let chunk = chunks[index]
+                group.addTask { (index, try await self.requestBatch(chunk)) }
+            }
+            while nextChunk < maximumConcurrentBatches {
+                enqueue(nextChunk)
+                nextChunk += 1
+            }
+            var resolved = Array<[OperatorBatchResult]?>(repeating: nil, count: chunks.count)
+            for try await (index, values) in group {
+                guard values.count == chunks[index].count else {
+                    throw OperatorRPCError.malformedResponse
+                }
+                resolved[index] = values
+                if nextChunk < chunks.count {
+                    enqueue(nextChunk)
+                    nextChunk += 1
+                }
+            }
+            guard resolved.allSatisfy({ $0 != nil }) else {
+                throw OperatorRPCError.malformedResponse
+            }
+            return resolved.map { $0! }
+        }
+        return try results.flatMap { chunk in
+            try chunk.map { try ABI.decodeUInt256(decodeBatchData($0)) }
+        }
+    }
+
     func vaultAuthorization(
         vault: EthereumAddress,
         operatorAddress: EthereumAddress
     ) async throws -> VaultAuthorization {
-        let operatorResult = try await callData(
-            from: nil,
-            to: vault,
-            data: SettlementABI.encodeIsOperator(operatorAddress)
-        )
+        let results = try await requestBatch([
+            OperatorBatchCall(
+                method: "eth_call",
+                params: [
+                    transactionObject(
+                        from: nil,
+                        to: vault,
+                        data: SettlementABI.encodeIsOperator(operatorAddress)
+                    ),
+                    .string("latest"),
+                ]
+            ),
+            OperatorBatchCall(
+                method: "eth_call",
+                params: [
+                    transactionObject(
+                        from: nil,
+                        to: vault,
+                        data: SettlementABI.encodeOwner()
+                    ),
+                    .string("latest"),
+                ]
+            ),
+        ])
+        let operatorResult = try decodeBatchData(results[0])
         let isOperator = try ABI.decodeBool(operatorResult)
 
         do {
-            let ownerResult = try await callData(
-                from: nil,
-                to: vault,
-                data: SettlementABI.encodeOwner()
-            )
+            let ownerResult = try decodeBatchData(results[1])
             guard ownerResult.count == 32,
                   ownerResult.prefix(12).allSatisfy({ $0 == 0 })
             else {
@@ -169,12 +265,17 @@ public actor OperatorRPCClient: EthereumOperatorRPC {
     }
 
     func feeQuote() async throws -> EIP1559FeeQuote {
-        let gasPrice = try decodeUInt64(try await requiredString("eth_gasPrice"))
+        let results = try await requestBatch([
+            OperatorBatchCall(method: "eth_gasPrice", params: []),
+            OperatorBatchCall(
+                method: "eth_getBlockByNumber",
+                params: [.string("pending"), .bool(false)]
+            ),
+            OperatorBatchCall(method: "eth_maxPriorityFeePerGas", params: []),
+        ])
+        let gasPrice = try decodeUInt64(try decodeBatchString(results[0]))
 
-        let pendingBlock = try? await request(
-            "eth_getBlockByNumber",
-            params: [.string("pending"), .bool(false)]
-        )
+        let pendingBlock = try? decodeBatchValue(results[1])
         let baseFee: UInt64? = try pendingBlock.flatMap { value in
             guard case let .object(object) = value,
                   case let .string(quantity)? = object["baseFeePerGas"]
@@ -190,12 +291,7 @@ public actor OperatorRPCClient: EthereumOperatorRPC {
             )
         }
 
-        let remotePriority: UInt64?
-        do {
-            remotePriority = try decodeUInt64(try await requiredString("eth_maxPriorityFeePerGas"))
-        } catch {
-            remotePriority = nil
-        }
+        let remotePriority = try? decodeUInt64(try decodeBatchString(results[2]))
         let inferredPriority = gasPrice > baseFee
             ? gasPrice - baseFee
             : min(gasPrice, 1_000_000_000)
@@ -398,20 +494,141 @@ public actor OperatorRPCClient: EthereumOperatorRPC {
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(payload)
+        let requestToSend = request
 
-        let response = try await transport.send(request)
+        let response = try await RPCOriginRequestLimiter.shared.withPermit(for: endpoint) {
+            var boundedRequest = requestToSend
+            boundedRequest.timeoutInterval = try RPCRequestDeadline.boundedRequestTimeout(
+                default: 20
+            )
+            return try await transport.send(boundedRequest)
+        }
         guard (200..<300).contains(response.statusCode) else {
             throw OperatorRPCError.invalidHTTPStatus(response.statusCode)
         }
+        let strictID = try StrictOperatorJSONRPCResponseID.single(in: response.body)
         let decoded = try decoder.decode(OperatorJSONRPCResponse.self, from: response.body)
         guard decoded.jsonrpc == "2.0" else { throw OperatorRPCError.malformedResponse }
-        guard decoded.id == id else { throw OperatorRPCError.mismatchedID }
+        guard strictID == id, decoded.id == strictID else {
+            throw OperatorRPCError.mismatchedID
+        }
         if let error = decoded.error {
             throw OperatorRPCError.server(code: error.code, message: error.message)
         }
         if decoded.result == nil, !allowsNull { throw OperatorRPCError.malformedResponse }
         return decoded.result
     }
+
+    private func requestBatch(
+        _ calls: [OperatorBatchCall]
+    ) async throws -> [OperatorBatchResult] {
+        guard !calls.isEmpty else { return [] }
+        guard calls.count <= 10 else { throw OperatorRPCError.malformedResponse }
+        var payloads = [OperatorJSONRPCRequest]()
+        var expectedIDs = [UInt64]()
+        payloads.reserveCapacity(calls.count)
+        expectedIDs.reserveCapacity(calls.count)
+        for call in calls {
+            let id = nextID
+            nextID &+= 1
+            expectedIDs.append(id)
+            payloads.append(OperatorJSONRPCRequest(
+                id: id,
+                method: call.method,
+                params: call.params
+            ))
+        }
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(payloads)
+        let requestToSend = request
+
+        let response = try await RPCOriginRequestLimiter.shared.withPermit(for: endpoint) {
+            var boundedRequest = requestToSend
+            boundedRequest.timeoutInterval = try RPCRequestDeadline.boundedRequestTimeout(
+                default: 20
+            )
+            return try await transport.send(boundedRequest)
+        }
+        guard (200..<300).contains(response.statusCode) else {
+            throw OperatorRPCError.invalidHTTPStatus(response.statusCode)
+        }
+        let strictIDs = try StrictOperatorJSONRPCResponseID.batch(in: response.body)
+        let decoded = try decoder.decode([OperatorJSONRPCResponse].self, from: response.body)
+        guard decoded.count == expectedIDs.count,
+              strictIDs.count == decoded.count
+        else { throw OperatorRPCError.malformedResponse }
+        var byID = [UInt64: OperatorJSONRPCResponse]()
+        for (item, strictID) in zip(decoded, strictIDs) {
+            guard item.jsonrpc == "2.0",
+                  item.id == strictID,
+                  expectedIDs.contains(strictID),
+                  byID.updateValue(item, forKey: strictID) == nil,
+                  (item.result == nil) != (item.error == nil)
+            else { throw OperatorRPCError.mismatchedID }
+        }
+        return try expectedIDs.map { id in
+            guard let item = byID[id] else { throw OperatorRPCError.mismatchedID }
+            if let error = item.error {
+                return .failure(.server(code: error.code, message: error.message))
+            }
+            guard let result = item.result else { throw OperatorRPCError.malformedResponse }
+            return .success(result)
+        }
+    }
+
+    private func decodeBatchValue(_ result: OperatorBatchResult) throws -> OperatorJSONValue {
+        switch result {
+        case let .success(value): value
+        case let .failure(error): throw error
+        }
+    }
+
+    private func decodeBatchString(_ result: OperatorBatchResult) throws -> String {
+        try requiredString(decodeBatchValue(result))
+    }
+
+    private func decodeBatchData(_ result: OperatorBatchResult) throws -> Data {
+        let value = try decodeBatchString(result)
+        do {
+            return try Data(hex: value)
+        } catch {
+            throw SettlementOperatorError.invalidRPCData(value)
+        }
+    }
+}
+
+public final class OperatorRPCClientPool: @unchecked Sendable {
+    public static let shared = OperatorRPCClientPool()
+
+    private let lock = NSLock()
+    private let transport: any RPCTransport
+    private var clients = [URL: OperatorRPCClient]()
+
+    public init(transport: any RPCTransport = URLSessionRPCTransport.shared) {
+        self.transport = transport
+    }
+
+    public func client(for endpoint: URL) throws -> OperatorRPCClient {
+        try lock.withLock {
+            if let client = clients[endpoint] { return client }
+            let client = try OperatorRPCClient(endpoint: endpoint, transport: transport)
+            clients[endpoint] = client
+            return client
+        }
+    }
+}
+
+private struct OperatorBatchCall: Sendable {
+    let method: String
+    let params: [OperatorJSONValue]
+}
+
+private enum OperatorBatchResult: Sendable {
+    case success(OperatorJSONValue)
+    case failure(OperatorRPCError)
 }
 
 private enum OperatorJSONValue: Hashable, Sendable, Codable {
@@ -462,6 +679,45 @@ private struct OperatorJSONRPCResponse: Decodable {
     let id: UInt64
     let result: OperatorJSONValue?
     let error: OperatorJSONRPCError?
+}
+
+private enum StrictOperatorJSONRPCResponseID {
+    static func single(in data: Data) throws -> UInt64 {
+        let value: Any
+        do {
+            value = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw OperatorRPCError.malformedResponse
+        }
+        guard let object = value as? [String: Any] else {
+            throw OperatorRPCError.malformedResponse
+        }
+        return try parse(object["id"])
+    }
+
+    static func batch(in data: Data) throws -> [UInt64] {
+        let value: Any
+        do {
+            value = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw OperatorRPCError.malformedResponse
+        }
+        guard let objects = value as? [[String: Any]] else {
+            throw OperatorRPCError.malformedResponse
+        }
+        return try objects.map { try parse($0["id"]) }
+    }
+
+    private static func parse(_ raw: Any?) throws -> UInt64 {
+        guard let number = raw as? NSNumber else {
+            throw OperatorRPCError.mismatchedID
+        }
+        let numericType = String(cString: number.objCType)
+        guard numericType == "q" || numericType == "Q",
+              let value = UInt64(number.stringValue)
+        else { throw OperatorRPCError.mismatchedID }
+        return value
+    }
 }
 
 private extension Character {

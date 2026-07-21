@@ -101,7 +101,7 @@ struct SettlementView: View {
                 await model.refreshOperatorStatus()
             }
             .task {
-                await model.reconcileSettlements()
+                await model.reconcileSettlementsOnAppearance()
                 await model.refreshOperatorStatus()
             }
             .sheet(isPresented: preparedBinding) {
