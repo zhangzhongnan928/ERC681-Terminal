@@ -41,8 +41,10 @@ struct ConfigurationAddressScanner: UIViewControllerRepresentable {
     ) {}
 }
 
+// Metadata delivery is explicitly registered on `.main`; `@preconcurrency` keeps that invariant
+// compatible with Xcode 16, which predates isolated protocol-conformance syntax.
 final class ConfigurationAddressScannerViewController: UIViewController,
-    @MainActor AVCaptureMetadataOutputObjectsDelegate
+    @preconcurrency AVCaptureMetadataOutputObjectsDelegate
 {
     private let sessionRunner = ConfigurationAddressSessionRunner()
     private let metadataOutput = AVCaptureMetadataOutput()
