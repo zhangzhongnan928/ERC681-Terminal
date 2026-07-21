@@ -406,25 +406,31 @@ struct AppSettings: Codable, Equatable {
               })
         else { throw AppSettingsError.invalidValue }
 
-        let newProfile = try AppPaymentProfile(
+        var appliedProfile = try AppPaymentProfile(
             configuration: configuration,
             token: token,
             operatorAddress: operatorAddress
         )
         // Constructing the profile again verifies all stored trust pins and display metadata.
-        _ = try newProfile.configuration()
+        _ = try appliedProfile.configuration()
 
         var candidate = self
-        if let index = candidate.paymentProfiles.firstIndex(where: { $0.id == newProfile.id }) {
-            candidate.paymentProfiles[index] = newProfile
+        if let index = candidate.paymentProfiles.firstIndex(where: { $0.id == appliedProfile.id }) {
+            let existingConfiguration = try candidate.paymentProfiles[index].configuration()
+            appliedProfile.confirmationBlocks = String(max(
+                existingConfiguration.confirmationPolicy.requiredBlocks,
+                profile.defaultConfirmationBlocks
+            ))
+            _ = try appliedProfile.configuration()
+            candidate.paymentProfiles[index] = appliedProfile
         } else {
             guard candidate.paymentProfiles.count < Self.maximumPaymentProfileCount else {
                 throw AppSettingsError.profileLimitExceeded
             }
-            candidate.paymentProfiles.append(newProfile)
+            candidate.paymentProfiles.append(appliedProfile)
         }
-        candidate.selectedPaymentProfileID = newProfile.id
-        candidate.fallbackProfile = newProfile
+        candidate.selectedPaymentProfileID = appliedProfile.id
+        candidate.fallbackProfile = appliedProfile
         return candidate
     }
 
@@ -749,19 +755,54 @@ enum AppSettingsError: LocalizedError {
     }
 }
 
+struct AppSettingsLoadResult {
+    let settings: AppSettings
+    let recoveryRequired: Bool
+}
+
 enum AppPreferences {
     private static let settingsKey = "opk.app.settings.v1"
+    private static let quarantineKey = "opk.app.settings.quarantine.v1"
 
     static func loadSettings() -> AppSettings {
-        guard let data = UserDefaults.standard.data(forKey: settingsKey),
-              let value = try? JSONDecoder().decode(AppSettings.self, from: data)
-        else { return AppSettings() }
+        loadSettingsResult().settings
+    }
+
+    static func loadSettingsResult() -> AppSettingsLoadResult {
+        guard let data = UserDefaults.standard.data(forKey: settingsKey) else {
+            return AppSettingsLoadResult(settings: AppSettings(), recoveryRequired: false)
+        }
+        guard let value = try? JSONDecoder().decode(AppSettings.self, from: data) else {
+            // Keep the authoritative bytes in place. AppModel blocks all incidental persistence
+            // until the device admin explicitly moves this blob into quarantine.
+            return AppSettingsLoadResult(settings: AppSettings(), recoveryRequired: true)
+        }
         // Make the normalized v3 value durable immediately. The notice remains pending until the
         // presentation layer explicitly acknowledges it after informing the merchant.
         if value.migrationNotice != nil {
             _ = saveSettings(value)
         }
-        return value
+        return AppSettingsLoadResult(settings: value, recoveryRequired: false)
+    }
+
+    /// Retains unreadable settings before clearing the active slot. Quarantine is append-only and
+    /// deduplicated so a crash between the two UserDefaults operations cannot destroy evidence.
+    static func quarantineUnreadableSettings() -> Bool {
+        let defaults = UserDefaults.standard
+        guard let data = defaults.data(forKey: settingsKey),
+              (try? JSONDecoder().decode(AppSettings.self, from: data)) == nil
+        else { return false }
+
+        var quarantined = defaults.array(forKey: quarantineKey) as? [Data] ?? []
+        if !quarantined.contains(data) {
+            quarantined.append(data)
+            defaults.set(quarantined, forKey: quarantineKey)
+        }
+        guard (defaults.array(forKey: quarantineKey) as? [Data])?.contains(data) == true else {
+            return false
+        }
+        defaults.removeObject(forKey: settingsKey)
+        return defaults.data(forKey: settingsKey) == nil
     }
 
     @discardableResult

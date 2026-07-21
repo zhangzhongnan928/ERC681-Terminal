@@ -82,7 +82,7 @@ fun InvoiceScreen(
     terminalRefreshing: Boolean,
     terminalConfigurationValidated: Boolean,
     onRefreshTerminalStatus: () -> Unit,
-    onProfileSelection: () -> Unit,
+    onProfileSelection: (sequence: Long, profileId: String) -> Unit,
     onRecoverFromInvoiceFailure: () -> Unit,
     onOpenSettings: () -> Unit,
     onInvoiceCreated: (String) -> Unit,
@@ -98,8 +98,14 @@ fun InvoiceScreen(
             onRecoverFromInvoiceFailure()
         }
     }
-    LaunchedEffect(state.profileSelectionSequence) {
-        if (state.profileSelectionSequence > 0) onProfileSelection()
+    LaunchedEffect(state.profileSelectionSequence, state.selectedProfile?.id) {
+        val selectedProfileId = state.selectedProfile?.id
+        if (state.profileSelectionPending &&
+            state.profileSelectionSequence > 0 &&
+            selectedProfileId != null
+        ) {
+            onProfileSelection(state.profileSelectionSequence, selectedProfileId)
+        }
     }
     LaunchedEffect(state.createdInvoice) {
         state.createdInvoice?.let {

@@ -86,6 +86,42 @@ class ChainConfigSharedPreferencesMigrationTest {
     }
 
     @Test
+    fun selectingProfilePersistsTheCashierChoiceAcrossReopen() {
+        assertTrue(
+            preferences.edit()
+                .putString(V2_CONFIG_KEY, V2_SINGLE_PROFILE_JSON)
+                .putBoolean(V2_PROVISIONED_KEY, true)
+                .commit(),
+        )
+        val config = ChainConfig(context)
+        val initial = config.snapshot()
+        val first = initial.resolvedPaymentProfiles().single()
+        val second = first.copy(
+            vaultAddress = "0x2222222222222222222222222222222222222222",
+            token = PaymentToken(
+                address = "0x3333333333333333333333333333333333333333",
+                symbol = "USDC",
+                decimals = 6,
+            ),
+        )
+        val catalog = initial.upsertingProfile(
+            second,
+            requireNotNull(initial.provisionedOperatorAddress),
+        )
+        assertTrue(config.compareAndReplaceProvisioned(initial, catalog))
+        assertEquals(second.id, config.snapshot().selectedProfileId)
+
+        assertTrue(config.selectProfile(first.id))
+
+        val reopened = ChainConfig(context).snapshot()
+        assertEquals(first.id, reopened.selectedProfileId)
+        assertEquals(first.id, reopened.selectedPaymentProfile()?.id)
+        assertEquals("AUD", reopened.paymentTokens.single().symbol)
+        assertEquals(2, reopened.resolvedPaymentProfiles().size)
+        assertTrue(reopened.hasCompleteProvisioning())
+    }
+
+    @Test
     fun storedV2FinalityBelowFloorIsRaisedAndNoticeSurvivesReopen() {
         assertTrue(
             preferences.edit()

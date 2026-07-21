@@ -88,9 +88,15 @@ fun AppNavigation(
                             invoiceViewModel::completeReadinessRefresh,
                         )
                     },
-                    onProfileSelection = {
+                    onProfileSelection = { sequence, profileId ->
                         settingsViewModel.refreshOperatorStatusAfterProfileSelection(
-                            invoiceViewModel::completeReadinessRefresh,
+                            { ready ->
+                                invoiceViewModel.completeProfileSelectionReadinessRefresh(
+                                    sequence = sequence,
+                                    profileId = profileId,
+                                    ready = ready,
+                                )
+                            },
                         )
                     },
                     onRecoverFromInvoiceFailure = {

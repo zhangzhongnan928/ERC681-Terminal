@@ -1,0 +1,162 @@
+name: Mobile deterministic checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android JVM, lint, build, and safety instrumentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+
+      - name: Install Android 35 toolchain
+        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
+
+      - name: Install boundary-check dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+
+      - name: Check mobile security boundaries
+        run: ./scripts/check-mobile-boundary.sh
+
+      - name: Run deterministic Android checks
+        working-directory: android
+        run: |
+          ./gradlew --no-daemon \
+            :erc681-sdk:test \
+            :app:testDebugUnitTest \
+            :app:lintDebug \
+            :app:assembleDebug \
+            :app:assembleDebugAndroidTest
+
+      - name: Verify committed Room schemas are current
+        run: git diff --exit-code -- android/app/schemas
+
+      - name: Enable KVM access for the Android emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run Room migration and ChainConfig persistence instrumentation
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 35
+          target: default
+          arch: x86_64
+          profile: pixel
+          cores: 2
+          ram-size: 2048M
+          heap-size: 512M
+          emulator-boot-timeout: 600
+          disable-animations: true
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -camera-back none -no-snapshot-save
+          script: |
+            cd android
+            ./gradlew --no-daemon :app:connectedDebugAndroidTest \
+              -Pandroid.testInstrumentationRunnerArguments.class=com.openpasskey.terminal.data.db.InvoiceDatabaseMigrationTest,com.openpasskey.terminal.chain.ChainConfigSharedPreferencesMigrationTest
+
+  swift-sdk:
+    name: Swift SDK, conformance, and targeted iOS safety tests
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Report Swift toolchain
+        run: swift --version
+
+      - name: Build and test Swift packages
+        working-directory: ios
+        run: |
+          swift build
+          swift test
+          swift run OPKTerminalConformance
+
+      - name: Select an available iPhone simulator
+        id: ios-simulator
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          inventory = json.loads(
+              subprocess.check_output(
+                  ["xcrun", "simctl", "list", "devices", "available", "--json"],
+                  text=True,
+              )
+          )
+          candidates = []
+          for runtime, devices in inventory.get("devices", {}).items():
+              match = re.search(r"\.iOS-(\d+)-(\d+)(?:-(\d+))?$", runtime)
+              if match is None:
+                  continue
+              version = tuple(int(part or 0) for part in match.groups())
+              for device in devices:
+                  if device.get("isAvailable") and device.get("name", "").startswith("iPhone"):
+                      candidates.append((version, device["name"], device["udid"], runtime))
+
+          if not candidates:
+              raise SystemExit("No available iPhone simulator is installed on this runner")
+          version, name, udid, runtime = max(candidates)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"udid={udid}", file=output)
+              print(f"name={name}", file=output)
+              print(f"runtime={runtime}", file=output)
+          print(f"Selected {name} ({runtime}) [{udid}]")
+          PY
+
+      - name: Boot selected iPhone simulator
+        run: |
+          xcrun simctl shutdown "${{ steps.ios-simulator.outputs.udid }}" || true
+          xcrun simctl erase "${{ steps.ios-simulator.outputs.udid }}"
+          xcrun simctl boot "${{ steps.ios-simulator.outputs.udid }}"
+          xcrun simctl bootstatus "${{ steps.ios-simulator.outputs.udid }}" -b
+
+      - name: Run targeted iOS finality, recovery, and settlement-guard tests
+        run: |
+          xcodebuild \
+            -project ios/OPKTerminal.xcodeproj \
+            -scheme OPKTerminalApp \
+            -destination "platform=iOS Simulator,id=${{ steps.ios-simulator.outputs.udid }}" \
+            -derivedDataPath "$RUNNER_TEMP/opk-terminal-ios-derived-data" \
+            -skipPackagePluginValidation \
+            -parallel-testing-enabled NO \
+            -skip-testing:OPKTerminalAppUITests \
+            test \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testFirstRunWalletCreationRemainsAvailableBeforeAdminPIN \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testNewPaymentRouteUsesKnownNetworkDefaultWithoutLeakingFallbackFinality \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testReprovisioningSamePaymentRoutePreservesRaisedFinality \
+            -only-testing:OPKTerminalAppTests/SettingsRecoveryAndSettlementGuardTests

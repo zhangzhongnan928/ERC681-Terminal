@@ -2,8 +2,11 @@ package com.openpasskey.terminal.provisioning
 
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.erc681.NetworkValidation
+import com.openpasskey.terminal.chain.PaymentToken
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
+import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.chain.resolvedPaymentProfiles
+import com.openpasskey.terminal.chain.selectedPaymentProfile
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.lifecycle.TerminalResetCoordinator
 import com.openpasskey.terminal.lifecycle.OperatorNativeBalanceReader
@@ -25,7 +28,7 @@ import java.util.concurrent.TimeUnit
 
 class TerminalProvisionerTest {
     @Test
-    fun provisioningUsesKnownNetworkDefaultWithoutLeakingPreviousFinality() = runBlocking {
+    fun newProfileUsesKnownNetworkDefaultWithoutLeakingLegacyFallbackFinality() = runBlocking {
         val committed = mutableListOf<TerminalConfigSnapshot>()
         val operational = FakeReader().apply {
             provenanceFailure = IllegalStateException("Operational override cannot prove provenance")
@@ -70,6 +73,28 @@ class TerminalProvisionerTest {
         assertTrue(trusted.provenanceCalls > 0)
         assertTrue(operational.closed)
         assertTrue(trusted.closed)
+    }
+
+    @Test
+    fun reprovisioningSameProfilePreservesMerchantRaisedFinality() = runBlocking {
+        var stored = provisionedPrevious(confirmationBlocks = 7)
+        val provisioner = TerminalProvisioner(
+            snapshot = { stored },
+            compareAndCommit = { expected, candidate ->
+                assertEquals(stored, expected)
+                stored = candidate
+                true
+            },
+            currentWalletSnapshot = ::wallet,
+            lifecycleGate = TerminalLifecycleGate(),
+            clientFactory = ProvisioningChainReaderFactory { FakeReader() },
+        )
+
+        val result = provisioner.provision(CANONICAL, wallet()) { commit -> commit() }
+
+        assertEquals(7, result.profile.confirmationBlocks)
+        assertEquals(7, result.configuration.confirmationBlocks)
+        assertEquals(7, stored.selectedPaymentProfile()?.confirmationBlocks)
     }
 
     @Test
@@ -459,6 +484,40 @@ class TerminalProvisionerTest {
         provisionedOperatorAddress = null,
         provisioned = false,
     )
+
+    private fun provisionedPrevious(confirmationBlocks: Int): TerminalConfigSnapshot {
+        val token = PaymentToken(
+            "0x7ffba642bc902880a737cb1c18a4e9540879e211",
+            "AUD",
+            18,
+        )
+        val profile = TerminalPaymentProfile(
+            networkName = "Base Sepolia",
+            rpcUrl = "https://sepolia.base.org",
+            chainId = 84532,
+            factoryAddress = FACTORY.value,
+            receiverImplementationAddress = IMPLEMENTATION.value,
+            vaultAddress = VAULT.value,
+            confirmationBlocks = confirmationBlocks,
+            token = token,
+            protocolVersion = "1.4.1",
+        )
+        return TerminalConfigSnapshot(
+            networkName = profile.networkName,
+            rpcUrl = profile.rpcUrl,
+            chainId = profile.chainId,
+            factoryAddress = profile.factoryAddress,
+            receiverImplementationAddress = profile.receiverImplementationAddress,
+            vaultAddress = profile.vaultAddress,
+            confirmationBlocks = profile.confirmationBlocks,
+            paymentTokens = listOf(token),
+            protocolVersion = profile.protocolVersion,
+            provisionedOperatorAddress = OPERATOR,
+            provisioned = true,
+            paymentProfiles = listOf(profile),
+            selectedProfileId = profile.id,
+        )
+    }
 
     private companion object {
         const val OPERATOR = "0x1111111111111111111111111111111111111111"

@@ -85,14 +85,9 @@ class InvoiceViewModel(
 
     fun refreshConfiguration() {
         val configuration = chainConfig.snapshot()
-        val profiles = configuration.resolvedPaymentProfiles()
-        val selected = configuration.selectedPaymentProfile()
-        val current = _createState.value
-        _createState.value = current.copy(
-            profiles = profiles,
-            selectedProfile = selected,
+        _createState.value = _createState.value.afterConfigurationRefresh(
+            configuration = configuration,
             operatorWalletReady = repository.hasReadyOperatorWallet(),
-            error = current.repositoryFailure,
         )
     }
 
@@ -172,9 +167,19 @@ class InvoiceViewModel(
     }
 
     fun completeReadinessRefresh(ready: Boolean) {
-        _createState.value = _createState.value.copy(
-            profileSelectionPending = false,
-        ).afterReadinessRefresh(ready)
+        _createState.value = _createState.value.afterReadinessRefresh(ready)
+    }
+
+    fun completeProfileSelectionReadinessRefresh(
+        sequence: Long,
+        profileId: String,
+        ready: Boolean,
+    ) {
+        _createState.value = _createState.value.afterProfileSelectionReadinessRefresh(
+            sequence = sequence,
+            profileId = profileId,
+            ready = ready,
+        )
     }
 
     fun consumeCreatedInvoice() {
@@ -239,6 +244,29 @@ internal fun CreateInvoiceState.withEditedAmount(value: String): CreateInvoiceSt
 )
 
 /**
+ * Synchronizes checkout with the authoritative catalog. A pending selection remains owned by its
+ * readiness callback only while that exact profile is still selected. Removal or an admin-side
+ * reselection supersedes the operation, so it is safe to release pending without trusting any
+ * generic or stale readiness result.
+ */
+internal fun CreateInvoiceState.afterConfigurationRefresh(
+    configuration: TerminalConfigSnapshot,
+    operatorWalletReady: Boolean,
+): CreateInvoiceState {
+    val profiles = configuration.resolvedPaymentProfiles()
+    val selected = configuration.selectedPaymentProfile()
+    val selectionChanged = selectedProfile?.id != selected?.id
+    return copy(
+        amount = if (selectionChanged) "" else amount,
+        profiles = profiles,
+        selectedProfile = selected,
+        operatorWalletReady = operatorWalletReady,
+        error = repositoryFailure,
+        profileSelectionPending = profileSelectionPending && !selectionChanged,
+    )
+}
+
+/**
  * A profile change always changes the sale's currency context, even when the two tokens happen to
  * use the same decimals. Clear the entered amount so a cashier must deliberately enter it again.
  */
@@ -272,3 +300,18 @@ internal fun CreateInvoiceState.afterReadinessRefresh(ready: Boolean): CreateInv
     } else {
         this
     }
+
+/** Only the readiness pass started for this exact selection may release checkout. */
+internal fun CreateInvoiceState.afterProfileSelectionReadinessRefresh(
+    sequence: Long,
+    profileId: String,
+    ready: Boolean,
+): CreateInvoiceState {
+    if (!profileSelectionPending ||
+        profileSelectionSequence != sequence ||
+        selectedProfile?.id != profileId
+    ) {
+        return this
+    }
+    return copy(profileSelectionPending = false).afterReadinessRefresh(ready)
+}

@@ -4,6 +4,7 @@ import OPKTerminalCore
 public enum TerminalProvisioningValidationError: Error, Equatable, Sendable {
     case unknownChain(UInt64)
     case operatorMismatch(expected: EthereumAddress, actual: EthereumAddress)
+    case confirmationPolicyBelowMinimum(chainID: UInt64, minimum: UInt64, actual: UInt64)
     case historicalDeploymentPinMismatch
     case vaultRuntimeCodeHashMismatch(expected: Bytes32, actual: Bytes32)
     case factoryPinMismatch(expected: EthereumAddress, actual: EthereumAddress)
@@ -17,6 +18,8 @@ extension TerminalProvisioningValidationError: LocalizedError {
             "Chain \(chainID) is an unverified deployment and cannot be provisioned automatically."
         case let .operatorMismatch(expected, actual):
             "This setup QR is bound to operator \(actual.hex), not this terminal's operator \(expected.hex)."
+        case let .confirmationPolicyBelowMinimum(chainID, minimum, actual):
+            "Chain \(chainID) requires at least \(minimum) confirmation blocks, but \(actual) was requested."
         case .historicalDeploymentPinMismatch:
             "The stored invoice deployment does not match this app's immutable trusted chain profile."
         case let .vaultRuntimeCodeHashMismatch(expected, actual):
@@ -90,6 +93,13 @@ public struct TerminalProvisioner:
         }
         guard let profile = TerminalKnownChainProfile.profile(for: payload.chainID) else {
             throw TerminalProvisioningValidationError.unknownChain(payload.chainID)
+        }
+        guard confirmationPolicy.requiredBlocks >= profile.minimumConfirmationBlocks else {
+            throw TerminalProvisioningValidationError.confirmationPolicyBelowMinimum(
+                chainID: profile.chainID,
+                minimum: profile.minimumConfirmationBlocks,
+                actual: confirmationPolicy.requiredBlocks
+            )
         }
 
         let operationalEndpoint: URL

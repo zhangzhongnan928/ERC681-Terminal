@@ -317,7 +317,7 @@ final class ProvisioningAppTests: XCTestCase {
         )
     }
 
-    func testProvisionedSettingsUseKnownNetworkDefaultWithoutLeakingPreviousFinality() throws {
+    func testNewPaymentRouteUsesKnownNetworkDefaultWithoutLeakingFallbackFinality() throws {
         var original = AppSettings()
         original.rpcURL = "https://example-rpc.invalid"
         original.confirmationBlocks = "7"
@@ -361,6 +361,37 @@ final class ProvisioningAppTests: XCTestCase {
         XCTAssertEqual(candidate.tokenSymbol, "USDC")
         XCTAssertEqual(candidate.tokenDecimals, "6")
         XCTAssertEqual(candidate.provisionedOperatorAddress, operatorAddress.hex)
+    }
+
+    func testReprovisioningSamePaymentRoutePreservesRaisedFinality() throws {
+        let profile = TerminalKnownChainProfile.baseSepolia
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let token = try PaymentToken(
+            address: address("0x2222222222222222222222222222222222222222"),
+            symbol: "USDC",
+            decimals: 6
+        )
+        let configuration = try TerminalConfiguration(
+            chainID: profile.chainID,
+            rpcEndpoints: [profile.rpcEndpoint],
+            protocolVersion: profile.protocolVersion,
+            deployment: OPKDeployment(
+                factory: profile.factory,
+                receiverImplementation: profile.receiverImplementation,
+                vault: address("0x3333333333333333333333333333333333333333")
+            ),
+            tokens: [token],
+            confirmationPolicy: .init(requiredBlocks: profile.defaultConfirmationBlocks),
+            create2TestVector: profile.create2TestVector
+        )
+        var raised = try AppSettings().applying(configuration, boundTo: operatorAddress)
+        raised.confirmationBlocks = "7"
+
+        let reprovisioned = try raised.applying(configuration, boundTo: operatorAddress)
+
+        XCTAssertEqual(reprovisioned.paymentProfiles.count, 1)
+        XCTAssertEqual(reprovisioned.selectedPaymentProfileID, raised.selectedPaymentProfileID)
+        XCTAssertEqual(reprovisioned.confirmationBlocks, "7")
     }
 
     func testRejectedCandidateCannotPartiallyMutateExistingSettings() throws {

@@ -58,6 +58,24 @@ internal fun shouldRestartActiveReadinessRefresh(
     refreshActive: Boolean,
 ): Boolean = refreshActive && trigger == ReadinessRefreshTrigger.INVOICE_FAILURE
 
+/** Main-thread callback ownership for one readiness generation. Cancellation is a false result. */
+internal class ReadinessRefreshCallbacks {
+    private val callbacks = mutableListOf<(Boolean) -> Unit>()
+
+    fun add(callback: (Boolean) -> Unit) {
+        callbacks += callback
+    }
+
+    fun complete(ready: Boolean) {
+        if (callbacks.isEmpty()) return
+        val pending = callbacks.toList()
+        callbacks.clear()
+        pending.forEach { callback -> callback(ready) }
+    }
+
+    fun cancel() = complete(ready = false)
+}
+
 data class SettingsState(
     val networkName: String = "",
     val isTestnet: Boolean = false,
@@ -174,7 +192,7 @@ class SettingsViewModel(
     private var provisioningGeneration = 0L
     private var walletCreationAuthorizationEpoch: Long? = null
     private var validatedConfiguration: TerminalConfigSnapshot? = null
-    private val refreshCompletionCallbacks = mutableListOf<(Boolean) -> Unit>()
+    private val refreshCompletionCallbacks = ReadinessRefreshCallbacks()
     private var migrationNoticeMessage = run {
         // snapshot() performs any v2 -> v3 migration before the notice is queried.
         chainConfig.snapshot()
@@ -763,16 +781,16 @@ class SettingsViewModel(
         refreshGeneration += 1
         validatedConfiguration = null
         _state.value = _state.value.copy(configurationValidated = false)
-        completeReadinessCallbacks(ready = false)
+        // A cancelled pass completes as not ready. Generic callbacks cannot release profile
+        // selection, while the exact sequence/profile-owned callback can terminate its pending
+        // state without making checkout ready.
+        refreshCompletionCallbacks.cancel()
         refreshJob?.cancel()
         refreshJob = null
     }
 
     private fun completeReadinessCallbacks(ready: Boolean) {
-        if (refreshCompletionCallbacks.isEmpty()) return
-        val callbacks = refreshCompletionCallbacks.toList()
-        refreshCompletionCallbacks.clear()
-        callbacks.forEach { callback -> callback(ready) }
+        refreshCompletionCallbacks.complete(ready)
     }
 
     class Factory(

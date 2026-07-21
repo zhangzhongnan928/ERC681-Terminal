@@ -344,7 +344,19 @@ fun TerminalConfigSnapshot.upsertingProfile(
     require(index >= 0 || profiles.size < ChainConfig.MAX_PAYMENT_PROFILES) {
         "This terminal already has the maximum ${ChainConfig.MAX_PAYMENT_PROFILES} payment profiles"
     }
-    if (index < 0) profiles += profile else profiles[index] = profile
+    if (index < 0) {
+        profiles += profile
+    } else {
+        // Re-scanning a portal QR refreshes chain-derived metadata for this exact route, but it
+        // must never silently weaken a confirmation preference the merchant raised previously.
+        // A different chain/vault/token identity still starts from its compiled network default.
+        profiles[index] = profile.copy(
+            confirmationBlocks = maxOf(
+                profiles[index].confirmationBlocks,
+                profile.confirmationBlocks,
+            ),
+        )
+    }
     return copy(
         provisioned = true,
         provisionedOperatorAddress = canonicalOperator,

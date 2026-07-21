@@ -13,7 +13,7 @@ import com.openpasskey.terminal.data.model.SettlementTransaction
 @Database(
     entities = [Invoice::class, SettlementTransaction::class, SettlementEvent::class],
     version = 6,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class InvoiceDatabase : RoomDatabase() {
     abstract fun invoiceDao(): InvoiceDao
@@ -176,18 +176,24 @@ abstract class InvoiceDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * The single migration registry used by both the production builder and migration tests.
+         * Keeping registration here prevents a tested migration from being omitted at app startup.
+         */
+        val ALL_MIGRATIONS = arrayOf(
+            MIGRATION_1_2,
+            MIGRATION_2_3,
+            MIGRATION_3_4,
+            MIGRATION_4_5,
+            MIGRATION_5_6,
+        )
+
         fun getInstance(context: Context): InvoiceDatabase = INSTANCE ?: synchronized(this) {
             INSTANCE ?: Room.databaseBuilder(
                 context.applicationContext,
                 InvoiceDatabase::class.java,
                 "opk_terminal_invoices.db"
-            ).addMigrations(
-                MIGRATION_1_2,
-                MIGRATION_2_3,
-                MIGRATION_3_4,
-                MIGRATION_4_5,
-                MIGRATION_5_6,
-            ).build().also { INSTANCE = it }
+            ).addMigrations(*ALL_MIGRATIONS).build().also { INSTANCE = it }
         }
     }
 }

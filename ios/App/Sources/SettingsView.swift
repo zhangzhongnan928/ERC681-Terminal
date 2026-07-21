@@ -21,13 +21,17 @@ struct SettingsView: View {
     @State private var manualChainID = TerminalKnownChainProfile.baseSepolia.chainID
     @State private var isPresentingProvisioningScanner = false
     @State private var isConfirmingWalletReset = false
+    @State private var isConfirmingUnreadableSettingsReset = false
     @State private var profilePendingRemoval: AppPaymentProfile?
     @FocusState private var focusedField: SettingsFocusField?
 
     var body: some View {
         NavigationStack {
             Form {
-                if model.canAccessAdmin {
+                if model.settingsRecoveryRequired {
+                    unreadableSettingsRecoverySection
+                    if !model.canAccessAdmin { lockedContent }
+                } else if model.canAccessAdmin {
                     adminContent
                 } else {
                     lockedContent
@@ -43,6 +47,18 @@ struct SettingsView: View {
             ProvisioningScannerSheet { payload in
                 Task { await model.provision(payload) }
             }
+        }
+        .confirmationDialog(
+            "Reset unreadable terminal setup?",
+            isPresented: $isConfirmingUnreadableSettingsReset,
+            titleVisibility: .visible
+        ) {
+            Button("Quarantine and reset setup", role: .destructive) {
+                model.resetUnreadableSettingsForRecovery()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The unreadable payment-profile configuration will be retained in local quarantine, then terminal setup will return to the unprovisioned state. The device operator wallet and all invoice and settlement history remain unchanged.")
         }
         .confirmationDialog(
             "Permanently reset operator wallet?",
@@ -82,6 +98,31 @@ struct SettingsView: View {
             }
         }
         .onDisappear { focusedField = nil }
+    }
+
+    @ViewBuilder
+    private var unreadableSettingsRecoverySection: some View {
+        Section("Setup recovery required") {
+            Label("Saved setup could not be verified", systemImage: "exclamationmark.shield.fill")
+                .foregroundStyle(.orange)
+            if let message = model.settingsRecoveryMessage {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            if model.adminPINConfigurationUnavailableMessage != nil {
+                Text("Restore Keychain access and restart the app before resetting this setup.")
+                    .font(.footnote.weight(.semibold))
+            } else if model.canAccessAdmin {
+                Button("Reset unreadable setup…", role: .destructive) {
+                    isConfirmingUnreadableSettingsReset = true
+                }
+                .disabled(model.operationBusy || model.isProvisioning)
+            } else {
+                Text("Unlock Admin below to start recovery.")
+                    .font(.footnote.weight(.semibold))
+            }
+        }
     }
 
     @ViewBuilder
@@ -471,21 +512,37 @@ struct SettingsView: View {
             }
         }
 
-        Section("Admin locked") {
-            Text("Setup, reprovisioning, network/vault changes, and wallet reset are hidden until the local admin PIN is verified.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            SecureField("Six-digit admin PIN", text: digitsBinding($unlockPIN))
-                .keyboardType(.numberPad)
-                .focused($focusedField, equals: .unlockPIN)
-                .accessibilityIdentifier("unlockAdminPIN")
-            Button("Unlock Admin") {
-                focusedField = nil
-                model.unlockAdmin(with: unlockPIN)
-                if model.adminUnlocked { unlockPIN = "" }
+        if let unavailable = model.adminPINConfigurationUnavailableMessage {
+            Section("Admin protection unavailable") {
+                Label(
+                    "Admin PIN verifier could not be accessed",
+                    systemImage: "lock.trianglebadge.exclamationmark"
+                )
+                .foregroundStyle(.orange)
+                Text(unavailable)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text("Restore Keychain access and restart the app before making setup changes.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
-            .disabled(unlockPIN.count != 6)
-            .accessibilityIdentifier("unlockAdminButton")
+        } else {
+            Section("Admin locked") {
+                Text("Setup, reprovisioning, network/vault changes, and wallet reset are hidden until the local admin PIN is verified.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                SecureField("Six-digit admin PIN", text: digitsBinding($unlockPIN))
+                    .keyboardType(.numberPad)
+                    .focused($focusedField, equals: .unlockPIN)
+                    .accessibilityIdentifier("unlockAdminPIN")
+                Button("Unlock Admin") {
+                    focusedField = nil
+                    model.unlockAdmin(with: unlockPIN)
+                    if model.adminUnlocked { unlockPIN = "" }
+                }
+                .disabled(unlockPIN.count != 6)
+                .accessibilityIdentifier("unlockAdminButton")
+            }
         }
     }
 

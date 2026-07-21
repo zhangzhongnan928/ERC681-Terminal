@@ -70,6 +70,45 @@ class ChainConfigPolicyTest {
     }
 
     @Test
+    fun sameRouteReprovisionRetainsRaisedFinalityWhileNewRouteUsesItsDefault() {
+        val original = config()
+        val operator = requireNotNull(original.provisionedOperatorAddress)
+        val originalProfile = requireNotNull(original.selectedPaymentProfile())
+        val raised = original.upsertingProfile(
+            originalProfile.copy(confirmationBlocks = 7),
+            operator,
+        )
+
+        val refreshed = raised.upsertingProfile(
+            originalProfile.copy(
+                confirmationBlocks = 2,
+                token = originalProfile.token.copy(symbol = "AUDM"),
+            ),
+            operator,
+        )
+        val differentRoute = originalProfile.copy(
+            vaultAddress = "0x2222222222222222222222222222222222222222",
+            token = PaymentToken(
+                "0x3333333333333333333333333333333333333333",
+                "USDC",
+                6,
+            ),
+            confirmationBlocks = 2,
+        )
+        val withNewRoute = refreshed.upsertingProfile(differentRoute, operator)
+
+        assertEquals(7, refreshed.selectedPaymentProfile()?.confirmationBlocks)
+        assertEquals("AUDM", refreshed.selectedPaymentProfile()?.token?.symbol)
+        assertEquals(2, withNewRoute.selectedPaymentProfile()?.confirmationBlocks)
+        assertEquals(
+            7,
+            withNewRoute.resolvedPaymentProfiles()
+                .single { it.id == originalProfile.id }
+                .confirmationBlocks,
+        )
+    }
+
+    @Test
     fun provisioningCannotMixProfilesBoundToDifferentDeviceOperators() {
         val original = config()
         val second = requireNotNull(original.selectedPaymentProfile()).copy(

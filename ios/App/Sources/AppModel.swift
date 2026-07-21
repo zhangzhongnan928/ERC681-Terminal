@@ -23,11 +23,22 @@ protocol OperatorWalletLifecycleManaging: Sendable {
 
 extension KeychainOperatorWallet: OperatorWalletLifecycleManaging {}
 
+enum AdminPINConfigurationState: Equatable {
+    case configured
+    case notConfigured
+    case unavailable(String)
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var settings: AppSettings {
         didSet {
-            AppPreferences.saveSettings(settings)
+            // A corrupt persisted catalog is kept byte-for-byte until the device admin explicitly
+            // quarantines it. Incidental readiness or UI mutations must never overwrite the only
+            // recovery evidence with an empty default configuration.
+            if !settingsRecoveryRequired {
+                AppPreferences.saveSettings(settings)
+            }
             guard !settings.hasSamePaymentConfiguration(as: oldValue) else { return }
             validatedConfigurationFingerprint = nil
             validationMessage = "On-chain validation required"
@@ -48,9 +59,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var validatedConfigurationFingerprint: String?
     @Published private(set) var provisioningMessage: String?
     @Published private(set) var isProvisioning = false
-    @Published private(set) var adminPINConfigured: Bool
+    @Published private(set) var adminPINConfigurationState: AdminPINConfigurationState
     @Published private(set) var adminUnlocked: Bool
     @Published private(set) var preparedSettlement: PreparedSettlement?
+    @Published private(set) var settingsRecoveryRequired = false
     @Published var errorMessage: String?
 
     private let container: ModelContainer
@@ -113,11 +125,23 @@ final class AppModel: ObservableObject {
         self.currentConfigurationValidation = currentConfigurationValidation
         self.operatorStatusReader = operatorStatusReader
         self.operatorResetBalanceReader = operatorResetBalanceReader
-        settings = AppPreferences.loadSettings()
-        let configured = (try? adminPINStore.isConfigured) ?? false
-        adminPINConfigured = configured
-        adminUnlocked = !configured
+        let settingsLoadResult = AppPreferences.loadSettingsResult()
+        settings = settingsLoadResult.settings
+        settingsRecoveryRequired = settingsLoadResult.recoveryRequired
+        let pinConfigurationState: AdminPINConfigurationState
+        do {
+            pinConfigurationState = try adminPINStore.isConfigured
+                ? .configured
+                : .notConfigured
+        } catch {
+            pinConfigurationState = .unavailable(error.localizedDescription)
+        }
+        adminPINConfigurationState = pinConfigurationState
+        adminUnlocked = pinConfigurationState == .notConfigured
         operatorAddress = try? self.operatorWalletLifecycle.existingAddress()
+        if settingsRecoveryRequired {
+            errorMessage = settingsRecoveryMessage
+        }
     }
 
     var terminalReadiness: TerminalReadiness {
@@ -129,13 +153,48 @@ final class AppModel: ObservableObject {
         )
     }
 
-    var canAccessAdmin: Bool { !adminPINConfigured || adminUnlocked }
+    var adminPINConfigured: Bool {
+        adminPINConfigurationState == .configured
+    }
+
+    var adminPINConfigurationUnavailableMessage: String? {
+        guard case let .unavailable(message) = adminPINConfigurationState else { return nil }
+        return message
+    }
+
+    var canAccessAdmin: Bool {
+        switch adminPINConfigurationState {
+        case .notConfigured:
+            true
+        case .configured:
+            adminUnlocked
+        case .unavailable:
+            false
+        }
+    }
+
+    var settingsRecoveryMessage: String? {
+        guard settingsRecoveryRequired else { return nil }
+        if let unavailable = adminPINConfigurationUnavailableMessage {
+            return "The saved terminal setup could not be verified and was not overwritten. "
+                + "The local admin PIN verifier is unavailable: \(unavailable) "
+                + "Restore Keychain access before recovery. The unreadable setup remains active; "
+                + "the operator wallet and invoice history are unchanged."
+        }
+        return "The saved terminal setup could not be verified and was not overwritten. "
+            + "Unlock Admin, quarantine the unreadable setup, then provision the terminal again. "
+            + "The operator wallet and invoice history are unchanged."
+    }
 
     var pendingSettingsMigrationMessage: String? {
         settings.migrationNotice.map(Self.migrationNoticeMessage)
     }
 
     func acknowledgeSettingsMigrationNotice() {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
         guard settings.migrationNotice != nil else { return }
         var updated = settings
         updated.acknowledgeMigrationNotice()
@@ -168,6 +227,10 @@ final class AppModel: ObservableObject {
     }
 
     func selectPaymentProfile(id: String) async {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
         guard id != settings.selectedPaymentProfileID else { return }
         guard !operationBusy, !isProvisioning, !isRefreshingReadiness else {
             errorMessage = AppSettlementError.operationInProgress.localizedDescription
@@ -184,6 +247,10 @@ final class AppModel: ObservableObject {
     }
 
     func removePaymentProfile(id: String) async {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
         guard adminPINConfigured, adminUnlocked else {
             errorMessage = "Unlock Admin before removing a payment profile."
             return
@@ -220,7 +287,7 @@ final class AppModel: ObservableObject {
         do {
             guard pin == confirmation else { throw AdminPINError.invalidFormat }
             try adminPINStore.setPIN(pin)
-            adminPINConfigured = true
+            adminPINConfigurationState = .configured
             adminUnlocked = true
             adminSessionGate.unlock()
             errorMessage = nil
@@ -232,7 +299,7 @@ final class AppModel: ObservableObject {
     func unlockAdmin(with pin: String) {
         do {
             try adminPINStore.verify(pin)
-            adminPINConfigured = true
+            adminPINConfigurationState = .configured
             adminUnlocked = true
             adminSessionGate.unlock()
             errorMessage = nil
@@ -249,7 +316,48 @@ final class AppModel: ObservableObject {
         adminUnlocked = false
     }
 
+    /// Explicit admin recovery for a catalog that failed current trust-pin or structural checks.
+    /// The unreadable bytes are retained in a quarantine slot before a clean, unprovisioned
+    /// catalog is persisted. The operator key and all durable invoice/settlement rows are separate.
+    func resetUnreadableSettingsForRecovery() {
+        guard settingsRecoveryRequired else { return }
+        guard adminPINConfigurationUnavailableMessage == nil else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
+        guard canAccessAdmin else {
+            errorMessage = "Unlock Admin before resetting unreadable terminal setup."
+            return
+        }
+        if adminPINConfigured, adminSessionGate.capture() == nil {
+            errorMessage = AppSafetyError.adminSessionExpired.localizedDescription
+            return
+        }
+        guard !operationBusy, !isProvisioning, !isRefreshingReadiness else {
+            errorMessage = AppSettlementError.operationInProgress.localizedDescription
+            return
+        }
+        guard AppPreferences.quarantineUnreadableSettings() else {
+            errorMessage = "The unreadable setup could not be quarantined. Nothing was changed."
+            return
+        }
+
+        settingsRecoveryRequired = false
+        settings = AppSettings()
+        validatedConfigurationFingerprint = nil
+        validationMessage = "On-chain validation required"
+        provisioningMessage = "Unreadable setup quarantined. Scan the merchant portal setup QR again."
+        operatorStatus = nil
+        operatorStatusMessage = nil
+        errorMessage = nil
+        if adminPINConfigured { lockAdmin() }
+    }
+
     func provision(_ payload: TerminalProvisioningPayload) async {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
         guard canAccessAdmin else {
             errorMessage = "Unlock Admin before changing terminal provisioning."
             return
@@ -559,6 +667,10 @@ final class AppModel: ObservableObject {
     }
 
     func resetOperatorWallet() async {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
         guard adminPINConfigured, adminUnlocked else {
             errorMessage = "Unlock Admin before resetting the operator wallet."
             return

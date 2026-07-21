@@ -8,6 +8,7 @@ import com.openpasskey.terminal.chain.PaymentToken
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.chain.resolvedPaymentProfiles
+import com.openpasskey.terminal.chain.selectedPaymentProfile
 import com.openpasskey.terminal.chain.upsertingProfile
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
@@ -157,7 +158,11 @@ class TerminalProvisioner(
                 "Terminal configuration changed during provisioning; scan the portal QR again"
             }
         }
-        return ProvisioningResult(candidate, token, paymentProfile)
+        return ProvisioningResult(
+            candidate,
+            token,
+            requireNotNull(candidate.selectedPaymentProfile()),
+        )
     }
 
     private fun validateTrustedProvenance(

@@ -4,6 +4,7 @@ import com.openpasskey.terminal.chain.PaymentToken
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -31,6 +32,124 @@ class InvoiceProfileSelectionStateTest {
         assertEquals(5, after.profileSelectionSequence)
         assertNull(after.error)
         assertNull(after.repositoryFailure)
+    }
+
+    @Test
+    fun genericAndStaleReadinessCallbacksCannotReleasePendingProfileSelection() {
+        val audm = profile("AUDM", "0x1111111111111111111111111111111111111111")
+        val usdc = profile("USDC", "0x2222222222222222222222222222222222222222")
+        val pending = CreateInvoiceState(
+            profiles = listOf(audm, usdc),
+            selectedProfile = usdc,
+            profileSelectionSequence = 5,
+            profileSelectionPending = true,
+        )
+
+        assertTrue(pending.afterReadinessRefresh(ready = true).profileSelectionPending)
+        assertEquals(
+            pending,
+            pending.afterProfileSelectionReadinessRefresh(
+                sequence = 4,
+                profileId = usdc.id,
+                ready = true,
+            ),
+        )
+        assertEquals(
+            pending,
+            pending.afterProfileSelectionReadinessRefresh(
+                sequence = 5,
+                profileId = audm.id,
+                ready = true,
+            ),
+        )
+    }
+
+    @Test
+    fun matchingSelectionReadinessCallbackReleasesPendingStateEvenWhenRouteIsNotReady() {
+        val selected = profile("USDC", "0x2222222222222222222222222222222222222222")
+        val pending = CreateInvoiceState(
+            profiles = listOf(selected),
+            selectedProfile = selected,
+            profileSelectionSequence = 8,
+            profileSelectionPending = true,
+        )
+
+        val completed = pending.afterProfileSelectionReadinessRefresh(
+            sequence = 8,
+            profileId = selected.id,
+            ready = false,
+        )
+
+        assertFalse(completed.profileSelectionPending)
+        assertEquals(8, completed.profileSelectionSequence)
+        assertEquals(selected.id, completed.selectedProfile?.id)
+    }
+
+    @Test
+    fun authoritativeProfileRemovalReleasesPendingWithoutAcceptingItsStaleCallback() {
+        val audm = profile("AUDM", "0x1111111111111111111111111111111111111111")
+        val usdc = profile("USDC", "0x2222222222222222222222222222222222222222")
+        val pending = CreateInvoiceState(
+            amount = "19.95",
+            profiles = listOf(audm, usdc),
+            selectedProfile = usdc,
+            profileSelectionSequence = 11,
+            profileSelectionPending = true,
+        )
+
+        val afterRemoval = pending.afterConfigurationRefresh(
+            configuration = snapshot(audm, listOf(audm)),
+            operatorWalletReady = true,
+        )
+
+        assertFalse(afterRemoval.profileSelectionPending)
+        assertEquals(audm.id, afterRemoval.selectedProfile?.id)
+        assertEquals("", afterRemoval.amount)
+        assertEquals(
+            afterRemoval,
+            afterRemoval.afterProfileSelectionReadinessRefresh(
+                sequence = 11,
+                profileId = usdc.id,
+                ready = true,
+            ),
+        )
+    }
+
+    @Test
+    fun sameSelectedConfigurationInvalidationTerminatesOwnedCallbackWithoutLaterRpc() {
+        val selected = profile("USDC", "0x2222222222222222222222222222222222222222")
+        val pending = CreateInvoiceState(
+            profiles = listOf(selected),
+            selectedProfile = selected,
+            profileSelectionSequence = 12,
+            profileSelectionPending = true,
+        )
+
+        var refreshed = pending.afterConfigurationRefresh(
+            configuration = snapshot(selected, listOf(selected)),
+            operatorWalletReady = true,
+        )
+        val callbacks = ReadinessRefreshCallbacks()
+        callbacks.add { ready -> refreshed = refreshed.afterReadinessRefresh(ready) }
+        callbacks.add { ready ->
+            refreshed = refreshed.afterProfileSelectionReadinessRefresh(
+                sequence = 12,
+                profileId = selected.id,
+                ready = ready,
+            )
+        }
+
+        assertTrue(refreshed.profileSelectionPending)
+        callbacks.cancel()
+        assertFalse(refreshed.profileSelectionPending)
+
+        val cancelled = refreshed
+        callbacks.complete(ready = true)
+        assertEquals(
+            "Cancelled generation cannot complete again later",
+            cancelled,
+            refreshed,
+        )
     }
 
     private fun profile(symbol: String, tokenAddress: String) = TerminalPaymentProfile(
