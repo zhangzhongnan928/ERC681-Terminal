@@ -50,6 +50,10 @@ final class AppModel: ObservableObject {
             validatedConfigurationFingerprint = nil
             configurationValidationProof = nil
             preparedSettlementValidationProof = nil
+            // Cancel but do not clear the in-flight prewarm reference: the task removes itself
+            // on exit, so a single writer owns that slot and no replacement task can race it.
+            salePrewarmTask?.cancel()
+            prewarmedSaleProof = nil
             validationMessage = "On-chain validation required"
             settlementCoordinator = nil
             settlementCoordinatorKey = nil
@@ -104,6 +108,15 @@ final class AppModel: ObservableObject {
     private let backgroundRPCUnitDeadline: Duration
     private let paymentObservationSampler: PaymentObservationSampling
     private let paymentMonitorPollIntervalNanoseconds: UInt64
+    private let paymentMonitorAcceleratedPollIntervalNanoseconds: UInt64
+    private let receiverFreshnessProver: @Sendable (
+        TerminalConfiguration,
+        EthereumAddress,
+        EthereumAddress
+    ) async throws -> ReceiverFreshnessProof
+    private let salePrewarmProofTTL: TimeInterval
+    private var salePrewarmTask: Task<Void, Never>?
+    private var prewarmedSaleProof: PrewarmedSaleProof?
     private let validationNow: @Sendable () -> Date
     private let configurationValidationTTL: TimeInterval
     private let preparedSettlementValidationTTL: TimeInterval
@@ -141,11 +154,20 @@ final class AppModel: ObservableObject {
         backgroundRPCUnitDeadline: Duration = .seconds(5),
         paymentObservationSampler: PaymentObservationSampling? = nil,
         paymentMonitorPollIntervalNanoseconds: UInt64 =
-            PaymentMonitor.defaultPollIntervalNanoseconds
+            PaymentMonitor.defaultPollIntervalNanoseconds,
+        paymentMonitorAcceleratedPollIntervalNanoseconds: UInt64 =
+            PaymentMonitor.acceleratedPollIntervalNanoseconds,
+        receiverFreshnessProver: (@Sendable (
+            TerminalConfiguration,
+            EthereumAddress,
+            EthereumAddress
+        ) async throws -> ReceiverFreshnessProof)? = nil,
+        salePrewarmProofTTL: TimeInterval = 60
     ) {
         precondition(interactiveBackgroundDrainTimeout > .zero)
         precondition(backgroundRPCUnitDeadline > .zero)
         precondition(paymentMonitorPollIntervalNanoseconds > 0)
+        precondition(paymentMonitorAcceleratedPollIntervalNanoseconds > 0)
         self.container = container
         self.operatorWallet = operatorWallet
         self.operatorWalletLifecycle = operatorWalletLifecycle ?? operatorWallet
@@ -175,10 +197,25 @@ final class AppModel: ObservableObject {
                     request,
                     previousThresholdCursor: paymentCursor,
                     additionalCursors: sweepableCursors,
-                    expectedChainID: configuration.chainID
+                    expectedChainID: configuration.chainID,
+                    includePendingBalanceHint: true
                 )
             }
         self.paymentMonitorPollIntervalNanoseconds = paymentMonitorPollIntervalNanoseconds
+        self.paymentMonitorAcceleratedPollIntervalNanoseconds =
+            paymentMonitorAcceleratedPollIntervalNanoseconds
+        self.receiverFreshnessProver = receiverFreshnessProver
+            ?? { configuration, receiver, token in
+                let rpc = try EthereumRPCClientPool.shared.client(
+                    for: configuration.rpcEndpoints[0]
+                )
+                return try await ReceiverFreshnessValidator(rpc: rpc).validate(
+                    receiver: receiver,
+                    token: token,
+                    expectedChainID: configuration.chainID
+                )
+            }
+        self.salePrewarmProofTTL = max(0, salePrewarmProofTTL)
         let settingsLoadResult = AppPreferences.loadSettingsResult()
         settings = settingsLoadResult.settings
         settingsRecoveryRequired = settingsLoadResult.recoveryRequired
@@ -598,49 +635,75 @@ final class AppModel: ObservableObject {
             let paymentProfile = try TerminalPaymentProfile(configuration: configuration)
             let token = paymentProfile.token
             let amount = try TokenAmount(display: displayAmount, decimals: token.decimals)
-            let request = try InvoiceFactory.create(
-                terminalIdentifier: TerminalIdentifier(address: operatorAddress),
-                amount: amount,
-                profile: paymentProfile,
-                expiresAt: Date().addingTimeInterval(15 * 60)
-            )
-            let rpc = try EthereumRPCClientPool.shared.client(
-                for: configuration.rpcEndpoints[0]
-            )
-            // These proofs are independent read-only operations. Launch them together so the
-            // slowest fixed-head proof, rather than their sum, controls checkout latency. Every
-            // result remains mandatory and the settings/operator snapshot is checked before any
-            // invoice is persisted or shown.
-            async let configurationProof: Void = validate(
-                configuration,
+            let request: PaymentRequest
+            let liveStatus: OperatorChainStatus
+            let freshness: ReceiverFreshnessProof
+            let prewarmed = await takeValidPrewarmedSaleProof(
                 fingerprint: settingsSnapshot.validationFingerprint,
-                allowCachedBackgroundProof: false
-            )
-            async let statusProof = fetchOperatorStatus(
-                configuration: configuration,
                 operatorAddress: operatorAddress
             )
-            async let freshnessProof = ReceiverFreshnessValidator(rpc: rpc).validate(
-                receiver: request.receiver,
-                token: token.address,
-                expectedChainID: configuration.chainID
-            )
-            let concurrentProofs: (Void, OperatorChainStatus, ReceiverFreshnessProof)
-            do {
-                concurrentProofs = try await (
-                    configurationProof,
-                    statusProof,
-                    freshnessProof
+            if let prewarmed,
+               let prewarmedRequest = try? InvoiceFactory.create(
+                   terminalIdentifier: TerminalIdentifier(address: operatorAddress),
+                   amount: amount,
+                   profile: paymentProfile,
+                   createdAt: prewarmed.createdAt,
+                   expiresAt: Date().addingTimeInterval(15 * 60),
+                   nonce: prewarmed.nonce
+               ),
+               // Amount does not participate in invoice or receiver derivation, so replaying
+               // the prewarmed nonce and creation time must reproduce both identifiers exactly.
+               // If derivation ever became amount-dependent, this guard forces the fresh proof
+               // path instead of publishing a QR whose proofs cover a different address.
+               prewarmedRequest.invoiceID == prewarmed.invoiceID,
+               prewarmedRequest.receiver == prewarmed.receiver {
+                request = prewarmedRequest
+                liveStatus = prewarmed.operatorStatus
+                freshness = prewarmed.freshnessProof
+            } else {
+                let freshRequest = try InvoiceFactory.create(
+                    terminalIdentifier: TerminalIdentifier(address: operatorAddress),
+                    amount: amount,
+                    profile: paymentProfile,
+                    expiresAt: Date().addingTimeInterval(15 * 60)
                 )
-            } catch {
-                // A concurrently failing endpoint must not hide a settings/operator mutation
-                // that invalidated the entire locally derived request while proofs were running.
-                guard settings == settingsSnapshot,
-                      self.operatorAddress == operatorAddress
-                else { throw AppSafetyError.configurationChanged }
-                throw error
+                // These proofs are independent read-only operations. Launch them together so the
+                // slowest fixed-head proof, rather than their sum, controls checkout latency. Every
+                // result remains mandatory and the settings/operator snapshot is checked before any
+                // invoice is persisted or shown.
+                async let configurationProof: Void = validate(
+                    configuration,
+                    fingerprint: settingsSnapshot.validationFingerprint,
+                    allowCachedBackgroundProof: false
+                )
+                async let statusProof = fetchOperatorStatus(
+                    configuration: configuration,
+                    operatorAddress: operatorAddress
+                )
+                async let freshnessProof = receiverFreshnessProver(
+                    configuration,
+                    freshRequest.receiver,
+                    token.address
+                )
+                let concurrentProofs: (Void, OperatorChainStatus, ReceiverFreshnessProof)
+                do {
+                    concurrentProofs = try await (
+                        configurationProof,
+                        statusProof,
+                        freshnessProof
+                    )
+                } catch {
+                    // A concurrently failing endpoint must not hide a settings/operator mutation
+                    // that invalidated the entire locally derived request while proofs were running.
+                    guard settings == settingsSnapshot,
+                          self.operatorAddress == operatorAddress
+                    else { throw AppSafetyError.configurationChanged }
+                    throw error
+                }
+                request = freshRequest
+                liveStatus = concurrentProofs.1
+                freshness = concurrentProofs.2
             }
-            let (_, liveStatus, freshness) = concurrentProofs
             guard settings == settingsSnapshot,
                   self.operatorAddress == operatorAddress
             else { throw AppSafetyError.configurationChanged }
@@ -675,6 +738,144 @@ final class AppModel: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Opportunistically runs the three sale proofs while the cashier is still typing the
+    /// amount. Amount does not participate in invoice-ID or receiver derivation (protocol §3.1),
+    /// so the invoice identity can be fixed and proven before the amount is known. The proof is
+    /// single-use, expires after `salePrewarmProofTTL`, is bound to the exact configuration
+    /// fingerprint and operator, and silently yields to interactive work: a failed or skipped
+    /// prewarm only means `createSale` runs its normal fresh proof path.
+    func prewarmSaleProofsIfNeeded() {
+        guard activeRequest == nil,
+              !operationBusy,
+              !isProvisioning,
+              settings.isProvisioned,
+              let operatorAddress,
+              settings.provisionedOperatorAddress?.lowercased()
+                  == operatorAddress.hex.lowercased(),
+              let configuration = try? settings.configuration()
+        else { return }
+        guard salePrewarmTask == nil else { return }
+        if let proof = prewarmedSaleProof,
+           proof.isReusable(
+               fingerprint: settings.validationFingerprint,
+               operatorAddress: operatorAddress,
+               at: validationNow(),
+               maximumAge: salePrewarmProofTTL
+           ) {
+            return
+        }
+        prewarmedSaleProof = nil
+        // Prewarming is cooperative background work: it never starts over an interactive
+        // operation and counts against the shared background budget, so an abandoned amount
+        // entry cannot stack uncontrolled load onto the free endpoint.
+        guard let token = backgroundRPCWorkGate.acquire(
+            interactiveOperationBusy: operationBusy
+        ) else { return }
+        let fingerprint = settings.validationFingerprint
+        salePrewarmTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.backgroundRPCWorkGate.release(token)
+                self.salePrewarmTask = nil
+            }
+            await self.runSalePrewarm(
+                configuration: configuration,
+                fingerprint: fingerprint,
+                operatorAddress: operatorAddress
+            )
+        }
+    }
+
+    /// Internal lifecycle seam used by deterministic app tests: awaits any in-flight prewarm.
+    /// Capturing the task first ensures a later replacement cannot change what is awaited.
+    func waitForSalePrewarmToFinish() async {
+        let task = salePrewarmTask
+        await task?.value
+    }
+
+    private func runSalePrewarm(
+        configuration: TerminalConfiguration,
+        fingerprint: String,
+        operatorAddress: EthereumAddress
+    ) async {
+        do {
+            let paymentProfile = try TerminalPaymentProfile(configuration: configuration)
+            let createdAt = Date()
+            let nonce = Bytes32.random()
+            let timestamp = UInt64(max(0, createdAt.timeIntervalSince1970.rounded(.down)))
+            let invoiceID = InvoiceFactory.invoiceID(
+                terminal: operatorAddress,
+                timestamp: timestamp,
+                nonce: UInt256(bigEndian: nonce.data)
+            )
+            let receiver = try ReceiverDerivation.receiver(
+                factory: configuration.deployment.factory,
+                receiverImplementation: configuration.deployment.receiverImplementation,
+                vault: configuration.deployment.vault,
+                invoiceID: invoiceID
+            )
+            let deadline = backgroundRPCUnitDeadline
+            let proofs: (OperatorChainStatus, ReceiverFreshnessProof) =
+                try await RPCRequestDeadline.withDeadline(after: deadline) {
+                    async let configurationProof: Void = self.validate(
+                        configuration,
+                        fingerprint: fingerprint,
+                        allowCachedBackgroundProof: false
+                    )
+                    async let statusProof = self.fetchOperatorStatus(
+                        configuration: configuration,
+                        operatorAddress: operatorAddress
+                    )
+                    async let freshnessProof = self.receiverFreshnessProver(
+                        configuration,
+                        receiver,
+                        paymentProfile.token.address
+                    )
+                    let resolved = try await (configurationProof, statusProof, freshnessProof)
+                    return (resolved.1, resolved.2)
+                }
+            guard settings.validationFingerprint == fingerprint,
+                  self.operatorAddress == operatorAddress
+            else { return }
+            prewarmedSaleProof = PrewarmedSaleProof(
+                fingerprint: fingerprint,
+                operatorAddress: operatorAddress,
+                createdAt: createdAt,
+                nonce: nonce,
+                invoiceID: invoiceID,
+                receiver: receiver,
+                operatorStatus: proofs.0,
+                freshnessProof: proofs.1,
+                completedAt: validationNow()
+            )
+        } catch {
+            // Prewarming is opportunistic: every failure silently falls back to the fresh
+            // interactive proof path in createSale. No alert may interrupt amount entry.
+            prewarmedSaleProof = nil
+        }
+    }
+
+    private func takeValidPrewarmedSaleProof(
+        fingerprint: String,
+        operatorAddress: EthereumAddress
+    ) async -> PrewarmedSaleProof? {
+        if let task = salePrewarmTask {
+            await task.value
+        }
+        guard let proof = prewarmedSaleProof,
+              proof.isReusable(
+                  fingerprint: fingerprint,
+                  operatorAddress: operatorAddress,
+                  at: validationNow(),
+                  maximumAge: salePrewarmProofTTL
+              )
+        else { return nil }
+        // Single-use: a consumed proof can never authorize a second invoice, and a failed sale
+        // falls back to the fresh interactive proof path on the next attempt.
+        prewarmedSaleProof = nil
+        return proof
     }
 
     func closeActiveSale() {
@@ -2094,8 +2295,16 @@ final class AppModel: ObservableObject {
                     default:
                         break
                     }
+                    // Track the Base block cadence only while funds are visibly in flight, so
+                    // the wait between a customer's send and the paid state shrinks without an
+                    // idle QR ever consuming the accelerated budget.
                     try await Task.sleep(
-                        nanoseconds: self.paymentMonitorPollIntervalNanoseconds
+                        nanoseconds: PaymentMonitor.pollInterval(
+                            after: observation,
+                            defaultInterval: self.paymentMonitorPollIntervalNanoseconds,
+                            acceleratedInterval:
+                                self.paymentMonitorAcceleratedPollIntervalNanoseconds
+                        )
                     )
                 }
             } catch is CancellationError {
@@ -2161,6 +2370,34 @@ final class AppModel: ObservableObject {
             payment: invoice.paymentThresholdCursor,
             sweepable: invoice.sweepableConfirmationCursor
         )
+    }
+}
+
+/// A complete, unconsumed set of sale proofs produced while the cashier was typing. The bound
+/// invoice identity (creation time plus nonce, and therefore invoice ID and receiver) is fixed
+/// at prewarm time; the amount is bound later by `createSale`, which must reproduce the same
+/// identifiers from these inputs before the proof may be consumed.
+struct PrewarmedSaleProof: Sendable {
+    let fingerprint: String
+    let operatorAddress: EthereumAddress
+    let createdAt: Date
+    let nonce: Bytes32
+    let invoiceID: Bytes32
+    let receiver: EthereumAddress
+    let operatorStatus: OperatorChainStatus
+    let freshnessProof: ReceiverFreshnessProof
+    let completedAt: Date
+
+    func isReusable(
+        fingerprint: String,
+        operatorAddress: EthereumAddress,
+        at now: Date,
+        maximumAge: TimeInterval
+    ) -> Bool {
+        guard maximumAge > 0, now >= completedAt else { return false }
+        return self.fingerprint == fingerprint
+            && self.operatorAddress == operatorAddress
+            && now.timeIntervalSince(completedAt) <= maximumAge
     }
 }
 

@@ -109,6 +109,18 @@ public struct ReceiverFreshnessProof: Hashable, Sendable {
     public let blockHash: Bytes32
     public let receiverCode: Data
     public let tokenBalance: UInt256
+
+    public init(
+        blockNumber: UInt64,
+        blockHash: Bytes32,
+        receiverCode: Data,
+        tokenBalance: UInt256
+    ) {
+        self.blockNumber = blockNumber
+        self.blockHash = blockHash
+        self.receiverCode = receiverCode
+        self.tokenBalance = tokenBalance
+    }
 }
 
 /// Proves a newly derived receiver is unused at one fixed canonical block. This is intentionally
@@ -205,6 +217,9 @@ public struct ReceiverFreshnessValidator: Sendable {
 
 public struct PaymentMonitor: Sendable {
     public static let defaultPollIntervalNanoseconds: UInt64 = 5_000_000_000
+    /// Cadence used only while funds are visibly in flight. Two seconds tracks the Base block
+    /// interval so an in-progress confirmation window is observed roughly once per new block.
+    public static let acceleratedPollIntervalNanoseconds: UInt64 = 2_000_000_000
 
     private let rpc: any EthereumReadRPC
     public let confirmationPolicy: ConfirmationPolicy
@@ -220,11 +235,35 @@ public struct PaymentMonitor: Sendable {
         self.pollIntervalNanoseconds = pollIntervalNanoseconds
     }
 
+    /// Poll-cadence policy: accelerate only while funds are visibly in flight (a nonzero
+    /// advisory pending hint, a partial balance, or an unfinished confirmation window). An idle
+    /// QR keeps the slower default cadence so waiting invoices cannot consume the shared
+    /// endpoint budget, and the accelerated cadence never exceeds the configured default.
+    public static func pollInterval(
+        after observation: PaymentObservation,
+        defaultInterval: UInt64,
+        acceleratedInterval: UInt64
+    ) -> UInt64 {
+        let accelerated = min(defaultInterval, acceleratedInterval)
+        switch observation.status {
+        case .partial, .confirming:
+            return accelerated
+        case .waiting:
+            if let hint = observation.pendingBalanceHint, !hint.isZero {
+                return accelerated
+            }
+            return defaultInterval
+        case .paid, .overpaid, .expired:
+            return defaultInterval
+        }
+    }
+
     public func sample(
         _ request: PaymentRequest,
         previousThresholdCursor: PaymentConfirmationCursor? = nil,
         additionalCursors: [PaymentConfirmationCursor] = [],
         expectedChainID: UInt64? = nil,
+        includePendingBalanceHint: Bool = false,
         now: Date = Date()
     ) async throws -> PaymentObservation {
         let observations = try await sampleBatch(
@@ -234,6 +273,7 @@ public struct PaymentMonitor: Sendable {
                 additionalCursors: additionalCursors
             )],
             expectedChainID: expectedChainID,
+            includePendingBalanceHints: includePendingBalanceHint,
             now: now
         )
         guard let observation = observations.first else {
@@ -250,6 +290,7 @@ public struct PaymentMonitor: Sendable {
     public func sampleBatch(
         _ inputs: [PaymentSampleInput],
         expectedChainID: UInt64? = nil,
+        includePendingBalanceHints: Bool = false,
         now: Date = Date()
     ) async throws -> [PaymentObservation] {
         guard !inputs.isEmpty else { return [] }
@@ -286,6 +327,12 @@ public struct PaymentMonitor: Sendable {
         }
         block = number
         initialBlockHash = hash
+
+        // Advisory mempool hints run beside the fixed-head proof and tolerate every failure.
+        // An empty input list resolves immediately, so the child task is free when disabled.
+        async let advisoryHints = advisoryPendingBalances(
+            for: includePendingBalanceHints ? inputs : []
+        )
 
         var cursorSets = [[PaymentConfirmationCursor]]()
         cursorSets.reserveCapacity(inputs.count)
@@ -347,23 +394,54 @@ public struct PaymentMonitor: Sendable {
             throw PaymentMonitorError.canonicalBlockChanged(blockNumber: block)
         }
 
-        return zip(zip(inputs, cursorSets), balances).map { pair, balance in
-            let (input, cursors) = pair
-            let validatedCursors = cursors.filter { cursor in
+        let pendingHints = await advisoryHints
+        var observations = [PaymentObservation]()
+        observations.reserveCapacity(inputs.count)
+        for (index, input) in inputs.enumerated() {
+            let validatedCursors = cursorSets[index].filter { cursor in
                 let canonicalHash = cursor.blockNumber == block
                     ? finalBlockHash
                     : historicalHashes[cursor.blockNumber]
                 return canonicalHash == cursor.blockHash
             }
-            return classify(
+            observations.append(classify(
                 input.request,
-                balance: balance,
+                balance: balances[index],
                 block: block,
                 blockHash: finalBlockHash,
                 previousThresholdCursor: input.previousThresholdCursor,
                 validatedCursors: validatedCursors,
+                pendingBalanceHint: index < pendingHints.count ? pendingHints[index] : nil,
                 now: now
+            ))
+        }
+        return observations
+    }
+
+    /// Advisory-only mempool balances used for cashier feedback while a QR is on screen. Any
+    /// transport, batching, endpoint-compatibility, or decoding failure degrades to `nil` hints.
+    /// Nothing read here may influence the fixed-head evidence, status classification
+    /// thresholds, or persisted confirmation state.
+    private func advisoryPendingBalances(
+        for inputs: [PaymentSampleInput]
+    ) async -> [UInt256?] {
+        guard !inputs.isEmpty else { return [] }
+        let requests = inputs.map { input in
+            EthereumReadBatchRequest.call(
+                address: input.request.token.address,
+                data: ABI.encodeCall(
+                    selector: ABI.balanceOfSelector,
+                    words: [ABI.word(input.request.receiver)]
+                ),
+                block: .pending
             )
+        }
+        guard let results = try? await resolve(requests),
+              results.count == requests.count
+        else { return [UInt256?](repeating: nil, count: inputs.count) }
+        return results.map { result in
+            guard case let .data(data) = result else { return nil }
+            return try? ABI.decodeUInt256(data)
         }
     }
 
@@ -477,6 +555,7 @@ public struct PaymentMonitor: Sendable {
         blockHash: Bytes32,
         previousThresholdCursor: PaymentConfirmationCursor? = nil,
         validatedCursors: [PaymentConfirmationCursor] = [],
+        pendingBalanceHint: UInt256? = nil,
         now: Date = Date()
     ) -> PaymentObservation {
         let expected = request.expectedAmount
@@ -497,7 +576,8 @@ public struct PaymentMonitor: Sendable {
                 status: status,
                 thresholdBlock: nil,
                 thresholdBlockHash: nil,
-                validatedPreviousCursors: validatedCursors
+                validatedPreviousCursors: validatedCursors,
+                pendingBalanceHint: pendingBalanceHint
             )
         }
 
@@ -534,7 +614,8 @@ public struct PaymentMonitor: Sendable {
             status: status,
             thresholdBlock: thresholdCursor.blockNumber,
             thresholdBlockHash: thresholdCursor.blockHash,
-            validatedPreviousCursors: validatedCursors
+            validatedPreviousCursors: validatedCursors,
+            pendingBalanceHint: pendingBalanceHint
         )
     }
 

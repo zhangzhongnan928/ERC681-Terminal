@@ -74,7 +74,14 @@ confirmation depends on them, and canonical block hashes are checked before and 
 window.
 
 Both SDK observers use three sequential network waves per payment sample: chain/head anchor,
-fixed-block balance plus saved-cursor identities, then a final canonical-head identity check. Once
+fixed-block balance plus saved-cursor identities, then a final canonical-head identity check. On
+iOS, `PaymentMonitor.sample(_:includePendingBalanceHint:)` can additionally read the receiver's
+`pending`-tag balance beside those waves. The result surfaces as
+`PaymentObservation.pendingBalanceHint` and is advisory only: it never joins classification or
+persisted confirmation state, and a failing or unsupported pending read degrades to a `nil` hint
+without failing the canonical sample. `PaymentMonitor.pollInterval(after:defaultInterval:acceleratedInterval:)`
+encodes the cadence policy — accelerate to the block cadence only while a nonzero hint, partial
+balance, or unfinished confirmation window shows funds in flight. Once
 cashier work is requested, the native apps defer new background RPC units. One already-started
 bounded unit may finish or overlap without owning the cashier queue, while the shared concurrency
 limit prevents an RPC burst. Normal payment polling is five seconds and automatic recovery runs on

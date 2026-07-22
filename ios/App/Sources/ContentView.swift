@@ -140,6 +140,13 @@ private struct CheckoutView: View {
         .onChange(of: model.settings.selectedPaymentProfileID) {
             amount = ""
         }
+        .onChange(of: amount) {
+            // Amount never participates in invoice or receiver derivation, so the sale proofs
+            // can start while the cashier is still typing. A skipped or failed prewarm simply
+            // leaves the normal fresh proof path in place when the QR button is tapped.
+            guard !amount.isEmpty else { return }
+            model.prewarmSaleProofsIfNeeded()
+        }
     }
 
     private var allowsQRCreation: Bool {
@@ -871,7 +878,10 @@ private struct PaymentPresentationView: View {
                     .font(.title3)
                     .foregroundStyle(.secondary)
 
-                PaymentStatusLabel(status: observation?.status ?? .waiting)
+                PaymentStatusLabel(
+                    status: observation?.status ?? .waiting,
+                    pendingDetected: isPendingPaymentDetected
+                )
 
                 if shouldPresentQR {
                     QRCodeImage(payload: request.erc681URI)
@@ -927,10 +937,22 @@ private struct PaymentPresentationView: View {
         case .paid, .overpaid, .expired: return false
         }
     }
+
+    private var isPendingPaymentDetected: Bool {
+        guard let observation,
+              case .waiting = observation.status,
+              let hint = observation.pendingBalanceHint
+        else { return false }
+        return !hint.isZero
+    }
 }
 
 private struct PaymentStatusLabel: View {
     let status: PaymentStatus
+    /// Advisory mempool signal only: switches the waiting label to "Payment detected" so the
+    /// cashier sees the incoming transfer immediately. Confirmation state, persistence, and
+    /// the paid transition still come exclusively from canonical fixed-head observations.
+    var pendingDetected: Bool = false
 
     var body: some View {
         Label(label, systemImage: symbol)
@@ -939,10 +961,17 @@ private struct PaymentStatusLabel: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .background(color.opacity(0.12), in: Capsule())
+            .accessibilityIdentifier("paymentStatusLabel")
+    }
+
+    private var isDetectedWhileWaiting: Bool {
+        guard case .waiting = status else { return false }
+        return pendingDetected
     }
 
     private var label: String {
-        switch status {
+        if isDetectedWhileWaiting { return "Payment detected — confirming" }
+        return switch status {
         case .waiting: "Waiting for payment"
         case .partial: "Partially funded"
         case let .confirming(_, confirmations, required): "Confirming \(confirmations)/\(required)"
@@ -953,7 +982,8 @@ private struct PaymentStatusLabel: View {
     }
 
     private var symbol: String {
-        switch status {
+        if isDetectedWhileWaiting { return "clock.badge.checkmark" }
+        return switch status {
         case .waiting, .confirming: "hourglass"
         case .partial: "circle.lefthalf.filled"
         case .paid, .overpaid: "checkmark.circle.fill"
@@ -962,7 +992,8 @@ private struct PaymentStatusLabel: View {
     }
 
     private var color: Color {
-        switch status {
+        if isDetectedWhileWaiting { return .orange }
+        return switch status {
         case .paid, .overpaid: .green
         case .partial, .confirming: .orange
         case .expired: .red

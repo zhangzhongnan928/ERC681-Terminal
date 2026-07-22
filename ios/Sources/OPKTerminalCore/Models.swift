@@ -377,6 +377,11 @@ public struct PaymentObservation: Hashable, Sendable, Codable {
     /// Saved cursors that the RPC sampler re-read and matched against the canonical chain during
     /// this observation. App-specific confirmation windows may only be preserved from this set.
     public let validatedPreviousCursors: [PaymentConfirmationCursor]
+    /// Advisory mempool balance sampled beside the canonical read, used only for "payment
+    /// detected" UI feedback. It is never payment evidence: classification, confirmation
+    /// cursors, and persisted invoice state are derived exclusively from the fixed-head
+    /// `balance` above, and a pending transaction can still be dropped before inclusion.
+    public let pendingBalanceHint: UInt256?
 
     public init(
         invoiceID: Bytes32,
@@ -386,7 +391,8 @@ public struct PaymentObservation: Hashable, Sendable, Codable {
         status: PaymentStatus,
         thresholdBlock: UInt64?,
         thresholdBlockHash: Bytes32?,
-        validatedPreviousCursors: [PaymentConfirmationCursor] = []
+        validatedPreviousCursors: [PaymentConfirmationCursor] = [],
+        pendingBalanceHint: UInt256? = nil
     ) {
         self.invoiceID = invoiceID
         self.blockNumber = blockNumber
@@ -396,6 +402,7 @@ public struct PaymentObservation: Hashable, Sendable, Codable {
         self.thresholdBlock = thresholdBlock
         self.thresholdBlockHash = thresholdBlockHash
         self.validatedPreviousCursors = validatedPreviousCursors
+        self.pendingBalanceHint = pendingBalanceHint
     }
 
     public var thresholdCursor: PaymentConfirmationCursor? {

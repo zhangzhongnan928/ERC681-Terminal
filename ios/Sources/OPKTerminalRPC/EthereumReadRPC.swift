@@ -3,11 +3,16 @@ import OPKTerminalCore
 
 public enum RPCBlockTag: Hashable, Sendable {
     case latest
+    /// Mempool/preconfirmation view. Never part of a fixed-head proof: pending state can be
+    /// replaced before inclusion, so it is only suitable for advisory reads such as the
+    /// payment-detected UI hint.
+    case pending
     case number(UInt64)
 
     var parameter: String {
         switch self {
         case .latest: "latest"
+        case .pending: "pending"
         case let .number(number): "0x" + String(number, radix: 16)
         }
     }

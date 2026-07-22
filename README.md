@@ -78,6 +78,18 @@ These controls reduce latency and public-endpoint throttling without turning mut
 balances, contract links, token metadata, simulation, nonce, fees, or canonical block identity into
 long-lived cache. Wall-clock time remains dependent on the public endpoint and network conditions.
 
+Because the amount never participates in invoice-ID or receiver derivation, the iOS app may run
+the full set of sale proofs opportunistically while the cashier is still typing. Such a prewarmed
+proof is bound to one fixed invoice identity, configuration fingerprint, and operator; it is
+single-use, expires after 60 seconds, and the sale must reproduce the identical invoice ID and
+receiver from the stored inputs before consuming it — otherwise the normal fresh proof path runs.
+While a QR is displayed, the sampler additionally reads the receiver's pending-tag balance beside
+the fixed-head proof as an advisory "payment detected" hint: it never joins classification,
+confirmation cursors, or persisted state, and any failure of that read degrades to no hint.
+Payment polling accelerates from five seconds to the two-second block cadence only while funds are
+visibly in flight (a nonzero pending hint, a partial balance, or an unfinished confirmation
+window), so an idle QR never consumes the accelerated budget.
+
 ## Payment flow
 
 1. Select one configured payment profile, then require the device operator wallet and freshly
