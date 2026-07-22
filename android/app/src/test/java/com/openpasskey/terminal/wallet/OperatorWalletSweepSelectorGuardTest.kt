@@ -2,10 +2,12 @@ package com.openpasskey.terminal.wallet
 
 import com.openpasskey.terminal.settlement.SettlementAbi
 import com.openpasskey.terminal.settlement.SettlementInvoiceIntent
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.web3j.crypto.RawTransaction
+import org.web3j.utils.Numeric
 import java.math.BigInteger
 
 /**
@@ -74,6 +76,50 @@ class OperatorWalletSweepSelectorGuardTest {
     @Test
     fun rejectsEmptyMissingOrMisplacedSelectorData() {
         listOf(null, "", "0x", "0x00682b11b5", "00682b11b5").forEach { callData ->
+            assertThrows(IllegalArgumentException::class.java) {
+                requireSweepSessionsCallData(callData)
+            }
+        }
+    }
+
+    /**
+     * Odd-length hex passes a naive "682b11b5" string-prefix check, but web3j left-pads it with a
+     * leading nibble before signing, so the bytes actually authorized begin 0x0682b11b. The guard
+     * validates the decoded bytes it will sign, so every odd-length variant must be rejected.
+     */
+    @Test
+    fun rejectsOddLengthHexThatShiftsTheSignedSelector() {
+        listOf(
+            "682b11b5f",
+            "0x682b11b5f",
+            "682B11B5F",
+            "682b11b5deadbee",
+        ).forEach { callData ->
+            assertThrows(IllegalArgumentException::class.java) {
+                requireSweepSessionsCallData(callData)
+            }
+        }
+    }
+
+    @Test
+    fun oddLengthCandidateWouldHavePassedANaiveStringPrefixCheck() {
+        // Documents the bypass this guard closes: the string starts with the selector text, yet the
+        // signed bytes do not. If this assertion ever fails the padding behaviour changed and the
+        // guard's byte-level rationale must be re-examined.
+        val bypass = "682b11b5f"
+        assertTrue(bypass.startsWith("682b11b5"))
+        val signedSelector = Numeric.toHexString(
+            Numeric.hexStringToByteArray(bypass).copyOfRange(0, 4),
+        )
+        assertEquals("0x0682b11b", signedSelector)
+        assertThrows(IllegalArgumentException::class.java) {
+            requireSweepSessionsCallData(bypass)
+        }
+    }
+
+    @Test
+    fun rejectsNonHexCharactersInSelectorPosition() {
+        listOf("682b11g5", "0x682b11z500", "  682b11b5").forEach { callData ->
             assertThrows(IllegalArgumentException::class.java) {
                 requireSweepSessionsCallData(callData)
             }

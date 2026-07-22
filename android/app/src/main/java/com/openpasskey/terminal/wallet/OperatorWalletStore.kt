@@ -364,13 +364,22 @@ internal fun requireVerifiedSettlementActivation(
     }
 }
 
-// Selector for sweepSessions(bytes32[],uint256[],address), stored without the 0x prefix because
-// web3j's RawTransaction strips the prefix from calldata while ABI encoders emit it prefixed.
-private const val SWEEP_SESSIONS_SELECTOR_HEX = "682b11b5"
+// Selector bytes for sweepSessions(bytes32[],uint256[],address). Compared against the decoded
+// calldata rather than a hex prefix: web3j signs Numeric.hexStringToByteArray(data), which strips
+// any 0x prefix AND left-pads odd-length hex with a leading nibble. A string prefix check would
+// pass "682b11b5f" while the bytes actually signed begin 0x0682b11b, so this fail-closed boundary
+// must validate the exact bytes it will authorize.
+private val SWEEP_SESSIONS_SELECTOR = byteArrayOf(0x68, 0x2b, 0x11, 0xb5.toByte())
 
 internal fun requireSweepSessionsCallData(callData: String?) {
     val normalized = Numeric.cleanHexPrefix(callData.orEmpty().lowercase())
-    require(normalized.startsWith(SWEEP_SESSIONS_SELECTOR_HEX)) {
+    require(
+        normalized.length >= SWEEP_SESSIONS_SELECTOR.size * 2 &&
+            normalized.length % 2 == 0 &&
+            normalized.all { it in '0'..'9' || it in 'a'..'f' },
+    ) { "Operator key only signs sweepSessions calls" }
+    val selector = Numeric.hexStringToByteArray(normalized).copyOfRange(0, SWEEP_SESSIONS_SELECTOR.size)
+    require(selector.contentEquals(SWEEP_SESSIONS_SELECTOR)) {
         "Operator key only signs sweepSessions calls"
     }
 }
