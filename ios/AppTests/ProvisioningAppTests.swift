@@ -3241,7 +3241,8 @@ final class ProvisioningAppTests: XCTestCase {
     }
 
     @MainActor
-    func testPrewarmedSaleProofIsConsumedByCreateSaleWithoutRefetching() async throws {
+    @MainActor
+    func testPrewarmedIdentityAndImmutableProofAreConsumedByCreateSale() async throws {
         let savedSettings = AppPreferences.loadSettings()
         defer { AppPreferences.saveSettings(savedSettings) }
         let container = try ModelContainer(
@@ -3268,41 +3269,48 @@ final class ProvisioningAppTests: XCTestCase {
             ),
             operatorWalletLifecycle: BlockingOperatorWalletLifecycle(address: operatorAddress),
             adminPINStore: InMemoryAdminPINStore(pin: "123456"),
-            currentConfigurationValidation: { _ in await probe.validate() },
+            currentConfigurationValidation: { _ in try await probe.validate() },
             operatorStatusReader: { _, _ in await probe.status() },
             validationNow: { clock.now },
             receiverFreshnessProver: { _, receiver, _ in
-                try await probe.freshness(receiver: receiver)
+                await probe.freshness(receiver: receiver)
             }
         )
         model.settings = configured
 
         model.prewarmSaleProofsIfNeeded()
+        let identity = try XCTUnwrap(
+            model.prewarmedSaleIdentity,
+            "The invoice identity must be fixed synchronously while typing"
+        )
         await model.waitForSalePrewarmToFinish()
         XCTAssertNil(model.errorMessage, "Prewarming must never surface an alert")
         let prewarmValidation = await probe.validationCalls
         let prewarmStatus = await probe.statusCalls
         let prewarmFreshness = await probe.freshnessCalls
-        XCTAssertEqual(prewarmValidation, 1)
-        XCTAssertEqual(prewarmStatus, 1)
-        XCTAssertEqual(prewarmFreshness, 1)
+        XCTAssertEqual(prewarmValidation, 1, "Warm-up proves only the immutable configuration")
+        XCTAssertEqual(prewarmStatus, 0, "Mutable operator status is never prewarmed")
+        XCTAssertEqual(prewarmFreshness, 0, "Mutable receiver freshness is never prewarmed")
 
         await model.createSale(displayAmount: "10.50")
 
         XCTAssertNil(model.errorMessage)
         let request = try XCTUnwrap(model.activeRequest)
+        XCTAssertEqual(
+            request.receiver,
+            identity.receiver,
+            "The sale must publish exactly the prewarmed invoice identity"
+        )
+        XCTAssertEqual(request.invoiceID, identity.invoiceID)
+        XCTAssertNil(model.prewarmedSaleIdentity, "A consumed identity is single-use")
         let saleValidation = await probe.validationCalls
         let saleStatus = await probe.statusCalls
         let saleFreshness = await probe.freshnessCalls
-        XCTAssertEqual(saleValidation, 1, "A fresh prewarmed proof must not be re-fetched")
-        XCTAssertEqual(saleStatus, 1)
-        XCTAssertEqual(saleFreshness, 1)
+        XCTAssertEqual(saleValidation, 1, "A fresh immutable proof must not be re-fetched")
+        XCTAssertEqual(saleStatus, 1, "Operator status is proven live at publication")
+        XCTAssertEqual(saleFreshness, 1, "Receiver freshness is proven live at publication")
         let provenReceivers = await probe.freshnessReceivers
-        XCTAssertEqual(
-            provenReceivers,
-            [request.receiver],
-            "The published QR must use exactly the prewarmed, freshness-proven receiver"
-        )
+        XCTAssertEqual(provenReceivers, [request.receiver])
         XCTAssertEqual(request.expectedAmount, UInt256(10_500_000))
         XCTAssertEqual(
             try container.mainContext.fetch(FetchDescriptor<StoredInvoice>()).count,
@@ -3312,7 +3320,7 @@ final class ProvisioningAppTests: XCTestCase {
     }
 
     @MainActor
-    func testStalePrewarmedSaleProofIsDiscardedAndCreateSaleRefetches() async throws {
+    func testStalePrewarmedProofIsReprovenAndCreateSaleStillSucceeds() async throws {
         let savedSettings = AppPreferences.loadSettings()
         defer { AppPreferences.saveSettings(savedSettings) }
         let container = try ModelContainer(
@@ -3339,17 +3347,18 @@ final class ProvisioningAppTests: XCTestCase {
             ),
             operatorWalletLifecycle: BlockingOperatorWalletLifecycle(address: operatorAddress),
             adminPINStore: InMemoryAdminPINStore(pin: "123456"),
-            currentConfigurationValidation: { _ in await probe.validate() },
+            currentConfigurationValidation: { _ in try await probe.validate() },
             operatorStatusReader: { _, _ in await probe.status() },
             validationNow: { clock.now },
             receiverFreshnessProver: { _, receiver, _ in
-                try await probe.freshness(receiver: receiver)
+                await probe.freshness(receiver: receiver)
             },
             salePrewarmProofTTL: 60
         )
         model.settings = configured
 
         model.prewarmSaleProofsIfNeeded()
+        let staleIdentity = try XCTUnwrap(model.prewarmedSaleIdentity)
         await model.waitForSalePrewarmToFinish()
         clock.advance(by: 61)
 
@@ -3357,21 +3366,24 @@ final class ProvisioningAppTests: XCTestCase {
 
         XCTAssertNil(model.errorMessage)
         let request = try XCTUnwrap(model.activeRequest)
-        let freshnessCalls = await probe.freshnessCalls
-        let validationCalls = await probe.validationCalls
-        XCTAssertEqual(freshnessCalls, 2, "An expired prewarm proof must be re-proven")
-        XCTAssertEqual(validationCalls, 2)
-        let provenReceivers = await probe.freshnessReceivers
-        XCTAssertEqual(
-            provenReceivers.last,
+        XCTAssertNotEqual(
             request.receiver,
-            "The sale must publish the freshly proven receiver, not the stale prewarmed one"
+            staleIdentity.receiver,
+            "An expired identity must be discarded, not published"
         )
+        let validationCalls = await probe.validationCalls
+        XCTAssertEqual(
+            validationCalls,
+            2,
+            "An expired immutable proof must be re-proven on chain"
+        )
+        let provenReceivers = await probe.freshnessReceivers
+        XCTAssertEqual(provenReceivers.last, request.receiver)
         model.closeActiveSale()
     }
 
     @MainActor
-    func testPrewarmFailureIsSilentAndCreateSaleFallsBackToFreshProofs() async throws {
+    func testPrewarmFailureIsSilentAndCreateSaleRunsFreshProofs() async throws {
         let savedSettings = AppPreferences.loadSettings()
         defer { AppPreferences.saveSettings(savedSettings) }
         let container = try ModelContainer(
@@ -3389,7 +3401,7 @@ final class ProvisioningAppTests: XCTestCase {
             ),
             boundTo: operatorAddress
         )
-        let probe = SaleProofProbe(failingFreshnessCalls: 1)
+        let probe = SaleProofProbe(failingValidationCalls: 1)
         let model = AppModel(
             container: container,
             operatorWallet: KeychainOperatorWallet(
@@ -3397,36 +3409,92 @@ final class ProvisioningAppTests: XCTestCase {
             ),
             operatorWalletLifecycle: BlockingOperatorWalletLifecycle(address: operatorAddress),
             adminPINStore: InMemoryAdminPINStore(pin: "123456"),
-            currentConfigurationValidation: { _ in await probe.validate() },
+            currentConfigurationValidation: { _ in try await probe.validate() },
             operatorStatusReader: { _, _ in await probe.status() },
             receiverFreshnessProver: { _, receiver, _ in
-                try await probe.freshness(receiver: receiver)
+                await probe.freshness(receiver: receiver)
+            }
+        )
+        model.settings = configured
+
+        model.prewarmSaleProofsIfNeeded()
+        let identity = try XCTUnwrap(model.prewarmedSaleIdentity)
+        await model.waitForSalePrewarmToFinish()
+        XCTAssertNil(
+            model.errorMessage,
+            "A failed warm-up is opportunistic and must never interrupt amount entry"
+        )
+        let warmupValidation = await probe.validationCalls
+        XCTAssertEqual(warmupValidation, 1)
+
+        await model.createSale(displayAmount: "10.50")
+
+        XCTAssertNil(model.errorMessage)
+        let request = try XCTUnwrap(model.activeRequest)
+        XCTAssertEqual(
+            request.receiver,
+            identity.receiver,
+            "The identity needs no network and survives a failed cache warm-up"
+        )
+        let validationCalls = await probe.validationCalls
+        XCTAssertEqual(validationCalls, 2, "The sale must run its own fresh immutable proof")
+        XCTAssertEqual(
+            try container.mainContext.fetch(FetchDescriptor<StoredInvoice>()).count,
+            1
+        )
+        model.closeActiveSale()
+    }
+
+    @MainActor
+    func testCreateSaleRejectsDewhitelistedTokenAtPublication() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        let container = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let configured = try AppSettings().applying(
+            paymentConfiguration(
+                vault: "0x2222222222222222222222222222222222222222",
+                token: "0x3333333333333333333333333333333333333333",
+                symbol: "AUDM"
+            ),
+            boundTo: operatorAddress
+        )
+        // The cached/prewarmed configuration proof is fresh, but the live whitelist read says
+        // the token was just removed. Publication must fail closed on the live fact.
+        let probe = SaleProofProbe(tokenWhitelisted: false)
+        let model = AppModel(
+            container: container,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(address: operatorAddress),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            currentConfigurationValidation: { _ in try await probe.validate() },
+            operatorStatusReader: { _, _ in await probe.status() },
+            receiverFreshnessProver: { _, receiver, _ in
+                await probe.freshness(receiver: receiver)
             }
         )
         model.settings = configured
 
         model.prewarmSaleProofsIfNeeded()
         await model.waitForSalePrewarmToFinish()
-        XCTAssertNil(
-            model.errorMessage,
-            "A failed prewarm is opportunistic and must never interrupt amount entry"
-        )
-        let prewarmFreshness = await probe.freshnessCalls
-        XCTAssertEqual(prewarmFreshness, 1)
 
         await model.createSale(displayAmount: "10.50")
 
-        XCTAssertNil(model.errorMessage)
-        let request = try XCTUnwrap(model.activeRequest)
-        let freshnessCalls = await probe.freshnessCalls
-        XCTAssertEqual(freshnessCalls, 2, "The sale must fall back to the fresh proof path")
-        let provenReceivers = await probe.freshnessReceivers
-        XCTAssertEqual(provenReceivers.last, request.receiver)
-        XCTAssertEqual(
-            try container.mainContext.fetch(FetchDescriptor<StoredInvoice>()).count,
-            1
+        XCTAssertNil(model.activeRequest, "No QR may be published for a de-whitelisted token")
+        XCTAssertTrue(
+            model.errorMessage?.contains("not whitelisted") == true,
+            "Unexpected error: \(model.errorMessage ?? "nil")"
         )
-        model.closeActiveSale()
+        XCTAssertTrue(
+            try container.mainContext.fetch(FetchDescriptor<StoredInvoice>()).isEmpty
+        )
     }
 
     private func address(_ value: String) throws -> EthereumAddress {
@@ -3707,14 +3775,19 @@ private actor SaleProofProbe {
     private(set) var statusCalls = 0
     private(set) var freshnessCalls = 0
     private(set) var freshnessReceivers = [EthereumAddress]()
-    private let failingFreshnessCalls: Int
+    private let failingValidationCalls: Int
+    private let tokenWhitelisted: Bool
 
-    init(failingFreshnessCalls: Int = 0) {
-        self.failingFreshnessCalls = failingFreshnessCalls
+    init(failingValidationCalls: Int = 0, tokenWhitelisted: Bool = true) {
+        self.failingValidationCalls = failingValidationCalls
+        self.tokenWhitelisted = tokenWhitelisted
     }
 
-    func validate() {
+    func validate() throws {
         validationCalls += 1
+        if validationCalls <= failingValidationCalls {
+            throw URLError(.timedOut)
+        }
     }
 
     func status() -> OperatorChainStatus {
@@ -3728,17 +3801,15 @@ private actor SaleProofProbe {
         )
     }
 
-    func freshness(receiver: EthereumAddress) throws -> ReceiverFreshnessProof {
+    func freshness(receiver: EthereumAddress) -> ReceiverFreshnessProof {
         freshnessCalls += 1
         freshnessReceivers.append(receiver)
-        if freshnessCalls <= failingFreshnessCalls {
-            throw URLError(.timedOut)
-        }
         return ReceiverFreshnessProof(
             blockNumber: 100,
             blockHash: .zero,
             receiverCode: Data(),
-            tokenBalance: .zero
+            tokenBalance: .zero,
+            tokenWhitelisted: tokenWhitelisted
         )
     }
 }

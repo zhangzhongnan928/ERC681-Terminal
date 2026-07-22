@@ -155,9 +155,10 @@ jobs:
             test \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testActiveMonitorPreservesLastVerifiedObservationAcrossTransientFailure \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testActiveMonitorKeepsWrongChainTerminalAndCancellationSilent \
-            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testPrewarmedSaleProofIsConsumedByCreateSaleWithoutRefetching \
-            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testStalePrewarmedSaleProofIsDiscardedAndCreateSaleRefetches \
-            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testPrewarmFailureIsSilentAndCreateSaleFallsBackToFreshProofs \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testPrewarmedIdentityAndImmutableProofAreConsumedByCreateSale \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testStalePrewarmedProofIsReprovenAndCreateSaleStillSucceeds \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testPrewarmFailureIsSilentAndCreateSaleRunsFreshProofs \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testCreateSaleRejectsDewhitelistedTokenAtPublication \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testFirstRunWalletCreationRemainsAvailableBeforeAdminPIN \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testNewPaymentRouteUsesKnownNetworkDefaultWithoutLeakingFallbackFinality \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testReprovisioningSamePaymentRoutePreservesRaisedFinality \

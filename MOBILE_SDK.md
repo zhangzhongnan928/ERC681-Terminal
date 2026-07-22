@@ -76,12 +76,17 @@ window.
 Both SDK observers use three sequential network waves per payment sample: chain/head anchor,
 fixed-block balance plus saved-cursor identities, then a final canonical-head identity check. On
 iOS, `PaymentMonitor.sample(_:includePendingBalanceHint:)` can additionally read the receiver's
-`pending`-tag balance beside those waves. The result surfaces as
-`PaymentObservation.pendingBalanceHint` and is advisory only: it never joins classification or
-persisted confirmation state, and a failing or unsupported pending read degrades to a `nil` hint
-without failing the canonical sample. `PaymentMonitor.pollInterval(after:defaultInterval:acceleratedInterval:)`
-encodes the cadence policy — accelerate to the block cadence only while a nonzero hint, partial
-balance, or unfinished confirmation window shows funds in flight. Once
+`pending`-tag balance beside those waves — the endpoint's pending/txpool view where supported.
+The result surfaces as `PaymentObservation.pendingBalanceHint` and is advisory only: it never
+joins classification or persisted confirmation state; it settles or is abandoned within
+`PaymentMonitor.advisoryPendingHintTimeout` BEFORE the final canonical-identity check so a
+stalled read can neither delay nor outlive the reorg bracket; and a failing or unsupported
+pending read degrades to a `nil` hint without failing the canonical sample. `PaymentPollCadence`
+encodes the cadence policy — accelerate to the block cadence only inside a bounded window after
+funds visibly progress (a new or increased hint, a balance increase, or confirmation progress),
+falling back to the default cadence for static partial balances and stuck pending transactions.
+`ReceiverFreshnessValidator` additionally proves the vault's live token whitelist at the same
+fixed head as the receiver reads, so QR publication never trusts a cached whitelist fact. Once
 cashier work is requested, the native apps defer new background RPC units. One already-started
 bounded unit may finish or overlap without owning the cashier queue, while the shared concurrency
 limit prevents an RPC burst. Normal payment polling is five seconds and automatic recovery runs on

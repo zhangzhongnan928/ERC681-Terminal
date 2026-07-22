@@ -50,10 +50,10 @@ final class AppModel: ObservableObject {
             validatedConfigurationFingerprint = nil
             configurationValidationProof = nil
             preparedSettlementValidationProof = nil
-            // Cancel but do not clear the in-flight prewarm reference: the task removes itself
+            // Cancel but do not clear the in-flight warm-up reference: the task removes itself
             // on exit, so a single writer owns that slot and no replacement task can race it.
             salePrewarmTask?.cancel()
-            prewarmedSaleProof = nil
+            prewarmedSaleIdentity = nil
             validationMessage = "On-chain validation required"
             settlementCoordinator = nil
             settlementCoordinatorKey = nil
@@ -116,7 +116,7 @@ final class AppModel: ObservableObject {
     ) async throws -> ReceiverFreshnessProof
     private let salePrewarmProofTTL: TimeInterval
     private var salePrewarmTask: Task<Void, Never>?
-    private var prewarmedSaleProof: PrewarmedSaleProof?
+    private(set) var prewarmedSaleIdentity: PrewarmedSaleIdentity?
     private let validationNow: @Sendable () -> Date
     private let configurationValidationTTL: TimeInterval
     private let preparedSettlementValidationTTL: TimeInterval
@@ -212,6 +212,7 @@ final class AppModel: ObservableObject {
                 return try await ReceiverFreshnessValidator(rpc: rpc).validate(
                     receiver: receiver,
                     token: token,
+                    vault: configuration.deployment.vault,
                     expectedChainID: configuration.chainID
                 )
             }
@@ -594,7 +595,7 @@ final class AppModel: ObservableObject {
             try await validate(
                 configuration,
                 fingerprint: snapshot.validationFingerprint,
-                allowCachedBackgroundProof: true
+                reusableProofMaximumAge: configurationValidationTTL
             )
             guard settings == snapshot else { throw AppSafetyError.configurationChanged }
             validatedConfigurationFingerprint = snapshot.validationFingerprint
@@ -635,75 +636,73 @@ final class AppModel: ObservableObject {
             let paymentProfile = try TerminalPaymentProfile(configuration: configuration)
             let token = paymentProfile.token
             let amount = try TokenAmount(display: displayAmount, decimals: token.decimals)
+            // A prewarmed identity only fixes WHICH invoice is published; every mutable fact is
+            // re-proven live below. Never wait for an unfinished cache warm-up here — the
+            // bounded drain already ran, and this sale proves everything it needs itself.
             let request: PaymentRequest
-            let liveStatus: OperatorChainStatus
-            let freshness: ReceiverFreshnessProof
-            let prewarmed = await takeValidPrewarmedSaleProof(
-                fingerprint: settingsSnapshot.validationFingerprint,
-                operatorAddress: operatorAddress
-            )
-            if let prewarmed,
-               let prewarmedRequest = try? InvoiceFactory.create(
+            if let identity = takeValidPrewarmedSaleIdentity(
+                   fingerprint: settingsSnapshot.validationFingerprint,
+                   operatorAddress: operatorAddress
+               ),
+               let reusedRequest = try? InvoiceFactory.create(
                    terminalIdentifier: TerminalIdentifier(address: operatorAddress),
                    amount: amount,
                    profile: paymentProfile,
-                   createdAt: prewarmed.createdAt,
+                   createdAt: identity.createdAt,
                    expiresAt: Date().addingTimeInterval(15 * 60),
-                   nonce: prewarmed.nonce
+                   nonce: identity.nonce
                ),
                // Amount does not participate in invoice or receiver derivation, so replaying
                // the prewarmed nonce and creation time must reproduce both identifiers exactly.
-               // If derivation ever became amount-dependent, this guard forces the fresh proof
-               // path instead of publishing a QR whose proofs cover a different address.
-               prewarmedRequest.invoiceID == prewarmed.invoiceID,
-               prewarmedRequest.receiver == prewarmed.receiver {
-                request = prewarmedRequest
-                liveStatus = prewarmed.operatorStatus
-                freshness = prewarmed.freshnessProof
+               // If derivation ever became amount-dependent, this guard discards the identity
+               // instead of publishing a QR whose derivation was never self-checked.
+               reusedRequest.invoiceID == identity.invoiceID,
+               reusedRequest.receiver == identity.receiver {
+                request = reusedRequest
             } else {
-                let freshRequest = try InvoiceFactory.create(
+                request = try InvoiceFactory.create(
                     terminalIdentifier: TerminalIdentifier(address: operatorAddress),
                     amount: amount,
                     profile: paymentProfile,
                     expiresAt: Date().addingTimeInterval(15 * 60)
                 )
-                // These proofs are independent read-only operations. Launch them together so the
-                // slowest fixed-head proof, rather than their sum, controls checkout latency. Every
-                // result remains mandatory and the settings/operator snapshot is checked before any
-                // invoice is persisted or shown.
-                async let configurationProof: Void = validate(
-                    configuration,
-                    fingerprint: settingsSnapshot.validationFingerprint,
-                    allowCachedBackgroundProof: false
-                )
-                async let statusProof = fetchOperatorStatus(
-                    configuration: configuration,
-                    operatorAddress: operatorAddress
-                )
-                async let freshnessProof = receiverFreshnessProver(
-                    configuration,
-                    freshRequest.receiver,
-                    token.address
-                )
-                let concurrentProofs: (Void, OperatorChainStatus, ReceiverFreshnessProof)
-                do {
-                    concurrentProofs = try await (
-                        configurationProof,
-                        statusProof,
-                        freshnessProof
-                    )
-                } catch {
-                    // A concurrently failing endpoint must not hide a settings/operator mutation
-                    // that invalidated the entire locally derived request while proofs were running.
-                    guard settings == settingsSnapshot,
-                          self.operatorAddress == operatorAddress
-                    else { throw AppSafetyError.configurationChanged }
-                    throw error
-                }
-                request = freshRequest
-                liveStatus = concurrentProofs.1
-                freshness = concurrentProofs.2
             }
+            // These proofs are independent read-only operations. Launch them together so the
+            // slowest fixed-head proof, rather than their sum, controls checkout latency.
+            // Immutable deployment facts (contract code, linkage, token metadata) may be served
+            // from a proof at most `salePrewarmProofTTL` old — typically the one the prewarm
+            // just produced. Every MUTABLE fact — token whitelist, operator authorization, gas
+            // reserve, and receiver freshness — is proven live on every QR publication.
+            async let configurationProof: Void = validate(
+                configuration,
+                fingerprint: settingsSnapshot.validationFingerprint,
+                reusableProofMaximumAge: salePrewarmProofTTL
+            )
+            async let statusProof = fetchOperatorStatus(
+                configuration: configuration,
+                operatorAddress: operatorAddress
+            )
+            async let freshnessProof = receiverFreshnessProver(
+                configuration,
+                request.receiver,
+                token.address
+            )
+            let concurrentProofs: (Void, OperatorChainStatus, ReceiverFreshnessProof)
+            do {
+                concurrentProofs = try await (
+                    configurationProof,
+                    statusProof,
+                    freshnessProof
+                )
+            } catch {
+                // A concurrently failing endpoint must not hide a settings/operator mutation
+                // that invalidated the entire locally derived request while proofs were running.
+                guard settings == settingsSnapshot,
+                      self.operatorAddress == operatorAddress
+                else { throw AppSafetyError.configurationChanged }
+                throw error
+            }
+            let (_, liveStatus, freshness) = concurrentProofs
             guard settings == settingsSnapshot,
                   self.operatorAddress == operatorAddress
             else { throw AppSafetyError.configurationChanged }
@@ -718,6 +717,9 @@ final class AppModel: ObservableObject {
             )
             guard readiness.isReady else {
                 throw AppSafetyError.terminalNotReady(readiness.detail)
+            }
+            guard freshness.tokenWhitelisted else {
+                throw ConfigurationValidationError.tokenNotWhitelisted(token.address)
             }
             guard freshness.receiverCode.isEmpty else {
                 throw AppSafetyError.receiverAlreadyDeployed
@@ -740,12 +742,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Opportunistically runs the three sale proofs while the cashier is still typing the
-    /// amount. Amount does not participate in invoice-ID or receiver derivation (protocol §3.1),
-    /// so the invoice identity can be fixed and proven before the amount is known. The proof is
-    /// single-use, expires after `salePrewarmProofTTL`, is bound to the exact configuration
-    /// fingerprint and operator, and silently yields to interactive work: a failed or skipped
-    /// prewarm only means `createSale` runs its normal fresh proof path.
+    /// Opportunistically prepares a sale while the cashier is still typing the amount. Amount
+    /// does not participate in invoice-ID or receiver derivation (protocol §3.1), so the invoice
+    /// identity is fixed synchronously with no network at all, and the only network work started
+    /// here is warming the IMMUTABLE configuration proof cache. Mutable facts — token whitelist,
+    /// operator authorization, gas reserve, receiver freshness — are never prewarmed; `createSale`
+    /// proves them live on every QR publication. The identity is single-use, expires after
+    /// `salePrewarmProofTTL`, and is bound to the exact configuration fingerprint and operator.
     func prewarmSaleProofsIfNeeded() {
         guard activeRequest == nil,
               !operationBusy,
@@ -756,52 +759,15 @@ final class AppModel: ObservableObject {
                   == operatorAddress.hex.lowercased(),
               let configuration = try? settings.configuration()
         else { return }
-        guard salePrewarmTask == nil else { return }
-        if let proof = prewarmedSaleProof,
-           proof.isReusable(
-               fingerprint: settings.validationFingerprint,
-               operatorAddress: operatorAddress,
-               at: validationNow(),
-               maximumAge: salePrewarmProofTTL
-           ) {
-            return
-        }
-        prewarmedSaleProof = nil
-        // Prewarming is cooperative background work: it never starts over an interactive
-        // operation and counts against the shared background budget, so an abandoned amount
-        // entry cannot stack uncontrolled load onto the free endpoint.
-        guard let token = backgroundRPCWorkGate.acquire(
-            interactiveOperationBusy: operationBusy
-        ) else { return }
         let fingerprint = settings.validationFingerprint
-        salePrewarmTask = Task { [weak self] in
-            guard let self else { return }
-            defer {
-                self.backgroundRPCWorkGate.release(token)
-                self.salePrewarmTask = nil
-            }
-            await self.runSalePrewarm(
-                configuration: configuration,
-                fingerprint: fingerprint,
-                operatorAddress: operatorAddress
-            )
-        }
-    }
-
-    /// Internal lifecycle seam used by deterministic app tests: awaits any in-flight prewarm.
-    /// Capturing the task first ensures a later replacement cannot change what is awaited.
-    func waitForSalePrewarmToFinish() async {
-        let task = salePrewarmTask
-        await task?.value
-    }
-
-    private func runSalePrewarm(
-        configuration: TerminalConfiguration,
-        fingerprint: String,
-        operatorAddress: EthereumAddress
-    ) async {
-        do {
-            let paymentProfile = try TerminalPaymentProfile(configuration: configuration)
+        let hasReusableIdentity = prewarmedSaleIdentity?.isReusable(
+            fingerprint: fingerprint,
+            operatorAddress: operatorAddress,
+            at: validationNow(),
+            maximumAge: salePrewarmProofTTL
+        ) == true
+        if !hasReusableIdentity {
+            prewarmedSaleIdentity = nil
             let createdAt = Date()
             let nonce = Bytes32.random()
             let timestamp = UInt64(max(0, createdAt.timeIntervalSince1970.rounded(.down)))
@@ -810,72 +776,92 @@ final class AppModel: ObservableObject {
                 timestamp: timestamp,
                 nonce: UInt256(bigEndian: nonce.data)
             )
-            let receiver = try ReceiverDerivation.receiver(
+            guard let receiver = try? ReceiverDerivation.receiver(
                 factory: configuration.deployment.factory,
                 receiverImplementation: configuration.deployment.receiverImplementation,
                 vault: configuration.deployment.vault,
                 invoiceID: invoiceID
-            )
-            let deadline = backgroundRPCUnitDeadline
-            let proofs: (OperatorChainStatus, ReceiverFreshnessProof) =
-                try await RPCRequestDeadline.withDeadline(after: deadline) {
-                    async let configurationProof: Void = self.validate(
-                        configuration,
-                        fingerprint: fingerprint,
-                        allowCachedBackgroundProof: false
-                    )
-                    async let statusProof = self.fetchOperatorStatus(
-                        configuration: configuration,
-                        operatorAddress: operatorAddress
-                    )
-                    async let freshnessProof = self.receiverFreshnessProver(
-                        configuration,
-                        receiver,
-                        paymentProfile.token.address
-                    )
-                    let resolved = try await (configurationProof, statusProof, freshnessProof)
-                    return (resolved.1, resolved.2)
-                }
-            guard settings.validationFingerprint == fingerprint,
-                  self.operatorAddress == operatorAddress
-            else { return }
-            prewarmedSaleProof = PrewarmedSaleProof(
+            ) else { return }
+            prewarmedSaleIdentity = PrewarmedSaleIdentity(
                 fingerprint: fingerprint,
                 operatorAddress: operatorAddress,
                 createdAt: createdAt,
                 nonce: nonce,
                 invoiceID: invoiceID,
                 receiver: receiver,
-                operatorStatus: proofs.0,
-                freshnessProof: proofs.1,
-                completedAt: validationNow()
+                capturedAt: validationNow()
             )
-        } catch {
-            // Prewarming is opportunistic: every failure silently falls back to the fresh
-            // interactive proof path in createSale. No alert may interrupt amount entry.
-            prewarmedSaleProof = nil
+        }
+        startConfigurationProofWarmupIfNeeded(
+            configuration: configuration,
+            fingerprint: fingerprint
+        )
+    }
+
+    /// Internal lifecycle seam used by deterministic app tests: awaits any in-flight cache
+    /// warm-up. Capturing the task first ensures a later replacement cannot change what is
+    /// awaited. Production code never awaits this task.
+    func waitForSalePrewarmToFinish() async {
+        let task = salePrewarmTask
+        await task?.value
+    }
+
+    private func startConfigurationProofWarmupIfNeeded(
+        configuration: TerminalConfiguration,
+        fingerprint: String
+    ) {
+        guard salePrewarmTask == nil else { return }
+        let hasFreshProof = configurationValidationProof?.isReusable(
+            configuration: configuration,
+            fingerprint: fingerprint,
+            at: validationNow(),
+            maximumAge: min(salePrewarmProofTTL, configurationValidationTTL)
+        ) == true
+        guard !hasFreshProof else { return }
+        // Warming is cooperative background work: it never starts over an interactive
+        // operation and counts against the shared background budget, so an abandoned amount
+        // entry cannot stack uncontrolled load onto the free endpoint.
+        guard let token = backgroundRPCWorkGate.acquire(
+            interactiveOperationBusy: operationBusy
+        ) else { return }
+        let deadline = backgroundRPCUnitDeadline
+        salePrewarmTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.backgroundRPCWorkGate.release(token)
+                self.salePrewarmTask = nil
+            }
+            // Failures are silent: warming only primes the immutable configuration proof
+            // cache, and `createSale` re-proves everything it actually relies on.
+            try? await RPCRequestDeadline.withDeadline(after: deadline) {
+                try await self.validate(
+                    configuration,
+                    fingerprint: fingerprint,
+                    reusableProofMaximumAge: nil
+                )
+            }
         }
     }
 
-    private func takeValidPrewarmedSaleProof(
+    private func takeValidPrewarmedSaleIdentity(
         fingerprint: String,
         operatorAddress: EthereumAddress
-    ) async -> PrewarmedSaleProof? {
-        if let task = salePrewarmTask {
-            await task.value
-        }
-        guard let proof = prewarmedSaleProof,
-              proof.isReusable(
+    ) -> PrewarmedSaleIdentity? {
+        // Never wait for an in-flight warm-up: the bounded background drain already ran, and
+        // the sale proves every mutable fact itself. An unfinished warm-up is cancelled so it
+        // cannot compete with the sale's own validation for the endpoint budget.
+        salePrewarmTask?.cancel()
+        guard let identity = prewarmedSaleIdentity,
+              identity.isReusable(
                   fingerprint: fingerprint,
                   operatorAddress: operatorAddress,
                   at: validationNow(),
                   maximumAge: salePrewarmProofTTL
               )
         else { return nil }
-        // Single-use: a consumed proof can never authorize a second invoice, and a failed sale
-        // falls back to the fresh interactive proof path on the next attempt.
-        prewarmedSaleProof = nil
-        return proof
+        // Single-use: a consumed identity can never name a second invoice.
+        prewarmedSaleIdentity = nil
+        return identity
     }
 
     func closeActiveSale() {
@@ -2195,17 +2181,21 @@ final class AppModel: ObservableObject {
         return value
     }
 
+    /// `reusableProofMaximumAge` is the caller's freshness policy for the IMMUTABLE
+    /// configuration proof only: nil demands a fresh on-chain proof; background readiness
+    /// passes the long configuration TTL; the sale path passes the short prewarm TTL. The
+    /// effective window never exceeds `configurationValidationTTL`.
     private func validate(
         _ configuration: TerminalConfiguration,
         fingerprint: String,
-        allowCachedBackgroundProof: Bool
+        reusableProofMaximumAge: TimeInterval?
     ) async throws {
-        if allowCachedBackgroundProof,
+        if let reusableProofMaximumAge,
            configurationValidationProof?.isReusable(
                configuration: configuration,
                fingerprint: fingerprint,
                at: validationNow(),
-               maximumAge: configurationValidationTTL
+               maximumAge: min(reusableProofMaximumAge, configurationValidationTTL)
            ) == true {
             validationMessage = "On-chain validation passed"
             return
@@ -2256,6 +2246,7 @@ final class AppModel: ObservableObject {
         monitoringTask = Task { [weak self] in
             guard let self else { return }
             do {
+                var cadence = PaymentPollCadence()
                 while !Task.isCancelled {
                     let cursors = try self.confirmationCursors(
                         for: request.invoiceID.hex
@@ -2276,8 +2267,13 @@ final class AppModel: ObservableObject {
                     } catch {
                         self.backgroundRPCWorkGate.release(token)
                         if PaymentMonitorRetryPolicy.shouldRetry(error) {
-                            // Leave activeObservation and the persisted confirmation cursor at
-                            // their last verified values. A transient read is not evidence.
+                            // Canonical evidence and the persisted confirmation cursor keep
+                            // their last verified values — a transient read is not evidence.
+                            // The advisory hint is dropped, though: a possibly abandoned
+                            // pending transaction must not keep announcing "payment detected"
+                            // across failed refreshes.
+                            self.activeObservation =
+                                self.activeObservation?.withoutPendingBalanceHint()
                             try await Task.sleep(
                                 nanoseconds: self.paymentMonitorPollIntervalNanoseconds
                             )
@@ -2295,11 +2291,11 @@ final class AppModel: ObservableObject {
                     default:
                         break
                     }
-                    // Track the Base block cadence only while funds are visibly in flight, so
-                    // the wait between a customer's send and the paid state shrinks without an
-                    // idle QR ever consuming the accelerated budget.
+                    // Track the Base block cadence only inside a bounded window after funds
+                    // visibly progressed, so a static partial balance or stuck pending
+                    // transaction cannot hold the fast cadence for an entire invoice lifetime.
                     try await Task.sleep(
-                        nanoseconds: PaymentMonitor.pollInterval(
+                        nanoseconds: cadence.interval(
                             after: observation,
                             defaultInterval: self.paymentMonitorPollIntervalNanoseconds,
                             acceleratedInterval:
@@ -2373,20 +2369,18 @@ final class AppModel: ObservableObject {
     }
 }
 
-/// A complete, unconsumed set of sale proofs produced while the cashier was typing. The bound
-/// invoice identity (creation time plus nonce, and therefore invoice ID and receiver) is fixed
-/// at prewarm time; the amount is bound later by `createSale`, which must reproduce the same
-/// identifiers from these inputs before the proof may be consumed.
-struct PrewarmedSaleProof: Sendable {
+/// An unconsumed invoice identity fixed while the cashier was typing: creation time plus nonce,
+/// and therefore invoice ID and receiver. It carries no chain-state proofs — `createSale` must
+/// reproduce the same identifiers from these inputs before the identity may name an invoice,
+/// and it re-proves every mutable chain fact live at publication time.
+struct PrewarmedSaleIdentity: Sendable {
     let fingerprint: String
     let operatorAddress: EthereumAddress
     let createdAt: Date
     let nonce: Bytes32
     let invoiceID: Bytes32
     let receiver: EthereumAddress
-    let operatorStatus: OperatorChainStatus
-    let freshnessProof: ReceiverFreshnessProof
-    let completedAt: Date
+    let capturedAt: Date
 
     func isReusable(
         fingerprint: String,
@@ -2394,10 +2388,10 @@ struct PrewarmedSaleProof: Sendable {
         at now: Date,
         maximumAge: TimeInterval
     ) -> Bool {
-        guard maximumAge > 0, now >= completedAt else { return false }
+        guard maximumAge > 0, now >= capturedAt else { return false }
         return self.fingerprint == fingerprint
             && self.operatorAddress == operatorAddress
-            && now.timeIntervalSince(completedAt) <= maximumAge
+            && now.timeIntervalSince(capturedAt) <= maximumAge
     }
 }
 

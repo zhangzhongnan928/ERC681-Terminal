@@ -413,6 +413,23 @@ public struct PaymentObservation: Hashable, Sendable, Codable {
         )
     }
 
+    /// The same canonical evidence with the advisory hint removed. Used when a retained
+    /// observation outlives failed refresh attempts: canonical facts stay displayed, but a
+    /// possibly dropped pending transaction must not keep announcing "payment detected".
+    public func withoutPendingBalanceHint() -> PaymentObservation {
+        PaymentObservation(
+            invoiceID: invoiceID,
+            blockNumber: blockNumber,
+            blockHash: blockHash,
+            balance: balance,
+            status: status,
+            thresholdBlock: thresholdBlock,
+            thresholdBlockHash: thresholdBlockHash,
+            validatedPreviousCursors: validatedPreviousCursors,
+            pendingBalanceHint: nil
+        )
+    }
+
     public func validated(_ cursor: PaymentConfirmationCursor) -> Bool {
         validatedPreviousCursors.contains(cursor)
     }
