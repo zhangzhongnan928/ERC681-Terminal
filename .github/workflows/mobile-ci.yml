@@ -158,4 +158,10 @@ jobs:
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testFirstRunWalletCreationRemainsAvailableBeforeAdminPIN \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testNewPaymentRouteUsesKnownNetworkDefaultWithoutLeakingFallbackFinality \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testReprovisioningSamePaymentRoutePreservesRaisedFinality \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testReleasedLegacyFlatConfirmationAboveAdjustmentCapRemainsOperational \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testV2AndCurrentCatalogsPreserveGrandfatheredConfirmationAboveAdjustmentCap \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testProfilesShareNetworkPolicyWhileStoredValuesRemainBackwardCompatible \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testDecodedCatalogNormalizesSameNetworkFinalityToGrandfatheredStrongestValue \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testProvisioningNewRouteInheritsGrandfatheredNetworkPolicy \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testAdminMayExplicitlyLowerGrandfatheredNetworkPolicyWithoutChangingInvoice \
             -only-testing:OPKTerminalAppTests/SettingsRecoveryAndSettlementGuardTests

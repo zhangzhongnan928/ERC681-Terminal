@@ -35,7 +35,10 @@ data class PaymentObservation(
     val isOverpaid: Boolean get() = observedRawUnits > expectedAmount.rawUnits
 }
 
-/** Produces one reorg-aware payment observation per poll; callers retain the previous result. */
+/**
+ * Produces one reorg-aware payment observation per poll; callers retain the previous result.
+ * One confirmation is the SDK default. Merchants can pass a higher per-network requirement.
+ */
 class PaymentObserver(private val chain: ReadOnlyChainClient) {
     @JvmOverloads
     fun observe(

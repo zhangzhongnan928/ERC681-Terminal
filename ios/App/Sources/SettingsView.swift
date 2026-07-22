@@ -19,6 +19,7 @@ struct SettingsView: View {
     @State private var manualVault = ""
     @State private var manualToken = ""
     @State private var manualChainID = TerminalKnownChainProfile.baseSepolia.chainID
+    @State private var confirmationBlocksDraft = 1
     @State private var isPresentingProvisioningScanner = false
     @State private var isConfirmingWalletReset = false
     @State private var isConfirmingUnreadableSettingsReset = false
@@ -96,6 +97,10 @@ struct SettingsView: View {
                TerminalKnownChainProfile.profile(for: selectedChainID) != nil {
                 manualChainID = selectedChainID
             }
+            syncConfirmationBlocksDraft()
+        }
+        .onChange(of: model.settings.selectedPaymentProfileID) {
+            syncConfirmationBlocksDraft()
         }
         .onDisappear { focusedField = nil }
     }
@@ -222,6 +227,12 @@ struct SettingsView: View {
                                 Text(profile.detail)
                                     .font(.caption.monospaced())
                                     .foregroundStyle(.secondary)
+                                Text(
+                                    "\(profile.confirmationBlocks) confirmation"
+                                        + (profile.confirmationBlocks == "1" ? "" : "s")
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                             }
                         }
                         .buttonStyle(.plain)
@@ -270,6 +281,45 @@ struct SettingsView: View {
                 LabeledContent("Symbol", value: model.settings.tokenSymbol)
                 LabeledContent("Decimals", value: model.settings.tokenDecimals)
                 LabeledContent("RPC", value: model.settings.rpcURL)
+                LabeledContent(
+                    "Confirmations",
+                    value: "\(model.settings.confirmationBlocks) block"
+                        + (model.settings.confirmationBlocks == "1" ? "" : "s")
+                )
+                if model.adminPINConfigured && model.adminUnlocked {
+                    Stepper(
+                        value: $confirmationBlocksDraft,
+                        in: selectedConfirmationBlockRange
+                    ) {
+                        LabeledContent(
+                            "Required for new payments",
+                            value: "\(confirmationBlocksDraft)"
+                        )
+                    }
+                    Button("Apply to all \(model.settings.displayedPaymentProfile.networkName) profiles") {
+                        guard let chainID = UInt64(model.settings.chainID) else { return }
+                        Task {
+                            await model.updateConfirmationBlocks(
+                                UInt64(confirmationBlocksDraft),
+                                for: chainID
+                            )
+                        }
+                    }
+                    .disabled(
+                        confirmationBlocksDraft == currentConfirmationBlocks
+                            || model.operationBusy
+                            || model.isProvisioning
+                            || model.isRefreshingReadiness
+                    )
+                    .accessibilityIdentifier("applyNetworkConfirmationPolicy")
+                    Text("One confirmation means the payment's inclusion block is enough. This setting applies to every configured payment profile on this network. Existing invoice and settlement snapshots keep the policy captured when they were created.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Create and unlock the local Admin PIN before changing this network's confirmation policy.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
 
@@ -563,6 +613,34 @@ struct SettingsView: View {
 
     private var selectedNativeCurrencyDecimals: UInt8 {
         model.settings.displayedPaymentProfile.nativeCurrencyDecimals
+    }
+
+    private var currentConfirmationBlocks: Int {
+        Int(model.settings.confirmationBlocks) ?? AppSettings.adjustableConfirmationBlockRange.lowerBound
+    }
+
+    private var selectedConfirmationBlockRange: ClosedRange<Int> {
+        let knownMinimum = UInt64(model.settings.chainID)
+            .flatMap(TerminalKnownChainProfile.profile(for:))?
+            .minimumConfirmationBlocks
+        let lowerBound = min(
+            max(
+                Int(knownMinimum ?? 1),
+                AppSettings.adjustableConfirmationBlockRange.lowerBound
+            ),
+            AppSettings.adjustableConfirmationBlockRange.upperBound
+        )
+        return lowerBound...AppSettings.adjustableConfirmationBlockRange.upperBound
+    }
+
+    private func syncConfirmationBlocksDraft() {
+        confirmationBlocksDraft = min(
+            max(
+                currentConfirmationBlocks,
+                selectedConfirmationBlockRange.lowerBound
+            ),
+            selectedConfirmationBlockRange.upperBound
+        )
     }
 
     private var removalConfirmationBinding: Binding<Bool> {

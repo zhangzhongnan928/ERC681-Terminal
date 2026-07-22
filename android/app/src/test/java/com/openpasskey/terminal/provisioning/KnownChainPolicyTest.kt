@@ -9,6 +9,14 @@ import java.io.File
 
 class KnownChainPolicyTest {
     @Test
+    fun baseSepoliaDefaultsToOneConfirmationAndAllowsMerchantIncreases() {
+        val profile = KnownChainPolicy.requireProfile(84532)
+
+        assertEquals(1, profile.minimumConfirmationBlocks)
+        assertEquals(1, profile.defaultConfirmationBlocks)
+    }
+
+    @Test
     fun enabledProfilesMatchSharedConformanceRegistryAndEveryCreate2Component() {
         val registry = JsonParser.parseString(conformanceFile().readText()).asJsonObject
         assertEquals(1, registry.get("schemaVersion").asInt)

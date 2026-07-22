@@ -557,6 +557,79 @@ class SettingsViewModel(
         provision(payload)
     }
 
+    fun updateNetworkConfirmationBlocks(chainId: Long, confirmationBlocks: Int) {
+        if (provisioningJob?.isActive == true) {
+            _state.value = _state.value.copy(
+                message = "Wait for provisioning to finish before changing confirmations.",
+                isError = true,
+            )
+            return
+        }
+        val policy = runCatching { KnownChainPolicy.requireProfile(chainId) }.getOrElse { error ->
+            _state.value = _state.value.copy(message = error.message, isError = true)
+            return
+        }
+        if (confirmationBlocks !in policy.minimumConfirmationBlocks..64) {
+            _state.value = _state.value.copy(
+                message = "Confirmations for ${policy.networkName} must be between " +
+                    "${policy.minimumConfirmationBlocks} and 64.",
+                isError = true,
+            )
+            return
+        }
+        val networkIsConfigured = chainConfig.snapshot().resolvedPaymentProfiles()
+            .any { it.chainId == chainId }
+        if (!networkIsConfigured) {
+            _state.value = _state.value.copy(
+                message = "${policy.networkName} is not configured on this terminal.",
+                isError = true,
+            )
+            return
+        }
+        val authorizationEpoch = runCatching {
+            requireNotNull(
+                requireAdminAuthorizationEpoch(
+                    adminPinStore.snapshot().configured,
+                    adminSession,
+                    "changing network confirmation requirements",
+                ),
+            )
+        }.getOrElse { error ->
+            _state.value = _state.value.copy(message = error.message, isError = true)
+            return
+        }
+        invalidateReadinessRefresh()
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    updateNetworkConfirmationBlocksExclusively(
+                        lifecycleGate = lifecycleGate,
+                        chainId = chainId,
+                        confirmationBlocks = confirmationBlocks,
+                        commitWithAuthorization = { commit ->
+                            adminSession.withAuthorization(authorizationEpoch, commit)
+                        },
+                        update = chainConfig::updateNetworkConfirmationBlocks,
+                    )
+                }
+                adminSession.lock()
+                _state.value = load(
+                    networkConfirmationUpdateSuccessMessage(
+                        policy.networkName,
+                        confirmationBlocks,
+                    ),
+                )
+                refreshOperatorStatus()
+            } catch (error: Exception) {
+                _state.value = load(
+                    error.message ?: "Unable to update network confirmations",
+                    isError = true,
+                )
+                refreshOperatorStatus()
+            }
+        }
+    }
+
     fun removePaymentProfile(profileId: String) {
         if (provisioningJob?.isActive == true) {
             _state.value = _state.value.copy(
@@ -926,13 +999,28 @@ internal fun paymentProfileRemovalSuccessMessage(
 internal fun chainConfigMigrationNoticeMessage(notice: ChainConfigMigrationNotice): String {
     val count = notice.adjustedConfirmationProfileIds.size
     val subject = if (count == 1) "1 existing payment profile" else "$count existing payment profiles"
-    return "Confirmation requirements for $subject were increased to the network minimum during " +
-        "this update. Terminal setup was preserved; review readiness before accepting payments."
+    return "Confirmation requirements for $subject were increased to the applicable network " +
+        "policy during this update. Terminal setup was preserved; review readiness before " +
+        "accepting payments."
 }
 
 internal fun awaitingGasReadinessMessage(networkPolicy: KnownChainProfile): String =
     "Authorization confirmed. Fund the operator with at least " +
         "${networkPolicy.minimumOperatorNativeReserveDisplay()}."
+
+internal fun networkConfirmationUpdateSuccessMessage(
+    networkName: String,
+    confirmationBlocks: Int,
+): String {
+    require(confirmationBlocks in 1..64)
+    val confirmations = if (confirmationBlocks == 1) {
+        "1 confirmation"
+    } else {
+        "$confirmationBlocks confirmations"
+    }
+    return "$networkName now requires $confirmations for all configured payment profiles on " +
+        "this network. Existing invoices keep their original policy."
+}
 
 internal suspend fun removePaymentProfileExclusively(
     lifecycleGate: TerminalLifecycleGate,
@@ -942,6 +1030,18 @@ internal suspend fun removePaymentProfileExclusively(
 ) = lifecycleGate.withExclusiveMutation {
     check(commitWithAuthorization { removeProfile(profileId) }) {
         "Unable to remove the payment profile"
+    }
+}
+
+internal suspend fun updateNetworkConfirmationBlocksExclusively(
+    lifecycleGate: TerminalLifecycleGate,
+    chainId: Long,
+    confirmationBlocks: Int,
+    commitWithAuthorization: ((() -> Boolean) -> Boolean),
+    update: (Long, Int) -> Boolean,
+) = lifecycleGate.withExclusiveMutation {
+    check(commitWithAuthorization { update(chainId, confirmationBlocks) }) {
+        "Unable to update network confirmations"
     }
 }
 

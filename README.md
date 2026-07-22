@@ -122,7 +122,13 @@ provisioning QR chooses an enabled chain but cannot supply or override its RPC t
 receiver implementation, vault runtime hash, protocol version, CREATE2 vector, finality floor,
 native-currency metadata, or minimum operator gas reserve. The shared pins are recorded in
 `conformance/opk-terminal-networks-v1.json`. The Swift and Kotlin payment-profile
-catalogs remain EVM-generic. Base Mainnet (`8453`) and any additional network remain app-disabled
+catalogs remain EVM-generic. Base Sepolia's compiled confirmation minimum and fresh-network default
+are both one block; the block containing the payment is confirmation one. In Admin/setup, a merchant
+administrator can choose the confirmation requirement for each enabled EVM network within its
+allowed range. Every profile on the same chain shares that network policy, and a new profile inherits
+the existing choice. The value is snapshotted into new invoices and settlement batches, while
+existing invoices retain their original requirement. The strict v1 provisioning QR does not carry
+or override this local policy. Base Mainnet (`8453`) and any additional network remain app-disabled
 until a frozen or multisig-governed, implementation-pinned OPK deployment and its CREATE2 vector
 are reviewed and shipped; arbitrary QR-provided network infrastructure remains unsupported.
 

@@ -76,6 +76,7 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
     var showReset by remember { mutableStateOf(false) }
     var showAdvancedManualSetup by remember { mutableStateOf(false) }
     var profilePendingRemoval by remember { mutableStateOf<TerminalPaymentProfile?>(null) }
+    var chainPendingConfirmationEdit by remember { mutableStateOf<Long?>(null) }
 
     if (showProvisioningScanner) {
         ProvisioningScannerDialog(
@@ -186,6 +187,23 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
             },
         )
     }
+    chainPendingConfirmationEdit?.let { chainId ->
+        val policy = KnownChainPolicy.requireProfile(chainId)
+        val current = state.paymentProfiles
+            .filter { it.chainId == chainId }
+            .maxOfOrNull { it.confirmationBlocks }
+            ?: policy.defaultConfirmationBlocks
+        ConfirmationBlocksDialog(
+            networkName = policy.networkName,
+            initialConfirmationBlocks = current,
+            minimumConfirmationBlocks = policy.minimumConfirmationBlocks,
+            onDismiss = { chainPendingConfirmationEdit = null },
+            onSave = { confirmations ->
+                chainPendingConfirmationEdit = null
+                viewModel.updateNetworkConfirmationBlocks(chainId, confirmations)
+            },
+        )
+    }
     if (showAdvancedManualSetup) {
         AdvancedManualSetupDialog(
             onDismiss = { showAdvancedManualSetup = false },
@@ -248,6 +266,11 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                         state = state,
                         onRemove = if (state.adminUnlocked) {
                             { profile -> profilePendingRemoval = profile }
+                        } else {
+                            null
+                        },
+                        onEditNetworkConfirmations = if (state.adminUnlocked) {
+                            { chainId -> chainPendingConfirmationEdit = chainId }
                         } else {
                             null
                         },
@@ -429,6 +452,7 @@ private fun OperatorWalletCard(
 private fun ConfigurationSummary(
     state: SettingsState,
     onRemove: ((TerminalPaymentProfile) -> Unit)?,
+    onEditNetworkConfirmations: ((Long) -> Unit)?,
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -454,6 +478,25 @@ private fun ConfigurationSummary(
                 SummaryLine("Protocol", profile.protocolVersion)
                 SummaryLine("Factory", profile.factoryAddress)
                 SummaryLine("Receiver implementation", profile.receiverImplementationAddress)
+                val confirmationLabel = if (profile.confirmationBlocks == 1) {
+                    "1 block confirmation"
+                } else {
+                    "${profile.confirmationBlocks} block confirmations"
+                }
+                SummaryLine(
+                    "Confirmations",
+                    confirmationLabel,
+                )
+                val firstProfileForNetwork = state.paymentProfiles
+                    .indexOfFirst { it.chainId == profile.chainId } == index
+                if (onEditNetworkConfirmations != null && firstProfileForNetwork) {
+                    TextButton(
+                        onClick = { onEditNetworkConfirmations(profile.chainId) },
+                        modifier = Modifier.align(Alignment.End),
+                    ) {
+                        Text("Edit ${profile.networkName} confirmations")
+                    }
+                }
                 if (onRemove != null) {
                     TextButton(
                         onClick = { onRemove(profile) },
@@ -468,11 +511,56 @@ private fun ConfigurationSummary(
                 }
             }
             Text(
-                "Profiles are chain-derived and read-only. Unlock Admin/setup to add or refresh a portal profile.",
+                "Network, vault, token, and deployment fields are chain-derived and read-only. " +
+                    "Unlock Admin/setup to change per-network confirmations or add a portal profile.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
     }
+}
+
+@Composable
+private fun ConfirmationBlocksDialog(
+    networkName: String,
+    initialConfirmationBlocks: Int,
+    minimumConfirmationBlocks: Int,
+    onDismiss: () -> Unit,
+    onSave: (Int) -> Unit,
+) {
+    var value by remember(initialConfirmationBlocks) {
+        mutableStateOf(initialConfirmationBlocks.toString())
+    }
+    val parsed = value.toIntOrNull()
+    val valid = parsed != null && parsed in minimumConfirmationBlocks..64
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("$networkName confirmations") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Choose the confirmation depth for all payment profiles on this network. " +
+                        "The setting applies to new invoices; existing invoices keep their original policy.",
+                )
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { value = it.filter(Char::isDigit).take(2) },
+                    label = { Text("Block confirmations") },
+                    supportingText = { Text("Allowed range: $minimumConfirmationBlocks–64") },
+                    isError = value.isNotEmpty() && !valid,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(requireNotNull(parsed)) },
+                enabled = valid,
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable

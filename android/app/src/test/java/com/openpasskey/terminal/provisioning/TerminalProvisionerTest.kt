@@ -76,6 +76,7 @@ class TerminalProvisionerTest {
             KnownChainPolicy.requireProfile(84532).defaultConfirmationBlocks,
             result.configuration.confirmationBlocks,
         )
+        assertEquals(1, result.configuration.confirmationBlocks)
         assertEquals("https://merchant-rpc.example", result.configuration.rpcUrl)
         assertEquals(1, result.configuration.paymentTokens.size)
         assertEquals("AUD", result.token.symbol)
@@ -97,7 +98,7 @@ class TerminalProvisionerTest {
     }
 
     @Test
-    fun reprovisioningSameProfilePreservesMerchantRaisedFinality() = runBlocking {
+    fun reprovisioningAndNewRoutesPreserveMerchantNetworkFinality() = runBlocking {
         var stored = provisionedPrevious(confirmationBlocks = 7)
         val provisioner = TerminalProvisioner(
             snapshot = { stored },
@@ -112,9 +113,16 @@ class TerminalProvisionerTest {
         )
 
         val result = provisioner.provision(CANONICAL, wallet()) { commit -> commit() }
+        val secondPayload = CANONICAL.replace(
+            "0x7ffba642bc902880a737cb1c18a4e9540879e211",
+            "0x8888888888888888888888888888888888888888",
+        )
+        val second = provisioner.provision(secondPayload, wallet()) { commit -> commit() }
 
         assertEquals(7, result.profile.confirmationBlocks)
-        assertEquals(7, result.configuration.confirmationBlocks)
+        assertEquals(7, second.profile.confirmationBlocks)
+        assertEquals(7, second.configuration.confirmationBlocks)
+        assertEquals(setOf(7), stored.resolvedPaymentProfiles().map { it.confirmationBlocks }.toSet())
         assertEquals(7, stored.selectedPaymentProfile()?.confirmationBlocks)
     }
 

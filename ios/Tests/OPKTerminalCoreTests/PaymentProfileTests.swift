@@ -274,6 +274,19 @@ final class PaymentProfileTests: XCTestCase {
         XCTAssertNil(TerminalKnownChainProfile.profile(for: 1))
     }
 
+    func testTerminalConfigurationDefaultsToOneConfirmation() throws {
+        let configuration = try makeConfiguration(
+            chainID: 84_532,
+            vault: "0x1111111111111111111111111111111111111111",
+            tokens: [try token(
+                "0x2222222222222222222222222222222222222222",
+                symbol: "USDC"
+            )]
+        )
+
+        XCTAssertEqual(configuration.confirmationPolicy.requiredBlocks, 1)
+    }
+
     private func makeProfile(
         chainID: UInt64,
         vault: String,
