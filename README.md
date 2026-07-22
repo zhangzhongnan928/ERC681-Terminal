@@ -82,9 +82,11 @@ Because the amount never participates in invoice-ID or receiver derivation, the 
 invoice identity synchronously while the cashier is still typing and warms only the IMMUTABLE
 configuration proof (contract code, linkage, token metadata) in the background. That immutable
 proof may then be reused for up to 60 seconds. Mutable facts are never prewarmed: token
-whitelist, operator authorization, gas reserve, and receiver freshness are re-proven live, at one
-fixed canonical head, on every QR publication, and the sale must reproduce the identical invoice
-ID and receiver from the stored identity before publishing it. While a QR is displayed, the
+whitelist, operator authorization, and receiver freshness are re-proven live inside ONE fixed
+canonical-head bracket on every QR publication, the operator's gas reserve is re-read live from
+the pending fee view (fee-readiness semantics, deliberately not a canonical proof), and the sale
+must reproduce the identical invoice ID and receiver from the stored identity before publishing
+it. While a QR is displayed, the
 sampler additionally reads the receiver's pending-tag balance beside the fixed-head proof as an
 advisory "payment detected" hint from the endpoint's pending/txpool view where supported: it
 never joins classification, confirmation cursors, or persisted state; it settles or is abandoned

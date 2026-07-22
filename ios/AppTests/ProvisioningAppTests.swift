@@ -3241,7 +3241,6 @@ final class ProvisioningAppTests: XCTestCase {
     }
 
     @MainActor
-    @MainActor
     func testPrewarmedIdentityAndImmutableProofAreConsumedByCreateSale() async throws {
         let savedSettings = AppPreferences.loadSettings()
         defer { AppPreferences.saveSettings(savedSettings) }
@@ -3272,7 +3271,7 @@ final class ProvisioningAppTests: XCTestCase {
             currentConfigurationValidation: { _ in try await probe.validate() },
             operatorStatusReader: { _, _ in await probe.status() },
             validationNow: { clock.now },
-            receiverFreshnessProver: { _, receiver, _ in
+            receiverFreshnessProver: { _, receiver, _, _ in
                 await probe.freshness(receiver: receiver)
             }
         )
@@ -3350,7 +3349,7 @@ final class ProvisioningAppTests: XCTestCase {
             currentConfigurationValidation: { _ in try await probe.validate() },
             operatorStatusReader: { _, _ in await probe.status() },
             validationNow: { clock.now },
-            receiverFreshnessProver: { _, receiver, _ in
+            receiverFreshnessProver: { _, receiver, _, _ in
                 await probe.freshness(receiver: receiver)
             },
             salePrewarmProofTTL: 60
@@ -3411,7 +3410,7 @@ final class ProvisioningAppTests: XCTestCase {
             adminPINStore: InMemoryAdminPINStore(pin: "123456"),
             currentConfigurationValidation: { _ in try await probe.validate() },
             operatorStatusReader: { _, _ in await probe.status() },
-            receiverFreshnessProver: { _, receiver, _ in
+            receiverFreshnessProver: { _, receiver, _, _ in
                 await probe.freshness(receiver: receiver)
             }
         )
@@ -3476,7 +3475,7 @@ final class ProvisioningAppTests: XCTestCase {
             adminPINStore: InMemoryAdminPINStore(pin: "123456"),
             currentConfigurationValidation: { _ in try await probe.validate() },
             operatorStatusReader: { _, _ in await probe.status() },
-            receiverFreshnessProver: { _, receiver, _ in
+            receiverFreshnessProver: { _, receiver, _, _ in
                 await probe.freshness(receiver: receiver)
             }
         )
@@ -3490,6 +3489,55 @@ final class ProvisioningAppTests: XCTestCase {
         XCTAssertNil(model.activeRequest, "No QR may be published for a de-whitelisted token")
         XCTAssertTrue(
             model.errorMessage?.contains("not whitelisted") == true,
+            "Unexpected error: \(model.errorMessage ?? "nil")"
+        )
+        XCTAssertTrue(
+            try container.mainContext.fetch(FetchDescriptor<StoredInvoice>()).isEmpty
+        )
+    }
+
+    @MainActor
+    func testCreateSaleRejectsRevokedOperatorAtPublication() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        let container = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let configured = try AppSettings().applying(
+            paymentConfiguration(
+                vault: "0x2222222222222222222222222222222222222222",
+                token: "0x3333333333333333333333333333333333333333",
+                symbol: "AUDM"
+            ),
+            boundTo: operatorAddress
+        )
+        // The separately fetched status still reports an authorized operator, but the
+        // fixed-head proof says authorization was revoked. The fixed-head fact must win.
+        let probe = SaleProofProbe(operatorAuthorized: false)
+        let model = AppModel(
+            container: container,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(address: operatorAddress),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            currentConfigurationValidation: { _ in try await probe.validate() },
+            operatorStatusReader: { _, _ in await probe.status() },
+            receiverFreshnessProver: { _, receiver, _, _ in
+                await probe.freshness(receiver: receiver)
+            }
+        )
+        model.settings = configured
+
+        await model.createSale(displayAmount: "10.50")
+
+        XCTAssertNil(model.activeRequest, "No QR may be published for a revoked operator")
+        XCTAssertTrue(
+            model.errorMessage?.contains("no longer authorizes") == true,
             "Unexpected error: \(model.errorMessage ?? "nil")"
         )
         XCTAssertTrue(
@@ -3777,10 +3825,16 @@ private actor SaleProofProbe {
     private(set) var freshnessReceivers = [EthereumAddress]()
     private let failingValidationCalls: Int
     private let tokenWhitelisted: Bool
+    private let operatorAuthorized: Bool
 
-    init(failingValidationCalls: Int = 0, tokenWhitelisted: Bool = true) {
+    init(
+        failingValidationCalls: Int = 0,
+        tokenWhitelisted: Bool = true,
+        operatorAuthorized: Bool = true
+    ) {
         self.failingValidationCalls = failingValidationCalls
         self.tokenWhitelisted = tokenWhitelisted
+        self.operatorAuthorized = operatorAuthorized
     }
 
     func validate() throws {
@@ -3809,7 +3863,8 @@ private actor SaleProofProbe {
             blockHash: .zero,
             receiverCode: Data(),
             tokenBalance: .zero,
-            tokenWhitelisted: tokenWhitelisted
+            tokenWhitelisted: tokenWhitelisted,
+            operatorAuthorized: operatorAuthorized
         )
     }
 }

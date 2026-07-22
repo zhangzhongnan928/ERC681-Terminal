@@ -85,8 +85,11 @@ pending read degrades to a `nil` hint without failing the canonical sample. `Pay
 encodes the cadence policy — accelerate to the block cadence only inside a bounded window after
 funds visibly progress (a new or increased hint, a balance increase, or confirmation progress),
 falling back to the default cadence for static partial balances and stuck pending transactions.
-`ReceiverFreshnessValidator` additionally proves the vault's live token whitelist at the same
-fixed head as the receiver reads, so QR publication never trusts a cached whitelist fact. Once
+`ReceiverFreshnessValidator` additionally proves the vault's live token whitelist AND the
+terminal operator's live vault authorization at the same fixed head as the receiver reads, so QR
+publication never trusts a cached or separately anchored authorization fact. The shared
+per-origin request limiter is cancellation-aware: a cancelled waiter leaves the queue and throws
+immediately instead of remaining parked behind saturated slow requests. Once
 cashier work is requested, the native apps defer new background RPC units. One already-started
 bounded unit may finish or overlap without owning the cashier queue, while the shared concurrency
 limit prevents an RPC burst. Normal payment polling is five seconds and automatic recovery runs on

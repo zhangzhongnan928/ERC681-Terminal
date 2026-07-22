@@ -112,6 +112,7 @@ final class AppModel: ObservableObject {
     private let receiverFreshnessProver: @Sendable (
         TerminalConfiguration,
         EthereumAddress,
+        EthereumAddress,
         EthereumAddress
     ) async throws -> ReceiverFreshnessProof
     private let salePrewarmProofTTL: TimeInterval
@@ -160,6 +161,7 @@ final class AppModel: ObservableObject {
         receiverFreshnessProver: (@Sendable (
             TerminalConfiguration,
             EthereumAddress,
+            EthereumAddress,
             EthereumAddress
         ) async throws -> ReceiverFreshnessProof)? = nil,
         salePrewarmProofTTL: TimeInterval = 60
@@ -205,7 +207,7 @@ final class AppModel: ObservableObject {
         self.paymentMonitorAcceleratedPollIntervalNanoseconds =
             paymentMonitorAcceleratedPollIntervalNanoseconds
         self.receiverFreshnessProver = receiverFreshnessProver
-            ?? { configuration, receiver, token in
+            ?? { configuration, receiver, token, operatorAddress in
                 let rpc = try EthereumRPCClientPool.shared.client(
                     for: configuration.rpcEndpoints[0]
                 )
@@ -213,6 +215,7 @@ final class AppModel: ObservableObject {
                     receiver: receiver,
                     token: token,
                     vault: configuration.deployment.vault,
+                    operatorAddress: operatorAddress,
                     expectedChainID: configuration.chainID
                 )
             }
@@ -685,7 +688,8 @@ final class AppModel: ObservableObject {
             async let freshnessProof = receiverFreshnessProver(
                 configuration,
                 request.receiver,
-                token.address
+                token.address,
+                operatorAddress
             )
             let concurrentProofs: (Void, OperatorChainStatus, ReceiverFreshnessProof)
             do {
@@ -720,6 +724,15 @@ final class AppModel: ObservableObject {
             }
             guard freshness.tokenWhitelisted else {
                 throw ConfigurationValidationError.tokenNotWhitelisted(token.address)
+            }
+            // Authorization is gated on the fixed-head proof, not on the separately fetched
+            // operator status: the freshness proof brackets whitelist, authorization, and
+            // receiver facts inside ONE canonical-identity check, so a reorg during sampling
+            // cannot leave authorization anchored to a different block. The status read above
+            // still feeds readiness UI and the pending-view gas check, which is fee-readiness
+            // semantics and deliberately not a canonical proof.
+            guard freshness.operatorAuthorized else {
+                throw AppSafetyError.operatorAuthorizationRevoked
             }
             guard freshness.receiverCode.isEmpty else {
                 throw AppSafetyError.receiverAlreadyDeployed
@@ -2542,6 +2555,7 @@ private enum AppSafetyError: LocalizedError {
     case operatorResetBlockedByIssuedInvoice
     case receiverAlreadyDeployed
     case receiverAlreadyFunded
+    case operatorAuthorizationRevoked
     case corruptInvoiceSnapshot
     case snapshotChainMismatch(expected: UInt64, actual: UInt64)
 
@@ -2567,6 +2581,8 @@ private enum AppSafetyError: LocalizedError {
             "The newly derived receiver already has contract code. No QR was created."
         case .receiverAlreadyFunded:
             "The newly derived receiver already has a token balance. No QR was created."
+        case .operatorAuthorizationRevoked:
+            "The vault no longer authorizes this terminal operator at the proof head. No QR was created."
         case .corruptInvoiceSnapshot:
             "A stored invoice no longer matches its saved network configuration. It was not monitored."
         case let .snapshotChainMismatch(expected, actual):

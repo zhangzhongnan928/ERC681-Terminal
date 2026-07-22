@@ -113,19 +113,37 @@ public struct ReceiverFreshnessProof: Hashable, Sendable {
     /// receiver reads. Mutable authorization facts must never be served from a cached
     /// configuration proof at QR-publication time.
     public let tokenWhitelisted: Bool
+    /// Live vault authorization for the terminal operator (isOperator, or vault owner), proven
+    /// at the same fixed head and bracketed by the same canonical-identity check as every other
+    /// read in this proof. A reorg during sampling fails the whole proof closed instead of
+    /// leaving authorization anchored to a different block than the receiver facts.
+    public let operatorAuthorized: Bool
 
     public init(
         blockNumber: UInt64,
         blockHash: Bytes32,
         receiverCode: Data,
         tokenBalance: UInt256,
-        tokenWhitelisted: Bool
+        tokenWhitelisted: Bool,
+        operatorAuthorized: Bool
     ) {
         self.blockNumber = blockNumber
         self.blockHash = blockHash
         self.receiverCode = receiverCode
         self.tokenBalance = tokenBalance
         self.tokenWhitelisted = tokenWhitelisted
+        self.operatorAuthorized = operatorAuthorized
+    }
+
+    /// Canonical `owner()` words are 32 bytes with 12 leading zero bytes. Anything else is
+    /// treated as not-matching rather than a proof failure, because `isOperator` alone can
+    /// still authorize publication.
+    static func ownerMatches(_ ownerData: Data, operatorAddress: EthereumAddress) -> Bool {
+        guard ownerData.count == 32,
+              ownerData.prefix(12).allSatisfy({ $0 == 0 }),
+              let owner = try? EthereumAddress(data: ownerData.suffix(20))
+        else { return false }
+        return owner == operatorAddress
     }
 }
 
@@ -143,12 +161,18 @@ public struct ReceiverFreshnessValidator: Sendable {
         receiver: EthereumAddress,
         token: EthereumAddress,
         vault: EthereumAddress,
+        operatorAddress: EthereumAddress,
         expectedChainID: UInt64
     ) async throws -> ReceiverFreshnessProof {
         let whitelistCallData = ABI.encodeCall(
             selector: ABI.isPaymentTokenSelector,
             words: [ABI.word(token)]
         )
+        let isOperatorCallData = ABI.encodeCall(
+            selector: ABI.isOperatorSelector,
+            words: [ABI.word(operatorAddress)]
+        )
+        let ownerCallData = ABI.encodeCall(selector: ABI.ownerSelector)
         if let batchRPC = rpc as? any EthereumBatchReadRPC {
             let anchor = try await batchRPC.batch([.chainID, .latestBlockIdentity])
             guard anchor.count == 2,
@@ -173,11 +197,15 @@ public struct ReceiverFreshnessValidator: Sendable {
                     block: block
                 ),
                 .call(address: vault, data: whitelistCallData, block: block),
+                .call(address: vault, data: isOperatorCallData, block: block),
+                .call(address: vault, data: ownerCallData, block: block),
             ])
-            guard proof.count == 3,
+            guard proof.count == 5,
                   case let .data(receiverCode) = proof[0],
                   case let .data(balanceData) = proof[1],
-                  case let .data(whitelistData) = proof[2]
+                  case let .data(whitelistData) = proof[2],
+                  case let .data(isOperatorData) = proof[3],
+                  case let .data(ownerData) = proof[4]
             else { throw RPCDecodingError.invalidData("receiver freshness proof") }
             let final = try await batchRPC.batch([.canonicalBlockHash(head)])
             guard final.count == 1, case let .blockHash(finalBlockHash) = final[0] else {
@@ -191,7 +219,12 @@ public struct ReceiverFreshnessValidator: Sendable {
                 blockHash: finalBlockHash,
                 receiverCode: receiverCode,
                 tokenBalance: try ABI.decodeUInt256(balanceData),
-                tokenWhitelisted: try ABI.decodeBool(whitelistData)
+                tokenWhitelisted: try ABI.decodeBool(whitelistData),
+                operatorAuthorized: (try ABI.decodeBool(isOperatorData))
+                    || ReceiverFreshnessProof.ownerMatches(
+                        ownerData,
+                        operatorAddress: operatorAddress
+                    )
             )
         }
 
@@ -216,7 +249,9 @@ public struct ReceiverFreshnessValidator: Sendable {
             block: block
         )
         async let whitelistData = rpc.call(to: vault, data: whitelistCallData, block: block)
-        let reads = try await (receiverCode, balanceData, whitelistData)
+        async let isOperatorData = rpc.call(to: vault, data: isOperatorCallData, block: block)
+        async let ownerData = rpc.call(to: vault, data: ownerCallData, block: block)
+        let reads = try await (receiverCode, balanceData, whitelistData, isOperatorData, ownerData)
         let finalBlockHash = try await rpc.canonicalBlockHash(at: resolvedHead)
         guard finalBlockHash == initialBlockHash else {
             throw PaymentMonitorError.canonicalBlockChanged(blockNumber: resolvedHead)
@@ -226,7 +261,12 @@ public struct ReceiverFreshnessValidator: Sendable {
             blockHash: finalBlockHash,
             receiverCode: reads.0,
             tokenBalance: try ABI.decodeUInt256(reads.1),
-            tokenWhitelisted: try ABI.decodeBool(reads.2)
+            tokenWhitelisted: try ABI.decodeBool(reads.2),
+            operatorAuthorized: (try ABI.decodeBool(reads.3))
+                || ReceiverFreshnessProof.ownerMatches(
+                    reads.4,
+                    operatorAddress: operatorAddress
+                )
         )
     }
 }
@@ -242,7 +282,10 @@ public struct PaymentPollCadence: Sendable {
 
     private var acceleratedUntil: Date?
     private var lastBalance: UInt256?
-    private var lastHint: UInt256?
+    /// High-water mark of every nonzero hint ever seen. A flaky pending endpoint that
+    /// intermittently returns `nil` must not let the SAME stuck transaction count as new
+    /// progress each time it reappears, so this value never decreases.
+    private var highestHint: UInt256 = .zero
     private var lastConfirmations: UInt64?
 
     public init() {}
@@ -257,7 +300,9 @@ public struct PaymentPollCadence: Sendable {
             acceleratedUntil = now.addingTimeInterval(Self.accelerationWindow)
         }
         lastBalance = observation.balance
-        lastHint = observation.pendingBalanceHint
+        if let hint = observation.pendingBalanceHint, hint > highestHint {
+            highestHint = hint
+        }
         if case let .confirming(_, confirmations, _) = observation.status {
             lastConfirmations = confirmations
         } else {
@@ -278,7 +323,7 @@ public struct PaymentPollCadence: Sendable {
         if observation.balance > (lastBalance ?? .zero) { return true }
         if let hint = observation.pendingBalanceHint,
            !hint.isZero,
-           hint > (lastHint ?? .zero) {
+           hint > highestHint {
             return true
         }
         if case let .confirming(_, confirmations, required) = observation.status,

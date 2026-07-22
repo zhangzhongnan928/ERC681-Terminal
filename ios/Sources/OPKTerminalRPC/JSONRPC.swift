@@ -111,9 +111,14 @@ public enum RPCRequestDeadline {
 public actor RPCOriginRequestLimiter {
     public static let shared = RPCOriginRequestLimiter()
 
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, any Error>
+    }
+
     private struct OriginState {
         var active = 0
-        var waiters = [CheckedContinuation<Void, Never>]()
+        var waiters = [Waiter]()
     }
 
     private let maximumConcurrentRequests: Int
@@ -128,23 +133,47 @@ public actor RPCOriginRequestLimiter {
         operation: @Sendable () async throws -> Value
     ) async throws -> Value {
         let origin = Self.originKey(endpoint)
-        await acquire(origin)
+        try await acquire(origin)
         defer { release(origin) }
-        try Task.checkCancellation()
         return try await operation()
     }
 
-    private func acquire(_ origin: String) async {
-        var state = states[origin] ?? OriginState()
-        if state.active < maximumConcurrentRequests {
-            state.active += 1
-            states[origin] = state
-            return
+    /// Waiting is cancellation-aware: a cancelled waiter leaves the queue immediately and
+    /// throws, so an abandoned advisory read or a cancelled background unit can never remain
+    /// parked behind saturated slow requests. Only a waiter that actually received the permit
+    /// reaches the caller's release path.
+    private func acquire(_ origin: String) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (
+                continuation: CheckedContinuation<Void, any Error>
+            ) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                var state = states[origin] ?? OriginState()
+                if state.active < maximumConcurrentRequests {
+                    state.active += 1
+                    states[origin] = state
+                    continuation.resume(returning: ())
+                    return
+                }
+                state.waiters.append(Waiter(id: id, continuation: continuation))
+                states[origin] = state
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(origin: origin, id: id) }
         }
-        await withCheckedContinuation { continuation in
-            state.waiters.append(continuation)
-            states[origin] = state
-        }
+    }
+
+    private func cancelWaiter(origin: String, id: UUID) {
+        guard var state = states[origin],
+              let index = state.waiters.firstIndex(where: { $0.id == id })
+        else { return }
+        let waiter = state.waiters.remove(at: index)
+        states[origin] = state
+        waiter.continuation.resume(throwing: CancellationError())
     }
 
     private func release(_ origin: String) {
@@ -152,7 +181,7 @@ public actor RPCOriginRequestLimiter {
         if !state.waiters.isEmpty {
             let next = state.waiters.removeFirst()
             states[origin] = state
-            next.resume()
+            next.continuation.resume(returning: ())
         } else {
             state.active -= 1
             if state.active == 0 {

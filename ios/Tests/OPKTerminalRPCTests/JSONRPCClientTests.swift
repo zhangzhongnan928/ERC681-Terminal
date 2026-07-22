@@ -216,6 +216,45 @@ final class JSONRPCClientTests: XCTestCase {
         }
     }
 
+    func testLimiterCancelledWaiterLeavesTheQueueImmediately() async throws {
+        let limiter = RPCOriginRequestLimiter(maximumConcurrentRequests: 1)
+        let endpoint = URL(string: "https://limiter.invalid/rpc")!
+        let holder = Task {
+            try await limiter.withPermit(for: endpoint) {
+                try await Task.sleep(for: .seconds(10))
+            }
+        }
+        try await Task.sleep(for: .milliseconds(150))
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        let waiter = Task {
+            try await limiter.withPermit(for: endpoint) { }
+        }
+        try await Task.sleep(for: .milliseconds(150))
+        waiter.cancel()
+        do {
+            _ = try await waiter.value
+            XCTFail("Expected the cancelled waiter to throw instead of waiting for the permit")
+        } catch {
+            XCTAssertTrue(
+                error is CancellationError,
+                "Unexpected error: \(error)"
+            )
+        }
+        let elapsed = clock.now - start
+        XCTAssertLessThan(
+            elapsed,
+            .seconds(5),
+            "A cancelled waiter must not remain parked behind the saturated permit holder"
+        )
+
+        holder.cancel()
+        _ = try? await holder.value
+        // The slot released by the holder must remain grantable after the cancelled waiter left.
+        try await limiter.withPermit(for: endpoint) { }
+    }
+
     func testEndpointPoolReusesClientIdentityWithoutSharingAcrossEndpoints() throws {
         let pool = EthereumRPCClientPool(transport: QueueTransport([]))
         let firstEndpoint = URL(string: "https://rpc.example")!

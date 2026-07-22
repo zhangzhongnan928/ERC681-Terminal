@@ -159,6 +159,7 @@ jobs:
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testStalePrewarmedProofIsReprovenAndCreateSaleStillSucceeds \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testPrewarmFailureIsSilentAndCreateSaleRunsFreshProofs \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testCreateSaleRejectsDewhitelistedTokenAtPublication \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testCreateSaleRejectsRevokedOperatorAtPublication \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testFirstRunWalletCreationRemainsAvailableBeforeAdminPIN \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testNewPaymentRouteUsesKnownNetworkDefaultWithoutLeakingFallbackFinality \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testReprovisioningSamePaymentRoutePreservesRaisedFinality \

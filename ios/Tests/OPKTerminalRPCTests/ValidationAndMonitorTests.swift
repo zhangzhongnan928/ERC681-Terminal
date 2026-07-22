@@ -312,6 +312,7 @@ private actor BatchedPaymentRPC: EthereumBatchReadRPC {
     let pendingBalance: UInt256?
     let pendingStalls: Bool
     let tokenWhitelisted: Bool
+    let operatorIsAuthorized: Bool
 
     init(
         chainID: UInt64,
@@ -320,7 +321,8 @@ private actor BatchedPaymentRPC: EthereumBatchReadRPC {
         replaceFinalHeadHash: Bool = false,
         pendingBalance: UInt256? = nil,
         pendingStalls: Bool = false,
-        tokenWhitelisted: Bool = true
+        tokenWhitelisted: Bool = true,
+        operatorIsAuthorized: Bool = true
     ) {
         reportedChainID = chainID
         self.token = token
@@ -329,6 +331,7 @@ private actor BatchedPaymentRPC: EthereumBatchReadRPC {
         self.pendingBalance = pendingBalance
         self.pendingStalls = pendingStalls
         self.tokenWhitelisted = tokenWhitelisted
+        self.operatorIsAuthorized = operatorIsAuthorized
     }
 
     func batch(_ requests: [EthereumReadBatchRequest]) async throws -> [EthereumReadBatchResult] {
@@ -337,44 +340,58 @@ private actor BatchedPaymentRPC: EthereumBatchReadRPC {
         maximumInFlightBatches = max(maximumInFlightBatches, inFlightBatches)
         try await Task.sleep(for: .milliseconds(5))
         inFlightBatches -= 1
-        return try requests.map { request in
+        var results = [EthereumReadBatchResult]()
+        results.reserveCapacity(requests.count)
+        for request in requests {
             switch request {
             case .chainID:
-                return .quantity(reportedChainID)
+                results.append(.quantity(reportedChainID))
             case .blockNumber:
-                return .quantity(100)
+                results.append(.quantity(100))
             case .latestBlockIdentity:
-                return .blockIdentity(number: 100, hash: fixtureBlockHash(100))
+                results.append(.blockIdentity(number: 100, hash: fixtureBlockHash(100)))
             case let .canonicalBlockHash(block):
                 if block == 100 {
                     headHashReads += 1
                     let fork: UInt64 = replaceFinalHeadHash ? 1 : 0
-                    return .blockHash(fixtureBlockHash(block, fork: fork))
+                    results.append(.blockHash(fixtureBlockHash(block, fork: fork)))
+                } else {
+                    results.append(.blockHash(fixtureBlockHash(block)))
                 }
-                return .blockHash(fixtureBlockHash(block))
             case let .call(address, data, block):
                 let selector = Data(data.prefix(4))
                 if selector == ABI.isPaymentTokenSelector {
                     guard block == .number(100) else { throw URLError(.badServerResponse) }
-                    return .data(ABI.word(tokenWhitelisted ? UInt256(1) : UInt256(0)))
-                }
-                guard address == token, selector == ABI.balanceOfSelector
-                else { throw URLError(.badServerResponse) }
-                if block == .pending {
-                    pendingBalanceReads += 1
-                    if pendingStalls {
-                        try await Task.sleep(for: .seconds(60))
+                    results.append(.data(ABI.word(tokenWhitelisted ? UInt256(1) : UInt256(0))))
+                } else if selector == ABI.isOperatorSelector {
+                    guard block == .number(100) else { throw URLError(.badServerResponse) }
+                    results.append(.data(ABI.word(operatorIsAuthorized ? UInt256(1) : UInt256(0))))
+                } else if selector == ABI.ownerSelector {
+                    guard block == .number(100) else { throw URLError(.badServerResponse) }
+                    // A fixed non-matching owner: authorization in these fixtures is decided by
+                    // the isOperator flag alone.
+                    results.append(.data(ABI.word(UInt256(0xBEEF))))
+                } else {
+                    guard address == token, selector == ABI.balanceOfSelector
+                    else { throw URLError(.badServerResponse) }
+                    if block == .pending {
+                        pendingBalanceReads += 1
+                        if pendingStalls {
+                            try await Task.sleep(for: .seconds(60))
+                        }
+                        guard let pendingBalance else { throw URLError(.badServerResponse) }
+                        results.append(.data(ABI.word(pendingBalance)))
+                    } else {
+                        guard block == .number(100) else { throw URLError(.badServerResponse) }
+                        results.append(.data(ABI.word(balance)))
                     }
-                    guard let pendingBalance else { throw URLError(.badServerResponse) }
-                    return .data(ABI.word(pendingBalance))
                 }
-                guard block == .number(100) else { throw URLError(.badServerResponse) }
-                return .data(ABI.word(balance))
             case let .code(_, block):
                 guard block == .number(100) else { throw URLError(.badServerResponse) }
-                return .data(Data())
+                results.append(.data(Data()))
             }
         }
+        return results
     }
 
     func chainID() async throws -> UInt64 { reportedChainID }
@@ -994,6 +1011,32 @@ final class ValidationAndMonitorTests: XCTestCase {
             "Confirmation progress inside an unfinished window accelerates"
         )
 
+        // A flaky pending endpoint that flaps 400 -> nil -> 400 must not count the SAME stuck
+        // transaction as new progress after its window expired.
+        var flapping = PaymentPollCadence()
+        _ = flapping.interval(
+            after: observation(.waiting, hint: UInt256(400)),
+            defaultInterval: defaultInterval,
+            acceleratedInterval: accelerated,
+            now: base
+        )
+        _ = flapping.interval(
+            after: observation(.waiting),
+            defaultInterval: defaultInterval,
+            acceleratedInterval: accelerated,
+            now: base.addingTimeInterval(31)
+        )
+        XCTAssertEqual(
+            flapping.interval(
+                after: observation(.waiting, hint: UInt256(400)),
+                defaultInterval: defaultInterval,
+                acceleratedInterval: accelerated,
+                now: base.addingTimeInterval(36)
+            ),
+            defaultInterval,
+            "A reappearing unchanged hint is not new progress"
+        )
+
         var terminal = PaymentPollCadence()
         XCTAssertEqual(
             terminal.interval(
@@ -1019,6 +1062,180 @@ final class ValidationAndMonitorTests: XCTestCase {
         )
     }
 
+    func testObservationStreamRetriesAvailabilityFailuresAndCanonicalReplacement() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 1)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+        let failures: [PaymentStreamFailure] = [
+            .http(429),
+            .http(503),
+            .network(.networkConnectionLost),
+            .canonicalReplacement,
+        ]
+
+        for failure in failures {
+            let rpc = RetryingPaymentRPC(failure: failure, token: tokenAddress)
+            let monitor = PaymentMonitor(
+                rpc: rpc,
+                confirmationPolicy: configuration.confirmationPolicy,
+                pollIntervalNanoseconds: 1_000_000
+            )
+            var iterator = monitor.observations(for: request).makeAsyncIterator()
+
+            let observation = try await iterator.next()
+
+            XCTAssertEqual(observation?.status, .paid(received: UInt256(1_000)))
+            let attempts = await rpc.attempts()
+            XCTAssertEqual(attempts, 2, "Expected one retry for \(failure)")
+        }
+    }
+
+    func testObservationStreamKeepsWrongChainAndHTTP400Terminal() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 1)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+
+        let wrongChainRPC = RetryingPaymentRPC(
+            failure: .wrongChain,
+            token: tokenAddress
+        )
+        var wrongChainIterator = PaymentMonitor(
+            rpc: wrongChainRPC,
+            confirmationPolicy: configuration.confirmationPolicy,
+            pollIntervalNanoseconds: 1_000_000
+        ).observations(for: request).makeAsyncIterator()
+        do {
+            _ = try await wrongChainIterator.next()
+            XCTFail("Expected wrong-chain failure to terminate monitoring")
+        } catch let PaymentMonitorError.wrongChain(expected, actual) {
+            XCTAssertEqual(expected, configuration.chainID)
+            XCTAssertEqual(actual, 1)
+        }
+        let wrongChainAttempts = await wrongChainRPC.attempts()
+        XCTAssertEqual(wrongChainAttempts, 1)
+
+        let badRequestRPC = RetryingPaymentRPC(failure: .http(400), token: tokenAddress)
+        var badRequestIterator = PaymentMonitor(
+            rpc: badRequestRPC,
+            confirmationPolicy: configuration.confirmationPolicy,
+            pollIntervalNanoseconds: 1_000_000
+        ).observations(for: request).makeAsyncIterator()
+        do {
+            _ = try await badRequestIterator.next()
+            XCTFail("Expected HTTP 400 to terminate monitoring")
+        } catch let JSONRPCError.invalidHTTPStatus(status) {
+            XCTAssertEqual(status, 400)
+        }
+        let badRequestAttempts = await badRequestRPC.attempts()
+        XCTAssertEqual(badRequestAttempts, 1)
+    }
+
+    func testObservationStreamClearsInheritedExpiredAbsoluteDeadline() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 1)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+        let rpc = RetryingPaymentRPC(
+            failure: .inheritedDeadline,
+            token: tokenAddress
+        )
+        let monitor = PaymentMonitor(
+            rpc: rpc,
+            confirmationPolicy: configuration.confirmationPolicy,
+            pollIntervalNanoseconds: 1_000_000
+        )
+
+        let observation = try await RPCRequestDeadline.withDeadline(
+            after: .milliseconds(1)
+        ) {
+            try await Task.sleep(for: .milliseconds(5))
+            var iterator = monitor.observations(for: request).makeAsyncIterator()
+            return try await iterator.next()
+        }
+
+        XCTAssertEqual(observation?.status, .paid(received: UInt256(1_000)))
+        let attempts = await rpc.attempts()
+        XCTAssertEqual(attempts, 1)
+    }
+
+    func testPaymentMonitorRetryPolicyIsNarrowAndDefaultsToFiveSeconds() throws {
+        let rpc = FixtureRPC(
+            chainID: 84_532,
+            factory: factory,
+            implementation: implementation,
+            vault: vault,
+            token: tokenAddress
+        )
+        XCTAssertEqual(
+            PaymentMonitor(
+                rpc: rpc,
+                confirmationPolicy: .init(requiredBlocks: 1)
+            ).pollIntervalNanoseconds,
+            5_000_000_000
+        )
+
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(RPCRequestDeadlineError.expired))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(
+            PaymentMonitorError.canonicalBlockChanged(blockNumber: 100)
+        ))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(URLError(.notConnectedToInternet)))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.invalidHTTPStatus(408)))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.invalidHTTPStatus(425)))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.invalidHTTPStatus(429)))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.invalidHTTPStatus(500)))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.server(
+            RPCServerError(code: -32_005, message: "limit exceeded")
+        )))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.server(
+            RPCServerError(code: -32_016, message: "over rate limit")
+        )))
+
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(CancellationError()))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(URLError(.cancelled)))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(
+            PaymentMonitorError.wrongChain(expected: 84_532, actual: 1)
+        ))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(
+            PaymentMonitorError.requestChainMismatch(expected: 1, request: 84_532)
+        ))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(
+            PaymentMonitorError.mixedRequestChains
+        ))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.invalidHTTPStatus(400)))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.invalidHTTPStatus(401)))
+        XCTAssertTrue(PaymentMonitorRetryPolicy.shouldRetry(
+            JSONRPCError.remoteResponseDecodeFailure
+        ))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.malformedResponse))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.mismatchedID))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(
+            JSONRPCError.batchLimitExceeded(maximum: 10)
+        ))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(
+            RPCDecodingError.invalidData("invalid balance")
+        ))
+        XCTAssertFalse(PaymentMonitorRetryPolicy.shouldRetry(JSONRPCError.server(
+            RPCServerError(code: -32_000, message: "execution reverted")
+        )))
+    }
+
     func testReceiverFreshnessUsesAnchoredFixedBlockAndRejectsReorg() async throws {
         let stableRPC = BatchedPaymentRPC(
             chainID: 84_532,
@@ -1029,6 +1246,7 @@ final class ValidationAndMonitorTests: XCTestCase {
             receiver: vault,
             token: tokenAddress,
             vault: vault,
+            operatorAddress: vault,
             expectedChainID: 84_532
         )
         XCTAssertEqual(proof.blockNumber, 100)
@@ -1036,8 +1254,12 @@ final class ValidationAndMonitorTests: XCTestCase {
         XCTAssertTrue(proof.receiverCode.isEmpty)
         XCTAssertTrue(proof.tokenBalance.isZero)
         XCTAssertTrue(proof.tokenWhitelisted, "The live whitelist fact rides in the same fixed head")
+        XCTAssertTrue(
+            proof.operatorAuthorized,
+            "The live authorization fact rides in the same fixed head"
+        )
         let stableBatches = await stableRPC.batches
-        XCTAssertEqual(stableBatches.map(\.count), [2, 3, 1])
+        XCTAssertEqual(stableBatches.map(\.count), [2, 5, 1])
         XCTAssertEqual(stableBatches[0], [.chainID, .latestBlockIdentity])
         XCTAssertTrue(stableBatches[1].allSatisfy { request in
             switch request {
@@ -1057,6 +1279,7 @@ final class ValidationAndMonitorTests: XCTestCase {
                 receiver: vault,
                 token: tokenAddress,
                 vault: vault,
+                operatorAddress: vault,
                 expectedChainID: 84_532
             )
             XCTFail("Expected receiver freshness to reject a canonical replacement")
