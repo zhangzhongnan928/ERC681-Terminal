@@ -2054,6 +2054,55 @@ final class ProvisioningAppTests: XCTestCase {
         XCTAssertFalse(invoice.shouldPresentQRCode)
     }
 
+    func testSettledInvoiceStaysClosedAfterConfirmedLateTopUp() throws {
+        let invoice = try storedInvoice(confirmationBlocks: 1)
+        let request = try invoice.paymentRequest()
+        invoice.statusLabel = "Settled"
+        invoice.confirmedCumulativeSweptAmount = request.expectedAmount.decimalString
+        invoice.cumulativeSweptAtObservation = request.expectedAmount.decimalString
+
+        let lateBalance = UInt256(25)
+        try invoice.apply(
+            observation(
+                invoiceID: request.invoiceID,
+                balance: lateBalance,
+                block: 102
+            ),
+            cumulativeConfirmedSweptAmount: request.expectedAmount
+        )
+
+        XCTAssertEqual(invoice.observedBalance, lateBalance.decimalString)
+        XCTAssertEqual(invoice.statusLabel, "Settled")
+        XCTAssertEqual(invoice.historyStatusLabel, "Settled")
+        XCTAssertFalse(invoice.shouldPresentQRCode)
+        XCTAssertTrue(invoice.hasConfirmedSweepableFunds)
+    }
+
+    func testPartiallySettledInvoiceStaysClosedAfterConfirmedLateTopUp() throws {
+        let invoice = try storedInvoice(confirmationBlocks: 1)
+        let request = try invoice.paymentRequest()
+        let partialCumulative = UInt256(400)
+        let remainingBalance = UInt256(600)
+        invoice.statusLabel = "Partially settled"
+        invoice.confirmedCumulativeSweptAmount = partialCumulative.decimalString
+        invoice.cumulativeSweptAtObservation = partialCumulative.decimalString
+
+        try invoice.apply(
+            observation(
+                invoiceID: request.invoiceID,
+                balance: remainingBalance,
+                block: 102
+            ),
+            cumulativeConfirmedSweptAmount: partialCumulative
+        )
+
+        XCTAssertEqual(invoice.observedBalance, remainingBalance.decimalString)
+        XCTAssertEqual(invoice.statusLabel, "Partially settled")
+        XCTAssertEqual(invoice.historyStatusLabel, "Partially settled")
+        XCTAssertFalse(invoice.shouldPresentQRCode)
+        XCTAssertTrue(invoice.hasConfirmedSweepableFunds)
+    }
+
     func testClosedUnpaidInvoiceStaysClosedAcrossZeroBalanceRefresh() throws {
         let invoice = try storedInvoice()
         let request = try invoice.paymentRequest()

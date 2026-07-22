@@ -166,6 +166,8 @@ jobs:
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testAdminMayExplicitlyLowerGrandfatheredNetworkPolicyWithoutChangingInvoice \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testClosedPaidInvoiceBecomesSettledInsteadOfWaitingAfterSweep \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testClosingConfirmationAfterSettlementPreservesSettledHistoryStatus \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testSettledInvoiceStaysClosedAfterConfirmedLateTopUp \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testPartiallySettledInvoiceStaysClosedAfterConfirmedLateTopUp \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testClosedUnpaidInvoiceStaysClosedAcrossZeroBalanceRefresh \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testCanonicalSettlementEvidenceImmediatelyMarksPaidInvoiceSettled \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testPartialSettlementEvidenceSurvivesZeroBalanceRefresh \
