@@ -206,9 +206,7 @@ class OperatorWalletStore(context: Context) {
         val wallet = snapshot()
         requireVerifiedSettlementActivation(wallet, chainId, target)
         require(transaction.value == BigInteger.ZERO) { "Settlement cannot transfer native value" }
-        require(transaction.data.lowercase().startsWith(SWEEP_SESSIONS_SELECTOR)) {
-            "Operator key only signs sweepSessions calls"
-        }
+        requireSweepSessionsCallData(transaction.data)
         if (eip1559) {
             require(transaction.type == TransactionType.EIP1559) { "Expected a type-2 transaction" }
             val typed = transaction.transaction as? Transaction1559
@@ -343,7 +341,6 @@ class OperatorWalletStore(context: Context) {
         private const val PRIVATE_KEY_BYTES = 32
         private const val GCM_TAG_BITS = 128
         private const val AUTH_WINDOW_SECONDS = 30
-        private const val SWEEP_SESSIONS_SELECTOR = "0x682b11b5"
         private val AAD = "OPK_OPERATOR_WALLET_V1".toByteArray(Charsets.UTF_8)
     }
 }
@@ -364,5 +361,27 @@ internal fun requireVerifiedSettlementActivation(
     }
     require(wallet.activatedOperatorAddress?.equals(wallet.address, ignoreCase = true) == true) {
         "Settlement activation is not bound to this operator wallet"
+    }
+}
+
+// Selector bytes for sweepSessions(bytes32[],uint256[],address). The guard must validate the
+// exact bytes web3j will sign, mirroring its decode semantics precisely:
+//  - Numeric.hexStringToByteArray left-pads odd-length hex, so "682b11b5f" signs as 0x0682b11b….
+//  - Numeric.cleanHexPrefix strips only a lowercase "0x"; an uppercase "0X" prefix survives into
+//    the signed bytes as 0xff, so "0X682B11B5…" signs selector 0xff682b11. Case-normalizing
+//    before prefix handling would therefore validate a different string than the one signed.
+// Hence: strip the prefix exactly as web3j does, then accept only unambiguous ASCII hex.
+private val SWEEP_SESSIONS_SELECTOR = byteArrayOf(0x68, 0x2b, 0x11, 0xb5.toByte())
+
+internal fun requireSweepSessionsCallData(callData: String?) {
+    val normalized = Numeric.cleanHexPrefix(callData.orEmpty())
+    require(
+        normalized.length >= SWEEP_SESSIONS_SELECTOR.size * 2 &&
+            normalized.length % 2 == 0 &&
+            normalized.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' },
+    ) { "Operator key only signs sweepSessions calls" }
+    val selector = Numeric.hexStringToByteArray(normalized).copyOfRange(0, SWEEP_SESSIONS_SELECTOR.size)
+    require(selector.contentEquals(SWEEP_SESSIONS_SELECTOR)) {
+        "Operator key only signs sweepSessions calls"
     }
 }
