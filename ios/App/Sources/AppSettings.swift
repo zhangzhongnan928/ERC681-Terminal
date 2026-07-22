@@ -1,6 +1,8 @@
 import Foundation
 import OPKTerminalCore
 
+private let maximumAdjustableConfirmationBlocks: UInt64 = 64
+
 /// Persisted configuration for one merchant-selectable currency route. Its identity includes the
 /// chain, vault, and token; display symbols are metadata and never identify a route.
 struct AppPaymentProfile: Codable, Equatable, Identifiable {
@@ -26,7 +28,7 @@ struct AppPaymentProfile: Codable, Equatable, Identifiable {
         tokenAddress: String = "0x7ffba642bc902880a737cb1c18a4e9540879e211",
         tokenSymbol: String = "AUD",
         tokenDecimals: String = "18",
-        confirmationBlocks: String = "2",
+        confirmationBlocks: String = "1",
         provisionedOperatorAddress: String? = nil
     ) {
         self.rpcURL = rpcURL
@@ -122,7 +124,7 @@ struct AppPaymentProfile: Codable, Equatable, Identifiable {
               let endpoint = URL(string: rpcURL),
               let decimals = UInt8(tokenDecimals),
               let blocks = UInt64(confirmationBlocks), blocks > 0,
-              blocks <= UInt64(Int64.max)
+              blocks <= maximumAdjustableConfirmationBlocks
         else { throw AppSettingsError.invalidValue }
         guard let profile = TerminalKnownChainProfile.profile(for: chainID) else {
             throw AppSettingsError.unsupportedChain
@@ -251,6 +253,7 @@ struct AppSettingsMigrationNotice: Codable, Equatable {
 struct AppSettings: Codable, Equatable {
     private static let schemaVersion = 3
     static let maximumPaymentProfileCount = TerminalPaymentProfileCatalog.maximumProfileCount
+    static let adjustableConfirmationBlockRange = 1...Int(maximumAdjustableConfirmationBlocks)
 
     private(set) var paymentProfiles: [AppPaymentProfile]
     var selectedPaymentProfileID: String?
@@ -389,6 +392,35 @@ struct AppSettings: Codable, Equatable {
         return candidate
     }
 
+    /// Applies one merchant-selected finality policy to every payment route on a network.
+    /// Existing invoices retain the confirmation policy captured in their immutable snapshot.
+    func updatingConfirmationBlocks(
+        for chainID: UInt64,
+        to requiredBlocks: UInt64
+    ) throws -> AppSettings {
+        guard let known = TerminalKnownChainProfile.profile(for: chainID) else {
+            throw AppSettingsError.unsupportedChain
+        }
+        guard requiredBlocks >= known.minimumConfirmationBlocks,
+              requiredBlocks <= maximumAdjustableConfirmationBlocks
+        else { throw AppSettingsError.invalidValue }
+
+        var candidate = self
+        let matchingIndices = candidate.paymentProfiles.indices.filter {
+            UInt64(candidate.paymentProfiles[$0].chainID) == chainID
+        }
+        guard !matchingIndices.isEmpty else { throw AppSettingsError.profileNotFound }
+
+        for index in matchingIndices {
+            candidate.paymentProfiles[index].confirmationBlocks = String(requiredBlocks)
+            _ = try candidate.paymentProfiles[index].configuration()
+        }
+        if let selected = candidate.selectedPaymentProfile {
+            candidate.fallbackProfile = selected
+        }
+        return candidate
+    }
+
     func applying(
         _ configuration: TerminalConfiguration,
         boundTo operatorAddress: EthereumAddress
@@ -415,13 +447,17 @@ struct AppSettings: Codable, Equatable {
         _ = try appliedProfile.configuration()
 
         var candidate = self
+        let existingNetworkConfirmations = try candidate.paymentProfiles
+            .filter { UInt64($0.chainID) == configuration.chainID }
+            .map { try $0.configuration().confirmationPolicy.requiredBlocks }
+        let networkConfirmationBlocks = Self.confirmationBlocksForProvisioning(
+            existing: existingNetworkConfirmations,
+            compiledDefault: profile.defaultConfirmationBlocks
+        )
+        appliedProfile.confirmationBlocks = String(networkConfirmationBlocks)
+        _ = try appliedProfile.configuration()
+
         if let index = candidate.paymentProfiles.firstIndex(where: { $0.id == appliedProfile.id }) {
-            let existingConfiguration = try candidate.paymentProfiles[index].configuration()
-            appliedProfile.confirmationBlocks = String(max(
-                existingConfiguration.confirmationPolicy.requiredBlocks,
-                profile.defaultConfirmationBlocks
-            ))
-            _ = try appliedProfile.configuration()
             candidate.paymentProfiles[index] = appliedProfile
         } else {
             guard candidate.paymentProfiles.count < Self.maximumPaymentProfileCount else {
@@ -429,9 +465,20 @@ struct AppSettings: Codable, Equatable {
             }
             candidate.paymentProfiles.append(appliedProfile)
         }
+        for index in candidate.paymentProfiles.indices
+            where UInt64(candidate.paymentProfiles[index].chainID) == configuration.chainID {
+            candidate.paymentProfiles[index].confirmationBlocks = String(networkConfirmationBlocks)
+        }
         candidate.selectedPaymentProfileID = appliedProfile.id
         candidate.fallbackProfile = appliedProfile
         return candidate
+    }
+
+    static func confirmationBlocksForProvisioning(
+        existing: [UInt64],
+        compiledDefault: UInt64
+    ) -> UInt64 {
+        existing.max() ?? compiledDefault
     }
 
     func clearingProvisioning() -> AppSettings {
@@ -621,6 +668,17 @@ struct AppSettings: Codable, Equatable {
                 forKey: .migrationNotice
             )
         }
+        let networkAlignedProfileIDs = Self.normalizeConfirmationPoliciesByChain(
+            in: &paymentProfiles
+        )
+        let noticeProfileIDs = Set(
+            migrationNotice?.adjustedConfirmationProfileIDs ?? []
+        ).union(networkAlignedProfileIDs)
+        migrationNotice = noticeProfileIDs.isEmpty
+            ? nil
+            : AppSettingsMigrationNotice(
+                adjustedConfirmationProfileIDs: noticeProfileIDs.sorted()
+            )
 
         let identifiers = paymentProfiles.map(\.id)
         guard paymentProfiles.count <= Self.maximumPaymentProfileCount,
@@ -649,6 +707,9 @@ struct AppSettings: Codable, Equatable {
                 in: container,
                 debugDescription: "Selected terminal payment profile is missing"
             )
+        }
+        if let selected = selectedPaymentProfile {
+            fallbackProfile = selected
         }
 
         do {
@@ -705,7 +766,7 @@ struct AppSettings: Codable, Equatable {
     private static func defaultConfirmationBlocks(for profile: AppPaymentProfile) -> String {
         guard let chainID = UInt64(profile.chainID),
               let known = TerminalKnownChainProfile.profile(for: chainID)
-        else { return "2" }
+        else { return "1" }
         return String(known.defaultConfirmationBlocks)
     }
 
@@ -716,6 +777,43 @@ struct AppSettings: Codable, Equatable {
         self.migrationNotice = retained.isEmpty
             ? nil
             : AppSettingsMigrationNotice(adjustedConfirmationProfileIDs: retained)
+    }
+
+    /// Older catalogs could persist route-specific values on the same chain. A network policy
+    /// must be deterministic, so retain the strongest stored value and never weaken finality.
+    private static func normalizeConfirmationPoliciesByChain(
+        in profiles: inout [AppPaymentProfile]
+    ) -> Set<String> {
+        var maximumByChain = [UInt64: UInt64]()
+        var invalidChains = Set<UInt64>()
+        var adjustedProfileIDs = Set<String>()
+        for profile in profiles {
+            guard let chainID = UInt64(profile.chainID),
+                  let known = TerminalKnownChainProfile.profile(for: chainID)
+            else { continue }
+            guard let requiredBlocks = UInt64(profile.confirmationBlocks),
+                  requiredBlocks >= known.minimumConfirmationBlocks,
+                  requiredBlocks <= maximumAdjustableConfirmationBlocks
+            else {
+                invalidChains.insert(chainID)
+                continue
+            }
+            maximumByChain[chainID] = max(
+                maximumByChain[chainID] ?? requiredBlocks,
+                requiredBlocks
+            )
+        }
+        for index in profiles.indices {
+            guard let chainID = UInt64(profiles[index].chainID),
+                  !invalidChains.contains(chainID),
+                  let requiredBlocks = maximumByChain[chainID]
+            else { continue }
+            if profiles[index].confirmationBlocks != String(requiredBlocks) {
+                adjustedProfileIDs.insert(profiles[index].id)
+            }
+            profiles[index].confirmationBlocks = String(requiredBlocks)
+        }
+        return adjustedProfileIDs
     }
 
     /// Returns true only when a previously valid positive legacy value was raised to the floor.

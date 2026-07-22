@@ -122,7 +122,7 @@ class ChainConfigSharedPreferencesMigrationTest {
     }
 
     @Test
-    fun storedV2FinalityBelowFloorIsRaisedAndNoticeSurvivesReopen() {
+    fun storedV2OneConfirmationMigratesWithoutAdjustmentOrNotice() {
         assertTrue(
             preferences.edit()
                 .putString(
@@ -141,29 +141,21 @@ class ChainConfigSharedPreferencesMigrationTest {
         val selected = requireNotNull(migrated.selectedPaymentProfile())
 
         assertTrue(migrated.provisioned)
-        assertEquals(2, migrated.confirmationBlocks)
-        assertEquals(2, selected.confirmationBlocks)
-        assertEquals(
-            setOf(selected.id),
-            firstOpen.pendingMigrationNotice()?.adjustedConfirmationProfileIds,
-        )
+        assertEquals(1, migrated.confirmationBlocks)
+        assertEquals(1, selected.confirmationBlocks)
+        assertNull(firstOpen.pendingMigrationNotice())
         assertTrue(preferences.getBoolean(V3_PROVISIONED_KEY, false))
         assertFalse(preferences.contains(V2_PROVISIONED_KEY))
         assertFalse(preferences.contains(V2_CONFIG_KEY))
 
         val reopened = ChainConfig(context)
         assertEquals(migrated, reopened.snapshot())
-        assertEquals(
-            setOf(selected.id),
-            reopened.pendingMigrationNotice()?.adjustedConfirmationProfileIds,
-        )
-        assertTrue(reopened.acknowledgeMigrationNotice())
         assertNull(reopened.pendingMigrationNotice())
         assertTrue(reopened.isConfigured())
     }
 
     @Test
-    fun removingMigratedProfileFiltersItsPendingNoticeWhenAnotherProfileRemains() {
+    fun networkConfirmationUpdatePersistsForEveryProfileAcrossReopen() {
         assertTrue(
             preferences.edit()
                 .putString(
@@ -178,8 +170,8 @@ class ChainConfigSharedPreferencesMigrationTest {
         )
         val config = ChainConfig(context)
         val migrated = config.snapshot()
-        val adjusted = requireNotNull(migrated.selectedPaymentProfile())
-        val second = adjusted.copy(
+        val first = requireNotNull(migrated.selectedPaymentProfile())
+        val second = first.copy(
             vaultAddress = "0x2222222222222222222222222222222222222222",
             token = PaymentToken(
                 address = "0x3333333333333333333333333333333333333333",
@@ -192,16 +184,54 @@ class ChainConfigSharedPreferencesMigrationTest {
             requireNotNull(migrated.provisionedOperatorAddress),
         )
         assertTrue(config.compareAndReplaceProvisioned(migrated, twoProfiles))
-        assertEquals(
-            setOf(adjusted.id),
-            config.pendingMigrationNotice()?.adjustedConfirmationProfileIds,
+
+        assertTrue(config.updateNetworkConfirmationBlocks(84532, 7))
+
+        val reopened = ChainConfig(context).snapshot()
+        assertEquals(2, reopened.resolvedPaymentProfiles().size)
+        assertEquals(setOf(7), reopened.resolvedPaymentProfiles().map { it.confirmationBlocks }.toSet())
+        assertEquals(7, reopened.confirmationBlocks)
+        assertEquals(second.id, reopened.selectedProfileId)
+        assertTrue(reopened.hasCompleteProvisioning())
+    }
+
+    @Test
+    fun divergentV3NetworkConfirmationsNormalizeToStrongestAndPersistAcrossReopen() {
+        assertTrue(
+            preferences.edit()
+                .putString(
+                    V3_CONFIG_KEY,
+                    v3CatalogJson(
+                        confirmationBlocks = 1,
+                        profileEntries = "${profileJson(1)},${secondProfileJson(7)}",
+                    ),
+                )
+                .putBoolean(V3_PROVISIONED_KEY, true)
+                .commit(),
         )
 
-        assertTrue(config.removeProfile(adjusted.id))
+        val firstOpen = ChainConfig(context)
+        val normalized = firstOpen.snapshot()
 
-        assertNull(config.pendingMigrationNotice())
-        assertEquals(listOf(second.id), config.snapshot().resolvedPaymentProfiles().map { it.id })
-        assertTrue(config.isConfigured())
+        assertEquals(2, normalized.resolvedPaymentProfiles().size)
+        assertEquals(
+            setOf(7),
+            normalized.resolvedPaymentProfiles().map { it.confirmationBlocks }.toSet(),
+        )
+        assertEquals(7, normalized.confirmationBlocks)
+        assertEquals(PROFILE_ID, normalized.selectedProfileId)
+        assertEquals(
+            setOf(PROFILE_ID),
+            firstOpen.pendingMigrationNotice()?.adjustedConfirmationProfileIds,
+        )
+
+        val reopened = ChainConfig(context)
+        assertEquals(normalized, reopened.snapshot())
+        assertEquals(
+            setOf(PROFILE_ID),
+            reopened.pendingMigrationNotice()?.adjustedConfirmationProfileIds,
+        )
+        assertTrue(reopened.isConfigured())
     }
 
     @Test
@@ -236,7 +266,7 @@ class ChainConfigSharedPreferencesMigrationTest {
                     "eip155:84532:0x9999999999999999999999999999999999999999:" +
                         "0x8888888888888888888888888888888888888888",
             ),
-            "below-floor finality" to v3CatalogJson(confirmationBlocks = 1),
+            "invalid zero finality" to v3CatalogJson(confirmationBlocks = 0),
         )
 
         malformedCatalogs.forEach { (label, json) ->
@@ -291,7 +321,7 @@ class ChainConfigSharedPreferencesMigrationTest {
             }
             """.trimIndent()
 
-        fun profileJson(confirmationBlocks: Int = 2) =
+        fun profileJson(confirmationBlocks: Int = 1) =
             """
             {
               "networkName": "Base Sepolia",
@@ -310,8 +340,27 @@ class ChainConfigSharedPreferencesMigrationTest {
             }
             """.trimIndent()
 
+        fun secondProfileJson(confirmationBlocks: Int = 1) =
+            """
+            {
+              "networkName": "Base Sepolia",
+              "rpcUrl": "https://sepolia.base.org",
+              "chainId": 84532,
+              "factoryAddress": "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
+              "receiverImplementationAddress": "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
+              "vaultAddress": "0x2222222222222222222222222222222222222222",
+              "confirmationBlocks": $confirmationBlocks,
+              "token": {
+                "address": "0x3333333333333333333333333333333333333333",
+                "symbol": "USDC",
+                "decimals": 6
+              },
+              "protocolVersion": "1.4.1"
+            }
+            """.trimIndent()
+
         fun v3CatalogJson(
-            confirmationBlocks: Int = 2,
+            confirmationBlocks: Int = 1,
             selectedProfileId: String = PROFILE_ID,
             profileEntries: String = profileJson(confirmationBlocks),
         ) =

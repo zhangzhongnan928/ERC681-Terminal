@@ -216,36 +216,21 @@ final class TerminalProvisionerTests: XCTestCase {
         XCTAssertTrue(result.validationReport.checks.contains { $0.name == "CREATE2 vector" })
     }
 
-    func testBelowMinimumConfirmationPolicyRejectsBeforeRPCFactory() async throws {
+    func testZeroConfirmationPolicyNormalizesToKnownNetworkMinimum() async throws {
         let profile = TerminalKnownChainProfile.baseSepolia
-        let probe = RPCFactoryProbe()
-        let provisioner = TerminalProvisioner(rpcFactory: { url in
-            probe.record(url)
-            throw URLError(.unsupportedURL)
-        })
+        let rpc = ProvisioningRPC(vault: vault, token: token)
+        let policy = ConfirmationPolicy(requiredBlocks: 0)
+        let result = try await TerminalProvisioner(rpcFactory: { _ in rpc }).deriveAndValidate(
+            payload(),
+            expectedOperator: operatorAddress,
+            confirmationPolicy: policy
+        )
 
-        do {
-            _ = try await provisioner.deriveAndValidate(
-                payload(),
-                expectedOperator: operatorAddress,
-                confirmationPolicy: .init(requiredBlocks: profile.minimumConfirmationBlocks - 1)
-            )
-            XCTFail("Expected a confirmation policy below the known-chain floor to be rejected")
-        } catch let error as TerminalProvisioningValidationError {
-            XCTAssertEqual(
-                error,
-                .confirmationPolicyBelowMinimum(
-                    chainID: profile.chainID,
-                    minimum: profile.minimumConfirmationBlocks,
-                    actual: profile.minimumConfirmationBlocks - 1
-                )
-            )
-            XCTAssertEqual(
-                error.localizedDescription,
-                "Chain 84532 requires at least 2 confirmation blocks, but 1 was requested."
-            )
-        }
-        XCTAssertTrue(probe.calls.isEmpty)
+        XCTAssertEqual(policy.requiredBlocks, profile.minimumConfirmationBlocks)
+        XCTAssertEqual(
+            result.configuration.confirmationPolicy.requiredBlocks,
+            profile.minimumConfirmationBlocks
+        )
     }
 
     func testMinimumConfirmationPolicyIsAccepted() async throws {

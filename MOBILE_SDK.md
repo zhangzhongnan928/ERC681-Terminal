@@ -139,6 +139,14 @@ reserve in both native registries. A QR cannot introduce these values.
 The enabled cross-platform pins and vectors are recorded in
 `conformance/opk-terminal-networks-v1.json`.
 
+Base Sepolia's compiled confirmation minimum and fresh-network default are both `1`; the block that
+contains the payment counts as confirmation one. A merchant administrator may select a value from
+the enabled network's compiled minimum through `64` in the PIN-protected terminal settings. Every
+profile on the same chain shares the choice, and a new profile on that chain inherits it. The policy
+is copied into each new invoice and its settlement batch, so a later settings change cannot alter
+already published payment requests. The strict `opk-terminal:provision` v1 payload has no
+confirmation field and cannot override this policy.
+
 ## Operator identity, authorization, and gas funding
 
 Creating the operator wallet establishes the terminal identity used for new invoices; it does not
@@ -249,11 +257,11 @@ val invoice = PaymentInvoiceFactory.create(
 displayQr(invoice.erc681Uri)
 
 val observer = PaymentObserver(ReadOnlyRpcClient(selected.network))
-var observation = observer.observe(invoice.request, requiredConfirmations = 2)
+var observation = observer.observe(invoice.request, requiredConfirmations = 1)
 observation = observer.observe(
     invoice.request,
     previous = observation,
-    requiredConfirmations = 2,
+    requiredConfirmations = 1,
 )
 
 if (observation.status == PaymentStatus.PAID) {
@@ -306,7 +314,7 @@ let configuration = try TerminalConfiguration(
     protocolVersion: .v1_4_1,
     deployment: deployment,
     tokens: [token],
-    confirmationPolicy: .init(requiredBlocks: 2)
+    confirmationPolicy: .init(requiredBlocks: 1)
 )
 
 let rpc = try JSONRPCEthereumClient(endpoint: endpoint)

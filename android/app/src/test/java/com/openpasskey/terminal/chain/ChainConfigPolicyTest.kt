@@ -22,29 +22,39 @@ class ChainConfigPolicyTest {
     fun legacySingleConfigMigratesToASelectedProfile() {
         val legacy = config()
 
+        assertEquals(1, ChainConfig.DEFAULT_CONFIRMATION_BLOCKS)
         assertEquals(1, legacy.resolvedPaymentProfiles().size)
         assertEquals(legacy.resolvedPaymentProfiles().single(), legacy.selectedPaymentProfile())
     }
 
     @Test
-    fun selectionKeepsEachProfilesFinalityAndRejectsBelowNetworkFloor() {
+    fun networkConfirmationUpdateAppliesToEveryRouteAndRejectsOutsideRange() {
         val operator = requireNotNull(config().provisionedOperatorAddress)
-        val higherFinality = requireNotNull(config().selectedPaymentProfile()).copy(
-            confirmationBlocks = 7,
-        )
-        val defaultFinality = higherFinality.copy(
+        val first = requireNotNull(config().selectedPaymentProfile())
+        val second = first.copy(
             vaultAddress = "0x2222222222222222222222222222222222222222",
-            confirmationBlocks = 2,
+            confirmationBlocks = 1,
         )
         val catalog = config()
-            .upsertingProfile(higherFinality, operator)
-            .upsertingProfile(defaultFinality, operator)
+            .upsertingProfile(second, operator)
+            .updatingNetworkConfirmationBlocks(84532, 7)
+        val lowered = catalog.updatingNetworkConfirmationBlocks(84532, 1)
 
-        assertEquals(7, catalog.selectingProfile(higherFinality.id).confirmationBlocks)
-        assertEquals(2, catalog.selectingProfile(defaultFinality.id).confirmationBlocks)
-        assertFalse(
-            config().copy(confirmationBlocks = 1).hasCompleteProvisioning(),
-        )
+        assertEquals(7, catalog.selectingProfile(first.id).confirmationBlocks)
+        assertEquals(7, catalog.selectingProfile(second.id).confirmationBlocks)
+        assertEquals(setOf(1), lowered.resolvedPaymentProfiles().map { it.confirmationBlocks }.toSet())
+        assertEquals(second.id, lowered.selectedProfileId)
+        assertEquals(1, lowered.confirmationBlocks)
+        assertTrue(lowered.hasCompleteProvisioning())
+        assertTrue(config().copy(confirmationBlocks = 1).hasCompleteProvisioning())
+        assertFalse(config().copy(confirmationBlocks = 0).hasCompleteProvisioning())
+        assertFalse(config().copy(confirmationBlocks = 65).hasCompleteProvisioning())
+        assertThrows(IllegalArgumentException::class.java) {
+            catalog.updatingNetworkConfirmationBlocks(84532, 0)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            catalog.updatingNetworkConfirmationBlocks(84532, 65)
+        }
     }
 
     @Test
@@ -70,18 +80,15 @@ class ChainConfigPolicyTest {
     }
 
     @Test
-    fun sameRouteReprovisionRetainsRaisedFinalityWhileNewRouteUsesItsDefault() {
+    fun sameRouteAndNewRouteInheritTheMerchantNetworkFinality() {
         val original = config()
         val operator = requireNotNull(original.provisionedOperatorAddress)
         val originalProfile = requireNotNull(original.selectedPaymentProfile())
-        val raised = original.upsertingProfile(
-            originalProfile.copy(confirmationBlocks = 7),
-            operator,
-        )
+        val raised = original.updatingNetworkConfirmationBlocks(84532, 7)
 
         val refreshed = raised.upsertingProfile(
             originalProfile.copy(
-                confirmationBlocks = 2,
+                confirmationBlocks = 1,
                 token = originalProfile.token.copy(symbol = "AUDM"),
             ),
             operator,
@@ -93,18 +100,61 @@ class ChainConfigPolicyTest {
                 "USDC",
                 6,
             ),
-            confirmationBlocks = 2,
+            confirmationBlocks = 1,
         )
         val withNewRoute = refreshed.upsertingProfile(differentRoute, operator)
 
         assertEquals(7, refreshed.selectedPaymentProfile()?.confirmationBlocks)
         assertEquals("AUDM", refreshed.selectedPaymentProfile()?.token?.symbol)
-        assertEquals(2, withNewRoute.selectedPaymentProfile()?.confirmationBlocks)
+        assertEquals(7, withNewRoute.selectedPaymentProfile()?.confirmationBlocks)
         assertEquals(
-            7,
-            withNewRoute.resolvedPaymentProfiles()
-                .single { it.id == originalProfile.id }
-                .confirmationBlocks,
+            setOf(7),
+            withNewRoute.resolvedPaymentProfiles().map { it.confirmationBlocks }.toSet(),
+        )
+    }
+
+    @Test
+    fun catalogLoadAndUpsertRepairSameChainDivergenceWithoutWeakening() {
+        val original = config()
+        val operator = requireNotNull(original.provisionedOperatorAddress)
+        val first = requireNotNull(original.selectedPaymentProfile())
+        val second = first.copy(
+            vaultAddress = "0x2222222222222222222222222222222222222222",
+            token = PaymentToken(
+                "0x3333333333333333333333333333333333333333",
+                "USDC",
+                6,
+            ),
+        )
+        val catalog = original.upsertingProfile(second, operator)
+        val divergentProfiles = catalog.resolvedPaymentProfiles().map { profile ->
+            profile.copy(confirmationBlocks = if (profile.id == first.id) 3 else 7)
+        }
+        val divergent = catalog.copy(paymentProfiles = divergentProfiles)
+            .selectingProfile(second.id)
+
+        val loaded = divergent.normalizingNetworkConfirmationBlocks()
+        val rescanned = divergent.upsertingProfile(
+            first.copy(
+                confirmationBlocks = 1,
+                token = first.token.copy(symbol = "AUDM"),
+            ),
+            operator,
+        )
+        val incomingDefault = catalog.upsertingProfile(
+            first.copy(confirmationBlocks = 9),
+            operator,
+        )
+
+        assertTrue(divergent.hasCompleteProvisioning(requireUniformNetworkConfirmations = false))
+        assertFalse(divergent.hasCompleteProvisioning())
+        assertEquals(setOf(7), loaded.resolvedPaymentProfiles().map { it.confirmationBlocks }.toSet())
+        assertEquals(7, loaded.confirmationBlocks)
+        assertEquals(setOf(7), rescanned.resolvedPaymentProfiles().map { it.confirmationBlocks }.toSet())
+        assertEquals("AUDM", rescanned.selectedPaymentProfile()?.token?.symbol)
+        assertEquals(
+            setOf(1),
+            incomingDefault.resolvedPaymentProfiles().map { it.confirmationBlocks }.toSet(),
         )
     }
 
@@ -184,7 +234,7 @@ class ChainConfigPolicyTest {
         factoryAddress = "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
         receiverImplementationAddress = "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
         vaultAddress = "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1",
-        confirmationBlocks = 2,
+        confirmationBlocks = 1,
         paymentTokens = listOf(
             PaymentToken("0x7ffba642bc902880a737cb1c18a4e9540879e211", "AUD", 18),
         ),

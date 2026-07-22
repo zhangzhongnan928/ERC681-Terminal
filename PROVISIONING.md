@@ -31,6 +31,13 @@ opk-terminal:provision?v=1&chainId=<chainId>&vault=<vault>&token=<token>&operato
 provisioning `operator` must equal the terminal's local EOA. The shared accepted and rejected vectors
 are in `conformance/opk-terminal-provisioning-v1.json`.
 
+Confirmation depth is deliberately not a v1 QR field. The first route on an EVM network starts at
+that network's compiled default (one block on Base Sepolia). After provisioning, a merchant
+administrator can choose a value from that network's compiled minimum through 64 in the terminal's
+PIN-protected Admin/setup controls. All profiles on the same chain share that network policy, and a
+new profile on an already configured chain inherits its current value. The value is snapshotted into
+new invoices; changing it does not rewrite historical invoices or their settlement requirements.
+
 Each successful scan atomically adds or updates the profile identified by `(chainId, vault, token)`
 and selects it; it does not delete other configured profiles. The merchant can therefore scan the
 portal setup QR for each desired vault/token combination. A sale selects exactly one stored profile,
@@ -44,11 +51,13 @@ The native apps enable only Base Sepolia (`84532`) in this release. They own an 
 profile containing the default RPC endpoint, network name, protocol version, factory, receiver
 implementation, vault runtime hash, CREATE2 vector, testnet flag, native-currency metadata,
 minimum/default confirmation policy, and gas-reserve policy. Persisted settings are never a source
-of those trust anchors or minimums. Base Mainnet (`8453`) and all other chains are rejected before
-contacting an RPC endpoint. Mainnet remains disabled pending a frozen or multisig-governed,
-implementation-pinned deployment. The checked-in enabled cross-platform constants are in
-`conformance/opk-terminal-networks-v1.json`; the reusable SDK payment-profile catalogs remain
-EVM-generic.
+of those trust anchors or minimums. Base Sepolia's compiled confirmation minimum and fresh-network
+default are both one block. The PIN-protected merchant control can select any allowed value but may
+never reduce a network below the compiled floor. Base Mainnet (`8453`) and all other chains are
+rejected before contacting an RPC endpoint. Mainnet remains disabled pending a frozen or
+multisig-governed, implementation-pinned deployment. The checked-in enabled cross-platform
+constants are in `conformance/opk-terminal-networks-v1.json`; the reusable SDK payment-profile
+catalogs remain EVM-generic.
 
 The terminal reads the scanned vault's factory, the pinned factory's implementation, token
 whitelist membership, decimals, and symbol. It performs the complete configuration and CREATE2
@@ -94,6 +103,10 @@ First-run setup remains visible until the device is provisioned. After setup, a 
 administrator PIN hides reprovisioning, network and vault controls, and operator-wallet reset from
 normal staff mode. The PIN is a local UI and operations boundary, not merchant authentication.
 Failed attempts are throttled, and the admin session locks when the app backgrounds.
+The same protected controls let the merchant administrator adjust the confirmation requirement for
+the selected EVM network without changing the immutable network trust anchors. The allowed range is
+the network's compiled minimum through 64; all profiles on that chain share the choice, and the
+setting applies only to future invoices.
 Creating the initial PIN unlocks that foreground admin session. After a PIN exists, creating or
 replacing a device wallet, every provisioning attempt, and destructive wallet reset require a
 currently unlocked session. Reset rechecks that same session after its asynchronous balance proofs

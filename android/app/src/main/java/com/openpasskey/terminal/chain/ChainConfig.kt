@@ -88,7 +88,7 @@ class ChainConfig(context: Context) {
         const val DEFAULT_CHAIN_ID = 84532L
         const val DEFAULT_FACTORY_ADDRESS = "0x062e3b5d3107e4d1b8dDA314E16b9F8cA6EB63D5"
         const val DEFAULT_RECEIVER_IMPLEMENTATION = "0xDAa292B1bf533737C5cE5d27F220273971Db3Bdc"
-        const val DEFAULT_CONFIRMATION_BLOCKS = 2
+        const val DEFAULT_CONFIRMATION_BLOCKS = 1
         const val MAX_PAYMENT_PROFILES = 32
 
         private val LEGACY_MUTABLE_KEYS = listOf(
@@ -185,6 +185,17 @@ class ChainConfig(context: Context) {
         return persist(selected)
     }
 
+    /**
+     * Changes finality for future invoices on one network. Existing invoice rows retain the
+     * confirmation policy they snapshotted when their payment QR was published.
+     */
+    @Synchronized
+    fun updateNetworkConfirmationBlocks(chainId: Long, confirmationBlocks: Int): Boolean {
+        val current = snapshot()
+        val updated = current.updatingNetworkConfirmationBlocks(chainId, confirmationBlocks)
+        return persist(updated.canonicalCatalog())
+    }
+
     /** Removes one future-checkout choice. Durable invoice and settlement snapshots are separate. */
     @Synchronized
     fun removeProfile(profileId: String): Boolean {
@@ -217,8 +228,32 @@ class ChainConfig(context: Context) {
         // v3 is catalog-native. Never reinterpret an empty/corrupt catalog as its flattened
         // downgrade facade, which exists only so older app versions can inspect the selection.
         if (stored.paymentProfiles.isEmpty() || stored.selectedProfileId == null) return null
-        if (!stored.provisioned || !stored.hasCompleteProvisioning()) return null
-        return stored.catalogNormalized()
+        if (!stored.provisioned || !stored.hasCompleteProvisioning(
+                requireUniformNetworkConfirmations = false,
+            )
+        ) return null
+        val catalog = stored.catalogNormalized()
+        val normalized = catalog.normalizingNetworkConfirmationBlocks()
+        if (!normalized.hasCompleteProvisioning()) return null
+        if (normalized != catalog) {
+            val previousById = catalog.resolvedPaymentProfiles().associateBy { it.id }
+            val adjustedIds = normalized.resolvedPaymentProfiles()
+                .filter { profile ->
+                    profile.confirmationBlocks > requireNotNull(previousById[profile.id]).confirmationBlocks
+                }
+                .mapTo(mutableSetOf()) { it.id }
+            val existingNoticeIds = prefs
+                .getStringSet(KEY_FINALITY_MIGRATION_PROFILE_IDS_V3, null)
+                .orEmpty()
+            val canonical = normalized.canonicalCatalog()
+            if (!persist(
+                    canonical,
+                    existingNoticeIds + adjustedIds,
+                )
+            ) return null
+            return canonical
+        }
+        return normalized
     }
 
     /**
@@ -344,24 +379,61 @@ fun TerminalConfigSnapshot.upsertingProfile(
     require(index >= 0 || profiles.size < ChainConfig.MAX_PAYMENT_PROFILES) {
         "This terminal already has the maximum ${ChainConfig.MAX_PAYMENT_PROFILES} payment profiles"
     }
+    // Confirmation depth is a merchant preference for the network, not for a vault/token route.
+    // Existing routes are the merchant's saved network preference. Normalize those to their
+    // strongest value, but never let an incoming compiled default override an explicit choice.
+    // The incoming value applies only to the first profile configured on a chain.
+    val networkConfirmationBlocks = profiles
+        .asSequence()
+        .filter { it.chainId == profile.chainId }
+        .map { it.confirmationBlocks }
+        .maxOrNull()
+        ?: profile.confirmationBlocks
+    val inheritedProfile = profile.copy(confirmationBlocks = networkConfirmationBlocks)
     if (index < 0) {
-        profiles += profile
+        profiles += inheritedProfile
     } else {
-        // Re-scanning a portal QR refreshes chain-derived metadata for this exact route, but it
-        // must never silently weaken a confirmation preference the merchant raised previously.
-        // A different chain/vault/token identity still starts from its compiled network default.
-        profiles[index] = profile.copy(
-            confirmationBlocks = maxOf(
-                profiles[index].confirmationBlocks,
-                profile.confirmationBlocks,
-            ),
-        )
+        // Re-scanning refreshes chain-derived metadata without weakening the network preference.
+        profiles[index] = inheritedProfile
+    }
+    profiles.indices.forEach { profileIndex ->
+        if (profiles[profileIndex].chainId == profile.chainId) {
+            profiles[profileIndex] = profiles[profileIndex].copy(
+                confirmationBlocks = networkConfirmationBlocks,
+            )
+        }
     }
     return copy(
         provisioned = true,
         provisionedOperatorAddress = canonicalOperator,
         paymentProfiles = profiles,
-    ).selectingProfile(profile.id)
+    ).selectingProfile(inheritedProfile.id)
+}
+
+/** Applies one merchant-selected confirmation depth to every future-checkout route on a chain. */
+fun TerminalConfigSnapshot.updatingNetworkConfirmationBlocks(
+    chainId: Long,
+    confirmationBlocks: Int,
+): TerminalConfigSnapshot {
+    require(provisioned) { "Provision this terminal before changing confirmation requirements" }
+    val policy = KnownChainPolicy.requireProfile(chainId)
+    require(confirmationBlocks in policy.minimumConfirmationBlocks..64) {
+        "Confirmations for ${policy.networkName} must be between " +
+            "${policy.minimumConfirmationBlocks} and 64"
+    }
+    val profiles = resolvedPaymentProfiles()
+    require(profiles.any { it.chainId == chainId }) {
+        "Network ${policy.networkName} is not configured on this terminal"
+    }
+    val selectedId = requireNotNull(selectedPaymentProfile()).id
+    val updatedProfiles = profiles.map { profile ->
+        if (profile.chainId == chainId) {
+            profile.copy(confirmationBlocks = confirmationBlocks)
+        } else {
+            profile
+        }
+    }
+    return copy(paymentProfiles = updatedProfiles).selectingProfile(selectedId)
 }
 
 /** Returns null when the removed profile was the last configured checkout choice. */
@@ -387,13 +459,11 @@ private fun TerminalConfigSnapshot.raisingLegacyConfirmationFloors(): LegacyFina
     runCatching {
         val profiles = resolvedPaymentProfiles()
         require(profiles.isNotEmpty())
-        val adjustedIds = mutableSetOf<String>()
         val adjustedProfiles = profiles.map { profile ->
             // Zero/negative and >64 were never valid legacy preferences and remain corruption.
             require(profile.confirmationBlocks in 1..64)
             val floor = KnownChainPolicy.requireProfile(profile.chainId).minimumConfirmationBlocks
             if (profile.confirmationBlocks < floor) {
-                adjustedIds += profile.id
                 profile.copy(confirmationBlocks = floor)
             } else {
                 profile
@@ -405,8 +475,17 @@ private fun TerminalConfigSnapshot.raisingLegacyConfirmationFloors(): LegacyFina
         val selected = requireNotNull(
             requestedSelection?.let { id -> adjustedProfiles.firstOrNull { it.id == id } },
         )
+        val normalized = copy(paymentProfiles = adjustedProfiles)
+            .selectingProfile(selected.id)
+            .normalizingNetworkConfirmationBlocks()
+        val previousById = profiles.associateBy { it.id }
+        val adjustedIds = normalized.resolvedPaymentProfiles()
+            .filter { profile ->
+                profile.confirmationBlocks > requireNotNull(previousById[profile.id]).confirmationBlocks
+            }
+            .mapTo(mutableSetOf()) { it.id }
         LegacyFinalityMigration(
-            snapshot = copy(paymentProfiles = adjustedProfiles).selectingProfile(selected.id),
+            snapshot = normalized,
             adjustedProfileIds = adjustedIds,
         )
     }.getOrNull()
@@ -415,6 +494,21 @@ private fun TerminalConfigSnapshot.catalogNormalized(): TerminalConfigSnapshot {
     if (!provisioned) return this
     val selected = selectedPaymentProfile() ?: return this
     return copy(paymentProfiles = resolvedPaymentProfiles()).selectingProfile(selected.id)
+}
+
+/** Repairs historical same-chain divergence by choosing the strongest stored value. */
+internal fun TerminalConfigSnapshot.normalizingNetworkConfirmationBlocks(): TerminalConfigSnapshot {
+    if (!provisioned) return this
+    val profiles = resolvedPaymentProfiles()
+    if (profiles.isEmpty()) return this
+    val strongestByChain = profiles.groupingBy { it.chainId }
+        .fold(0) { strongest, profile -> maxOf(strongest, profile.confirmationBlocks) }
+    val normalized = profiles.map { profile ->
+        profile.copy(confirmationBlocks = requireNotNull(strongestByChain[profile.chainId]))
+    }
+    if (normalized == profiles) return this
+    val selectedId = requireNotNull(selectedPaymentProfile()).id
+    return copy(paymentProfiles = normalized).selectingProfile(selectedId)
 }
 
 private fun TerminalConfigSnapshot.canonicalCatalog(): TerminalConfigSnapshot {
@@ -434,13 +528,20 @@ private fun TerminalConfigSnapshot.canonicalCatalog(): TerminalConfigSnapshot {
     ).selectingProfile(selectedId)
 }
 
-internal fun TerminalConfigSnapshot.hasCompleteProvisioning(): Boolean = runCatching {
+internal fun TerminalConfigSnapshot.hasCompleteProvisioning(
+    requireUniformNetworkConfirmations: Boolean = true,
+): Boolean = runCatching {
     require(provisioned)
     require(!EvmAddress.parse(requireNotNull(provisionedOperatorAddress)).isZero)
     val profiles = resolvedPaymentProfiles()
     require(profiles.isNotEmpty())
     require(profiles.size <= ChainConfig.MAX_PAYMENT_PROFILES)
     require(profiles.map { it.id }.distinct().size == profiles.size)
+    if (requireUniformNetworkConfirmations) {
+        profiles.groupBy { it.chainId }.values.forEach { networkProfiles ->
+            require(networkProfiles.map { it.confirmationBlocks }.distinct().size == 1)
+        }
+    }
     if (paymentProfiles.isNotEmpty()) {
         require(selectedProfileId != null)
         require(profiles.any { it.id == selectedProfileId })

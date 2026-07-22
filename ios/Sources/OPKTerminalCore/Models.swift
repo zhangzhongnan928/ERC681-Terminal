@@ -28,7 +28,7 @@ public struct TerminalConfiguration: Hashable, Sendable, Codable {
         protocolVersion: OPKProtocolVersion,
         deployment: OPKDeployment,
         tokens: [PaymentToken],
-        confirmationPolicy: ConfirmationPolicy = .init(requiredBlocks: 2),
+        confirmationPolicy: ConfirmationPolicy = .init(requiredBlocks: 1),
         create2TestVector: Create2TestVector? = nil
     ) throws {
         guard chainID > 0 else { throw ERC681Error.invalidChainID }

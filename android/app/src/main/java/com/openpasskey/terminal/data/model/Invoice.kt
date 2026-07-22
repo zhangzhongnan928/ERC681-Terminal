@@ -23,7 +23,9 @@ data class Invoice(
     @ColumnInfo(defaultValue = "''") val factoryAddress: String = "",
     @ColumnInfo(defaultValue = "''") val receiverImplementationAddress: String = "",
     @ColumnInfo(defaultValue = "''") val vaultAddress: String = "",
-    @ColumnInfo(defaultValue = "2") val confirmationBlocks: Int = 2,
+    // The database default remains 2 so pre-policy legacy rows keep their historical snapshot.
+    // New invoices explicitly snapshot a profile, while direct model construction defaults to 1.
+    @ColumnInfo(defaultValue = "2") val confirmationBlocks: Int = 1,
     @ColumnInfo(defaultValue = "''") val erc681Uri: String = "",
     val firstDetectedBlock: Long? = null,
     val firstDetectedBlockHash: String? = null,

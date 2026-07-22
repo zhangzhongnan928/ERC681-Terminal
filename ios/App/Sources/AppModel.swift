@@ -264,8 +264,9 @@ final class AppModel: ObservableObject {
         _ notice: AppSettingsMigrationNotice
     ) -> String {
         let count = notice.adjustedConfirmationProfileIDs.count
-        return "Safety update: confirmation depth was raised to the compiled network minimum "
-            + "for \(count) legacy payment profile\(count == 1 ? "" : "s")."
+        return "Safety update: confirmation depth was aligned with the strongest stored "
+            + "policy or compiled minimum for \(count) payment profile"
+            + "\(count == 1 ? "" : "s")."
     }
 
     var operatorFundingPayload: String? {
@@ -334,6 +335,49 @@ final class AppModel: ObservableObject {
         }
         // `settings` invalidated all selected-profile readiness state. Refresh only the profile
         // deterministically selected after removal; historical invoice snapshots are untouched.
+        await refreshReadiness()
+    }
+
+    func updateConfirmationBlocks(_ requiredBlocks: UInt64, for chainID: UInt64) async {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
+        guard adminPINConfigured, adminUnlocked else {
+            errorMessage = "Unlock Admin before changing the confirmation policy."
+            return
+        }
+        guard let adminSession = adminSessionGate.capture() else {
+            errorMessage = AppSafetyError.adminSessionExpired.localizedDescription
+            return
+        }
+        guard beginExclusiveOperation() else {
+            errorMessage = AppSettlementError.operationInProgress.localizedDescription
+            return
+        }
+
+        do {
+            await backgroundRPCWorkGate.waitUntilIdle()
+            let original = settings
+            let candidate = try original.updatingConfirmationBlocks(
+                for: chainID,
+                to: requiredBlocks
+            )
+            guard settings == original else { throw AppSafetyError.configurationChanged }
+            try adminSessionGate.requireCurrent(adminSession)
+            settings = candidate
+            let networkName = TerminalKnownChainProfile.profile(for: chainID)?.networkName
+                ?? "chain \(chainID)"
+            provisioningMessage = "\(networkName) now requires \(requiredBlocks) "
+                + "confirmation\(requiredBlocks == 1 ? "" : "s") for new payments."
+            errorMessage = nil
+        } catch {
+            endExclusiveOperation()
+            errorMessage = error.localizedDescription
+            return
+        }
+
+        endExclusiveOperation()
         await refreshReadiness()
     }
 

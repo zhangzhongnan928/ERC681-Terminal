@@ -22,7 +22,7 @@ class SettingsMigrationNoticeTest {
         )
 
         assertTrue(message.contains("2 existing payment profiles"))
-        assertTrue(message.contains("increased to the network minimum"))
+        assertTrue(message.contains("increased to the applicable network policy"))
         assertTrue(message.contains("Terminal setup was preserved"))
         assertTrue(message.contains("review readiness"))
     }

@@ -14,6 +14,18 @@ class PaymentObserverTest {
     private val request = Erc681PaymentRequest(token, 84532, receiver, TokenAmount.parse("12.34", 6))
 
     @Test
+    fun `default is one canonical block confirmation`() {
+        val chain = FakeChain(block = 100, balance = request.amount.rawUnits)
+
+        val result = PaymentObserver(chain).observe(request)
+
+        assertEquals(1, result.requiredConfirmations)
+        assertEquals(1, result.confirmations)
+        assertEquals(PaymentStatus.PAID, result.status)
+        assertEquals(canonicalHash(100), result.fundedAtBlockHash)
+    }
+
+    @Test
     fun `payment progresses through partial confirmations and paid`() {
         val chain = FakeChain()
         val observer = PaymentObserver(chain)
