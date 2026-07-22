@@ -690,10 +690,7 @@ final class AppModel: ObservableObject {
                 var descriptor = FetchDescriptor<StoredInvoice>(predicate: #Predicate { $0.invoiceID == id })
                 descriptor.fetchLimit = 1
                 if let invoice = try container.mainContext.fetch(descriptor).first {
-                    invoice.locallyClosed = true
-                    if invoice.statusLabel != "Paid" && invoice.statusLabel != "Overpaid" && invoice.statusLabel != "Expired" {
-                        invoice.statusLabel = "Closed"
-                    }
+                    invoice.closeLocally()
                     try saveMainContextOrRollback()
                 }
             } catch {
@@ -1526,6 +1523,7 @@ final class AppModel: ObservableObject {
                     invoice.confirmedCumulativeSweptThroughBlock ?? storedBlock,
                     storedBlock
                 )
+                invoice.refreshStatusLabelFromLifecycleEvidence()
             }
             container.mainContext.insert(StoredCanonicalSweepProof(
                 identity: proof.identity,

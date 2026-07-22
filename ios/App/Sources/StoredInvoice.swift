@@ -179,6 +179,52 @@ final class StoredInvoice {
         case .expired:
             statusLabel = "Expired"
         }
+        refreshStatusLabelFromLifecycleEvidence()
+    }
+
+    /// Receiver balance is only the currently sweepable amount. Once canonical settlement
+    /// evidence exists, a later zero balance must not erase the invoice's paid/settled history.
+    /// Likewise, a locally closed QR stays closed while its receiver remains empty.
+    var historyStatusLabel: String {
+        guard let balance = try? UInt256(decimalString: observedBalance),
+              let cumulative = try? UInt256(decimalString: confirmedCumulativeSweptAmount),
+              let observedCumulative = try? UInt256(
+                decimalString: cumulativeSweptAtObservation
+              ),
+              let expected = try? UInt256(decimalString: expectedAmount),
+              !expected.isZero
+        else { return statusLabel }
+
+        // A newly indexed proof can be newer than the saved balance observation. Treat that
+        // proof as authoritative until the next receiver sample pairs both values again.
+        let settlementEvidenceIsNewerThanObservation = cumulative > observedCumulative
+        if balance.isZero || settlementEvidenceIsNewerThanObservation {
+            if cumulative >= expected {
+                return "Settled"
+            }
+            if !cumulative.isZero {
+                return "Partially settled"
+            }
+            if locallyClosed {
+                return statusLabel == "Expired" ? "Expired" : "Closed"
+            }
+        }
+        return statusLabel
+    }
+
+    func refreshStatusLabelFromLifecycleEvidence() {
+        statusLabel = historyStatusLabel
+    }
+
+    func closeLocally() {
+        locallyClosed = true
+        let lifecycleStatus = historyStatusLabel
+        switch lifecycleStatus {
+        case "Paid", "Overpaid", "Expired", "Settled", "Partially settled":
+            statusLabel = lifecycleStatus
+        default:
+            statusLabel = "Closed"
+        }
     }
 
     var formattedAmount: String {
@@ -190,9 +236,9 @@ final class StoredInvoice {
 
     var shouldPresentQRCode: Bool {
         guard !locallyClosed else { return false }
-        return statusLabel == "Waiting"
-            || statusLabel == "Partially funded"
-            || statusLabel.hasPrefix("Confirming ")
+        return historyStatusLabel == "Waiting"
+            || historyStatusLabel == "Partially funded"
+            || historyStatusLabel.hasPrefix("Confirming ")
     }
 
     var hasObservedFunds: Bool {

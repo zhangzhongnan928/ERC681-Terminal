@@ -2001,6 +2001,120 @@ final class ProvisioningAppTests: XCTestCase {
         XCTAssertEqual(newer.observedBalance, "9")
     }
 
+    func testClosedPaidInvoiceBecomesSettledInsteadOfWaitingAfterSweep() throws {
+        let invoice = try storedInvoice()
+        let request = try invoice.paymentRequest()
+        invoice.statusLabel = "Paid"
+        invoice.observedBalance = request.expectedAmount.decimalString
+        invoice.locallyClosed = true
+
+        // Canonical settlement evidence is indexed after the last positive receiver sample.
+        invoice.confirmedCumulativeSweptAmount = request.expectedAmount.decimalString
+        invoice.confirmedCumulativeSweptThroughBlock = 101
+        invoice.refreshStatusLabelFromLifecycleEvidence()
+        XCTAssertEqual(invoice.statusLabel, "Settled")
+
+        try invoice.apply(
+            PaymentObservation(
+                invoiceID: request.invoiceID,
+                blockNumber: 102,
+                blockHash: appBlockHash(102),
+                balance: .zero,
+                status: .waiting,
+                thresholdBlock: nil,
+                thresholdBlockHash: nil
+            ),
+            cumulativeConfirmedSweptAmount: request.expectedAmount
+        )
+
+        XCTAssertEqual(invoice.statusLabel, "Settled")
+        XCTAssertEqual(invoice.historyStatusLabel, "Settled")
+
+        // Existing installs may already have persisted the old zero-balance classification.
+        invoice.statusLabel = "Waiting"
+        XCTAssertEqual(invoice.historyStatusLabel, "Settled")
+        invoice.refreshStatusLabelFromLifecycleEvidence()
+        XCTAssertEqual(invoice.statusLabel, "Settled")
+    }
+
+    func testClosingConfirmationAfterSettlementPreservesSettledHistoryStatus() throws {
+        let invoice = try storedInvoice()
+        let request = try invoice.paymentRequest()
+        invoice.statusLabel = "Paid"
+        invoice.observedBalance = request.expectedAmount.decimalString
+        invoice.confirmedCumulativeSweptAmount = request.expectedAmount.decimalString
+        invoice.confirmedCumulativeSweptThroughBlock = 101
+        invoice.refreshStatusLabelFromLifecycleEvidence()
+
+        invoice.closeLocally()
+
+        XCTAssertTrue(invoice.locallyClosed)
+        XCTAssertEqual(invoice.statusLabel, "Settled")
+        XCTAssertEqual(invoice.historyStatusLabel, "Settled")
+        XCTAssertFalse(invoice.shouldPresentQRCode)
+    }
+
+    func testClosedUnpaidInvoiceStaysClosedAcrossZeroBalanceRefresh() throws {
+        let invoice = try storedInvoice()
+        let request = try invoice.paymentRequest()
+        invoice.closeLocally()
+
+        try invoice.apply(
+            PaymentObservation(
+                invoiceID: request.invoiceID,
+                blockNumber: 102,
+                blockHash: appBlockHash(102),
+                balance: .zero,
+                status: .waiting,
+                thresholdBlock: nil,
+                thresholdBlockHash: nil
+            )
+        )
+
+        XCTAssertEqual(invoice.statusLabel, "Closed")
+        XCTAssertEqual(invoice.historyStatusLabel, "Closed")
+    }
+
+    @MainActor
+    func testCanonicalSettlementEvidenceImmediatelyMarksPaidInvoiceSettled() throws {
+        let container = try ModelContainer(
+            for: StoredInvoice.self,
+            StoredSettlement.self,
+            StoredCanonicalSweepProof.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let invoice = try storedInvoice()
+        invoice.statusLabel = "Paid"
+        invoice.observedBalance = invoice.expectedAmount
+        invoice.observedBlock = 100
+        invoice.observedBlockHash = appBlockHash(100).hex
+        let settlement = try storedFinalSettlement(
+            for: invoice,
+            transactionHash: "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            block: 101
+        )
+        settlement.cumulativeEvidenceIndexed = false
+        container.mainContext.insert(invoice)
+        container.mainContext.insert(settlement)
+        try container.mainContext.save()
+        let namespace = UUID().uuidString
+        let model = AppModel(
+            container: container,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.tests.\(namespace)"
+            ),
+            adminPINStore: KeychainAdminPINStore(
+                service: "com.openpasskey.terminal.admin-pin.tests.\(namespace)"
+            )
+        )
+
+        try model.indexCanonicalSettlementEvidence(now: Date(timeIntervalSince1970: 2_000))
+
+        XCTAssertEqual(invoice.confirmedCumulativeSweptAmount, invoice.expectedAmount)
+        XCTAssertEqual(invoice.statusLabel, "Settled")
+        XCTAssertEqual(invoice.historyStatusLabel, "Settled")
+    }
+
     func testSweepableConfirmationCoversInitialPartialCumulativeAndRepeatBalances() throws {
         let invoice = try storedInvoice(confirmationBlocks: 2)
         let invoiceID = try Bytes32(hex: invoice.invoiceID)
