@@ -52,8 +52,75 @@ class OperatorWalletSweepSelectorGuardTest {
     }
 
     @Test
-    fun acceptsUppercaseHexRepresentations() {
-        requireSweepSessionsCallData(encodedSweepSessions().uppercase())
+    fun acceptsUppercaseHexDigitsBehindALowercasePrefix() {
+        // Uppercase DIGITS are fine — web3j decodes them case-insensitively to the same bytes.
+        val upperDigits = "0x" + encodedSweepSessions().removePrefix("0x").uppercase()
+        requireSweepSessionsCallData(upperDigits)
+        val raw = RawTransaction.createTransaction(
+            NONCE,
+            GAS_PRICE,
+            GAS_LIMIT,
+            VAULT,
+            BigInteger.ZERO,
+            upperDigits,
+        )
+        requireSweepSessionsCallData(raw.data)
+    }
+
+    /**
+     * An uppercase "0X" PREFIX is not recognized by web3j's cleanHexPrefix, so it survives into
+     * the signed bytes: hexStringToByteArray decodes the "0X" pair to 0xff and the transaction
+     * signs selector 0xff682b11 instead of sweepSessions. The guard must reject the exact
+     * representation web3j will decode, for both fee modes, as carried by RawTransaction.
+     */
+    @Test
+    fun rejectsUppercase0XPrefixCarriedThroughLegacyRawTransaction() {
+        val attack = "0X" + encodedSweepSessions().removePrefix("0x").uppercase()
+        val raw = RawTransaction.createTransaction(
+            NONCE,
+            GAS_PRICE,
+            GAS_LIMIT,
+            VAULT,
+            BigInteger.ZERO,
+            attack,
+        )
+        assertTrue(raw.data.startsWith("0X"))
+        assertThrows(IllegalArgumentException::class.java) {
+            requireSweepSessionsCallData(raw.data)
+        }
+    }
+
+    @Test
+    fun rejectsUppercase0XPrefixCarriedThroughType2RawTransaction() {
+        val attack = "0X" + encodedSweepSessions().removePrefix("0x").uppercase()
+        val raw = RawTransaction.createTransaction(
+            CHAIN_ID,
+            NONCE,
+            GAS_LIMIT,
+            VAULT,
+            BigInteger.ZERO,
+            attack,
+            MAX_PRIORITY_FEE,
+            MAX_FEE,
+        )
+        assertTrue(raw.data.startsWith("0X"))
+        assertThrows(IllegalArgumentException::class.java) {
+            requireSweepSessionsCallData(raw.data)
+        }
+    }
+
+    @Test
+    fun uppercasePrefixCandidateDocumentsTheSignedByteDivergence() {
+        // Pins the web3j semantics this guard mirrors. If either assertion fails after a web3j
+        // upgrade, the guard's decode rationale must be re-examined.
+        assertEquals("0X682B11B5", Numeric.cleanHexPrefix("0X682B11B5"))
+        val signedHead = Numeric.toHexString(
+            Numeric.hexStringToByteArray("0X682B11B5").copyOfRange(0, 5),
+        )
+        assertEquals("0xff682b11b5", signedHead)
+        assertThrows(IllegalArgumentException::class.java) {
+            requireSweepSessionsCallData("0X682B11B5" + "00".repeat(30))
+        }
     }
 
     @Test

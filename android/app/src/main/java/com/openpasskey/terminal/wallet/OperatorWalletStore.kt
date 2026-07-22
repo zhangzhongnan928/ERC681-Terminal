@@ -364,19 +364,21 @@ internal fun requireVerifiedSettlementActivation(
     }
 }
 
-// Selector bytes for sweepSessions(bytes32[],uint256[],address). Compared against the decoded
-// calldata rather than a hex prefix: web3j signs Numeric.hexStringToByteArray(data), which strips
-// any 0x prefix AND left-pads odd-length hex with a leading nibble. A string prefix check would
-// pass "682b11b5f" while the bytes actually signed begin 0x0682b11b, so this fail-closed boundary
-// must validate the exact bytes it will authorize.
+// Selector bytes for sweepSessions(bytes32[],uint256[],address). The guard must validate the
+// exact bytes web3j will sign, mirroring its decode semantics precisely:
+//  - Numeric.hexStringToByteArray left-pads odd-length hex, so "682b11b5f" signs as 0x0682b11b….
+//  - Numeric.cleanHexPrefix strips only a lowercase "0x"; an uppercase "0X" prefix survives into
+//    the signed bytes as 0xff, so "0X682B11B5…" signs selector 0xff682b11. Case-normalizing
+//    before prefix handling would therefore validate a different string than the one signed.
+// Hence: strip the prefix exactly as web3j does, then accept only unambiguous ASCII hex.
 private val SWEEP_SESSIONS_SELECTOR = byteArrayOf(0x68, 0x2b, 0x11, 0xb5.toByte())
 
 internal fun requireSweepSessionsCallData(callData: String?) {
-    val normalized = Numeric.cleanHexPrefix(callData.orEmpty().lowercase())
+    val normalized = Numeric.cleanHexPrefix(callData.orEmpty())
     require(
         normalized.length >= SWEEP_SESSIONS_SELECTOR.size * 2 &&
             normalized.length % 2 == 0 &&
-            normalized.all { it in '0'..'9' || it in 'a'..'f' },
+            normalized.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' },
     ) { "Operator key only signs sweepSessions calls" }
     val selector = Numeric.hexStringToByteArray(normalized).copyOfRange(0, SWEEP_SESSIONS_SELECTOR.size)
     require(selector.contentEquals(SWEEP_SESSIONS_SELECTOR)) {
