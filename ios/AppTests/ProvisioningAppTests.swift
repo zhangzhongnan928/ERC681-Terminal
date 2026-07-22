@@ -3240,6 +3240,7 @@ final class ProvisioningAppTests: XCTestCase {
         XCTAssertNotEqual(try oldInvoice.configurationSnapshot().deployment.vault, newVault)
     }
 
+    @MainActor
     func testPrewarmedSaleProofIsConsumedByCreateSaleWithoutRefetching() async throws {
         let savedSettings = AppPreferences.loadSettings()
         defer { AppPreferences.saveSettings(savedSettings) }
@@ -3310,6 +3311,7 @@ final class ProvisioningAppTests: XCTestCase {
         model.closeActiveSale()
     }
 
+    @MainActor
     func testStalePrewarmedSaleProofIsDiscardedAndCreateSaleRefetches() async throws {
         let savedSettings = AppPreferences.loadSettings()
         defer { AppPreferences.saveSettings(savedSettings) }
@@ -3368,6 +3370,7 @@ final class ProvisioningAppTests: XCTestCase {
         model.closeActiveSale()
     }
 
+    @MainActor
     func testPrewarmFailureIsSilentAndCreateSaleFallsBackToFreshProofs() async throws {
         let savedSettings = AppPreferences.loadSettings()
         defer { AppPreferences.saveSettings(savedSettings) }
