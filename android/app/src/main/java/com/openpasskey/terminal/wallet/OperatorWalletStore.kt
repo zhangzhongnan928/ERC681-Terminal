@@ -206,9 +206,7 @@ class OperatorWalletStore(context: Context) {
         val wallet = snapshot()
         requireVerifiedSettlementActivation(wallet, chainId, target)
         require(transaction.value == BigInteger.ZERO) { "Settlement cannot transfer native value" }
-        require(transaction.data.lowercase().startsWith(SWEEP_SESSIONS_SELECTOR)) {
-            "Operator key only signs sweepSessions calls"
-        }
+        requireSweepSessionsCallData(transaction.data)
         if (eip1559) {
             require(transaction.type == TransactionType.EIP1559) { "Expected a type-2 transaction" }
             val typed = transaction.transaction as? Transaction1559
@@ -343,7 +341,6 @@ class OperatorWalletStore(context: Context) {
         private const val PRIVATE_KEY_BYTES = 32
         private const val GCM_TAG_BITS = 128
         private const val AUTH_WINDOW_SECONDS = 30
-        private const val SWEEP_SESSIONS_SELECTOR = "0x682b11b5"
         private val AAD = "OPK_OPERATOR_WALLET_V1".toByteArray(Charsets.UTF_8)
     }
 }
@@ -364,5 +361,16 @@ internal fun requireVerifiedSettlementActivation(
     }
     require(wallet.activatedOperatorAddress?.equals(wallet.address, ignoreCase = true) == true) {
         "Settlement activation is not bound to this operator wallet"
+    }
+}
+
+// Selector for sweepSessions(bytes32[],uint256[],address), stored without the 0x prefix because
+// web3j's RawTransaction strips the prefix from calldata while ABI encoders emit it prefixed.
+private const val SWEEP_SESSIONS_SELECTOR_HEX = "682b11b5"
+
+internal fun requireSweepSessionsCallData(callData: String?) {
+    val normalized = Numeric.cleanHexPrefix(callData.orEmpty().lowercase())
+    require(normalized.startsWith(SWEEP_SESSIONS_SELECTOR_HEX)) {
+        "Operator key only signs sweepSessions calls"
     }
 }

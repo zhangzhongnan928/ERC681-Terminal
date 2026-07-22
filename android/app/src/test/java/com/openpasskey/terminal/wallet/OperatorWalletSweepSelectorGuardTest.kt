@@ -1,0 +1,105 @@
+package com.openpasskey.terminal.wallet
+
+import com.openpasskey.terminal.settlement.SettlementAbi
+import com.openpasskey.terminal.settlement.SettlementInvoiceIntent
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.web3j.crypto.RawTransaction
+import java.math.BigInteger
+
+/**
+ * The operator key must sign exactly the calldata produced by [SettlementAbi.encodeSweepSessions]
+ * once it has travelled through web3j's [RawTransaction], which strips the 0x prefix from data.
+ * Regression: the guard compared the carried data against a 0x-prefixed selector string, so every
+ * legitimate settlement was rejected with "Operator key only signs sweepSessions calls".
+ */
+class OperatorWalletSweepSelectorGuardTest {
+
+    @Test
+    fun acceptsSweepCallDataCarriedByLegacyRawTransaction() {
+        val raw = RawTransaction.createTransaction(
+            NONCE,
+            GAS_PRICE,
+            GAS_LIMIT,
+            VAULT,
+            BigInteger.ZERO,
+            encodedSweepSessions(),
+        )
+        requireSweepSessionsCallData(raw.data)
+    }
+
+    @Test
+    fun acceptsSweepCallDataCarriedByType2RawTransaction() {
+        val raw = RawTransaction.createTransaction(
+            CHAIN_ID,
+            NONCE,
+            GAS_LIMIT,
+            VAULT,
+            BigInteger.ZERO,
+            encodedSweepSessions(),
+            MAX_PRIORITY_FEE,
+            MAX_FEE,
+        )
+        requireSweepSessionsCallData(raw.data)
+    }
+
+    @Test
+    fun acceptsEncoderOutputBeforeAnyTransactionWrapping() {
+        requireSweepSessionsCallData(encodedSweepSessions())
+    }
+
+    @Test
+    fun acceptsUppercaseHexRepresentations() {
+        requireSweepSessionsCallData(encodedSweepSessions().uppercase())
+    }
+
+    @Test
+    fun encoderEmitsTheCanonicalSweepSessionsSelector() {
+        assertTrue(encodedSweepSessions().startsWith("0x682b11b5"))
+    }
+
+    @Test
+    fun rejectsForeignSelectorsWithAndWithoutPrefix() {
+        val transferCallData = "a9059cbb" +
+            "000000000000000000000000" + RECEIVER.removePrefix("0x") +
+            "00000000000000000000000000000000000000000000000000000000000f4240"
+        listOf("0x$transferCallData", transferCallData).forEach { callData ->
+            assertThrows(IllegalArgumentException::class.java) {
+                requireSweepSessionsCallData(callData)
+            }
+        }
+    }
+
+    @Test
+    fun rejectsEmptyMissingOrMisplacedSelectorData() {
+        listOf(null, "", "0x", "0x00682b11b5", "00682b11b5").forEach { callData ->
+            assertThrows(IllegalArgumentException::class.java) {
+                requireSweepSessionsCallData(callData)
+            }
+        }
+    }
+
+    private fun encodedSweepSessions(): String = SettlementAbi.encodeSweepSessions(
+        listOf(
+            SettlementInvoiceIntent(
+                invoiceId = "0x" + "11".repeat(32),
+                receiver = RECEIVER,
+                expectedAmount = BigInteger.valueOf(1_000_000),
+            ),
+        ),
+        TOKEN,
+    )
+
+    private companion object {
+        const val CHAIN_ID = 84532L
+        const val VAULT = "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1"
+        const val RECEIVER = "0x3333333333333333333333333333333333333333"
+        const val TOKEN = "0x4444444444444444444444444444444444444444"
+        val NONCE: BigInteger = BigInteger.ONE
+        val GAS_PRICE: BigInteger = BigInteger.valueOf(1_000_000_000)
+        val GAS_LIMIT: BigInteger = BigInteger.valueOf(300_000)
+        val MAX_PRIORITY_FEE: BigInteger = BigInteger.valueOf(1_000_000_000)
+        val MAX_FEE: BigInteger = BigInteger.valueOf(2_000_000_000)
+    }
+}
