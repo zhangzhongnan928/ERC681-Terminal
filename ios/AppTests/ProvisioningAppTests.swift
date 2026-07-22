@@ -2115,6 +2115,47 @@ final class ProvisioningAppTests: XCTestCase {
         XCTAssertEqual(invoice.historyStatusLabel, "Settled")
     }
 
+    func testPartialSettlementEvidenceSurvivesZeroBalanceRefresh() throws {
+        let invoice = try storedInvoice()
+        let request = try invoice.paymentRequest()
+        let partialCumulative = UInt256(400)
+        XCTAssertLessThan(partialCumulative, request.expectedAmount)
+        invoice.statusLabel = "Paid"
+        invoice.confirmedCumulativeSweptAmount = partialCumulative.decimalString
+
+        try invoice.apply(
+            PaymentObservation(
+                invoiceID: request.invoiceID,
+                blockNumber: 102,
+                blockHash: appBlockHash(102),
+                balance: .zero,
+                status: .waiting,
+                thresholdBlock: nil,
+                thresholdBlockHash: nil
+            ),
+            cumulativeConfirmedSweptAmount: partialCumulative
+        )
+
+        XCTAssertEqual(invoice.statusLabel, "Partially settled")
+        XCTAssertEqual(invoice.historyStatusLabel, "Partially settled")
+        XCTAssertFalse(invoice.shouldPresentQRCode)
+
+        invoice.closeLocally()
+        XCTAssertEqual(invoice.statusLabel, "Partially settled")
+        XCTAssertEqual(invoice.historyStatusLabel, "Partially settled")
+    }
+
+    func testCorruptLifecycleEvidenceFallsBackToPersistedStatus() throws {
+        let invoice = try storedInvoice()
+        invoice.statusLabel = "Paid"
+        invoice.observedBalance = "not-a-decimal"
+        invoice.confirmedCumulativeSweptAmount = invoice.expectedAmount
+
+        XCTAssertEqual(invoice.historyStatusLabel, "Paid")
+        invoice.refreshStatusLabelFromLifecycleEvidence()
+        XCTAssertEqual(invoice.statusLabel, "Paid")
+    }
+
     func testSweepableConfirmationCoversInitialPartialCumulativeAndRepeatBalances() throws {
         let invoice = try storedInvoice(confirmationBlocks: 2)
         let invoiceID = try Bytes32(hex: invoice.invoiceID)
