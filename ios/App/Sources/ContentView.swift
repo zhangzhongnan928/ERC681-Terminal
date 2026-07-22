@@ -985,7 +985,7 @@ private struct HistoryView: View {
                             Text(invoice.formattedAmount)
                                 .font(.headline)
                             Spacer()
-                            Text(invoice.statusLabel)
+                            Text(invoice.historyStatusLabel)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -1016,7 +1016,7 @@ private struct InvoiceDetailView: View {
         List {
             Section {
                 LabeledContent("Amount", value: invoice.formattedAmount)
-                LabeledContent("Status", value: invoice.statusLabel)
+                LabeledContent("Status", value: invoice.historyStatusLabel)
                 LabeledContent("Balance", value: invoice.observedBalance)
                 LabeledContent("Receiver", value: abbreviated(invoice.receiver))
                 LabeledContent("Invoice", value: abbreviated(invoice.invoiceID))
@@ -1029,7 +1029,7 @@ private struct InvoiceDetailView: View {
                     ContentUnavailableView(
                         "QR closed",
                         systemImage: "qrcode",
-                        description: Text("This invoice is \(invoice.statusLabel.lowercased()) and is no longer payable from the terminal.")
+                        description: Text("This invoice is \(invoice.historyStatusLabel.lowercased()) and is no longer payable from the terminal.")
                     )
                 }
             }

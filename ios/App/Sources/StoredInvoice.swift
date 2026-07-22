@@ -179,6 +179,51 @@ final class StoredInvoice {
         case .expired:
             statusLabel = "Expired"
         }
+        refreshStatusLabelFromLifecycleEvidence()
+    }
+
+    /// Receiver balance is only the currently sweepable amount. Once canonical settlement
+    /// evidence exists, later receiver activity must not reopen the original full-amount QR.
+    /// Confirmed late value remains recoverable through Settlement, and a locally closed QR
+    /// stays closed while its receiver is empty.
+    var historyStatusLabel: String {
+        guard let balance = try? UInt256(decimalString: observedBalance),
+              let cumulative = try? UInt256(decimalString: confirmedCumulativeSweptAmount),
+              (try? UInt256(decimalString: cumulativeSweptAtObservation)) != nil,
+              let expected = try? UInt256(decimalString: expectedAmount),
+              !expected.isZero
+        else { return statusLabel }
+
+        // Any canonical sweep closes the original charge lifecycle. A later transfer to the
+        // deterministic receiver remains observable and sweepable in Settlement, but it must
+        // never make the original full-amount payment QR payable again.
+        if cumulative >= expected {
+            return "Settled"
+        }
+        if !cumulative.isZero {
+            return "Partially settled"
+        }
+        if balance.isZero {
+            if locallyClosed {
+                return statusLabel == "Expired" ? "Expired" : "Closed"
+            }
+        }
+        return statusLabel
+    }
+
+    func refreshStatusLabelFromLifecycleEvidence() {
+        statusLabel = historyStatusLabel
+    }
+
+    func closeLocally() {
+        locallyClosed = true
+        let lifecycleStatus = historyStatusLabel
+        switch lifecycleStatus {
+        case "Paid", "Overpaid", "Expired", "Settled", "Partially settled":
+            statusLabel = lifecycleStatus
+        default:
+            statusLabel = "Closed"
+        }
     }
 
     var formattedAmount: String {
@@ -190,9 +235,9 @@ final class StoredInvoice {
 
     var shouldPresentQRCode: Bool {
         guard !locallyClosed else { return false }
-        return statusLabel == "Waiting"
-            || statusLabel == "Partially funded"
-            || statusLabel.hasPrefix("Confirming ")
+        return historyStatusLabel == "Waiting"
+            || historyStatusLabel == "Partially funded"
+            || historyStatusLabel.hasPrefix("Confirming ")
     }
 
     var hasObservedFunds: Bool {
