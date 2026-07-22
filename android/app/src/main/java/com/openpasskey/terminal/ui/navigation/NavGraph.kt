@@ -18,6 +18,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.navigation.NavHostController
+import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -105,7 +106,7 @@ fun AppNavigation(
                         )
                     },
                     onOpenSettings = {
-                        controller.navigate(Routes.SETTINGS) { launchSingleTop = true }
+                        controller.navigateTopLevel(Routes.SETTINGS)
                     },
                 ) { controller.navigate(Routes.payment(it)) }
             }
@@ -126,21 +127,30 @@ fun AppNavigation(
 }
 
 @Composable
-private fun BottomNavigationBar(controller: NavHostController, currentRoute: String?) {
+internal fun BottomNavigationBar(controller: NavHostController, currentRoute: String?) {
     NavigationBar {
         navItems.forEach { item ->
             NavigationBarItem(
                 selected = currentRoute == item.route,
                 onClick = {
-                    controller.navigate(item.route) {
-                        popUpTo(Routes.INVOICE) { saveState = true }
-                        launchSingleTop = true
-                        restoreState = true
-                    }
+                    controller.navigateTopLevel(item.route)
                 },
                 icon = { Icon(item.icon, contentDescription = item.label) },
                 label = { Text(item.label) }
             )
         }
+    }
+}
+
+/**
+ * Every route shown in the bottom bar belongs to the same set of top-level destinations.
+ * Applying one navigation policy here prevents a nested Settings entry opened from Checkout from
+ * being saved against, then immediately restored over, the Checkout start destination.
+ */
+internal fun NavHostController.navigateTopLevel(route: String) {
+    navigate(route) {
+        popUpTo(graph.findStartDestination().id) { saveState = true }
+        launchSingleTop = true
+        restoreState = true
     }
 }
