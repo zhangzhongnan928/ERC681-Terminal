@@ -15,6 +15,18 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class NetworkConfirmationPolicyTest {
     @Test
+    fun successCopyDoesNotReportAPreMutationProfileCount() {
+        val singular = networkConfirmationUpdateSuccessMessage("Base Sepolia", 1)
+        val plural = networkConfirmationUpdateSuccessMessage("Base Sepolia", 7)
+
+        assertTrue(singular.contains("requires 1 confirmation"))
+        assertTrue(plural.contains("requires 7 confirmations"))
+        assertTrue(plural.contains("all configured payment profiles on this network"))
+        assertTrue(plural.contains("Existing invoices keep their original policy"))
+        assertFalse(plural.contains("payment profile(s)"))
+    }
+
+    @Test
     fun updateRequiresTheCurrentUnlockedAdminEpoch() = runBlocking {
         val gate = TerminalLifecycleGate()
         val session = AdminSessionGate()

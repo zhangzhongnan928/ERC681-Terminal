@@ -2,6 +2,7 @@ import Foundation
 import OPKTerminalCore
 
 private let maximumAdjustableConfirmationBlocks: UInt64 = 64
+private let maximumStoredConfirmationBlocks = UInt64(Int64.max)
 
 /// Persisted configuration for one merchant-selectable currency route. Its identity includes the
 /// chain, vault, and token; display symbols are metadata and never identify a route.
@@ -124,7 +125,7 @@ struct AppPaymentProfile: Codable, Equatable, Identifiable {
               let endpoint = URL(string: rpcURL),
               let decimals = UInt8(tokenDecimals),
               let blocks = UInt64(confirmationBlocks), blocks > 0,
-              blocks <= maximumAdjustableConfirmationBlocks
+              blocks <= maximumStoredConfirmationBlocks
         else { throw AppSettingsError.invalidValue }
         guard let profile = TerminalKnownChainProfile.profile(for: chainID) else {
             throw AppSettingsError.unsupportedChain
@@ -245,7 +246,7 @@ struct AppPaymentProfile: Codable, Equatable, Identifiable {
 }
 
 /// Non-secret metadata retained until the app tells the merchant that a legacy safety policy was
-/// raised to the current compiled network minimum.
+/// raised to the strongest stored network policy or the current compiled network minimum.
 struct AppSettingsMigrationNotice: Codable, Equatable {
     let adjustedConfirmationProfileIDs: [String]
 }
@@ -276,11 +277,11 @@ struct AppSettings: Codable, Equatable {
         selectedPaymentProfile ?? fallbackProfile
     }
 
-    /// Compatibility facade for legacy callers. The policy is stored on the selected profile,
-    /// never globally, so changing or selecting one route cannot rewrite another route's finality.
+    /// Read-only compatibility facade for consumers that display the selected network policy.
+    /// Mutations must use `updatingConfirmationBlocks(for:to:)` so every route on the network
+    /// remains aligned.
     var confirmationBlocks: String {
-        get { displayedPaymentProfile.confirmationBlocks }
-        set { mutateDisplayedProfile { $0.confirmationBlocks = newValue } }
+        displayedPaymentProfile.confirmationBlocks
     }
 
     var isProvisioned: Bool {
@@ -793,7 +794,7 @@ struct AppSettings: Codable, Equatable {
             else { continue }
             guard let requiredBlocks = UInt64(profile.confirmationBlocks),
                   requiredBlocks >= known.minimumConfirmationBlocks,
-                  requiredBlocks <= maximumAdjustableConfirmationBlocks
+                  requiredBlocks <= maximumStoredConfirmationBlocks
             else {
                 invalidChains.insert(chainID)
                 continue

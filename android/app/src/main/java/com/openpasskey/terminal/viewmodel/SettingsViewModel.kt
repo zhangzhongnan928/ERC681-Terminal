@@ -577,9 +577,9 @@ class SettingsViewModel(
             )
             return
         }
-        val affectedProfiles = chainConfig.snapshot().resolvedPaymentProfiles()
-            .count { it.chainId == chainId }
-        if (affectedProfiles == 0) {
+        val networkIsConfigured = chainConfig.snapshot().resolvedPaymentProfiles()
+            .any { it.chainId == chainId }
+        if (!networkIsConfigured) {
             _state.value = _state.value.copy(
                 message = "${policy.networkName} is not configured on this terminal.",
                 isError = true,
@@ -613,15 +613,11 @@ class SettingsViewModel(
                     )
                 }
                 adminSession.lock()
-                val noun = if (affectedProfiles == 1) "profile" else "profiles"
-                val confirmations = if (confirmationBlocks == 1) {
-                    "1 confirmation"
-                } else {
-                    "$confirmationBlocks confirmations"
-                }
                 _state.value = load(
-                    "${policy.networkName} now requires $confirmations for " +
-                        "$affectedProfiles payment $noun. Existing invoices keep their original policy.",
+                    networkConfirmationUpdateSuccessMessage(
+                        policy.networkName,
+                        confirmationBlocks,
+                    ),
                 )
                 refreshOperatorStatus()
             } catch (error: Exception) {
@@ -1011,6 +1007,20 @@ internal fun chainConfigMigrationNoticeMessage(notice: ChainConfigMigrationNotic
 internal fun awaitingGasReadinessMessage(networkPolicy: KnownChainProfile): String =
     "Authorization confirmed. Fund the operator with at least " +
         "${networkPolicy.minimumOperatorNativeReserveDisplay()}."
+
+internal fun networkConfirmationUpdateSuccessMessage(
+    networkName: String,
+    confirmationBlocks: Int,
+): String {
+    require(confirmationBlocks in 1..64)
+    val confirmations = if (confirmationBlocks == 1) {
+        "1 confirmation"
+    } else {
+        "$confirmationBlocks confirmations"
+    }
+    return "$networkName now requires $confirmations for all configured payment profiles on " +
+        "this network. Existing invoices keep their original policy."
+}
 
 internal suspend fun removePaymentProfileExclusively(
     lifecycleGate: TerminalLifecycleGate,

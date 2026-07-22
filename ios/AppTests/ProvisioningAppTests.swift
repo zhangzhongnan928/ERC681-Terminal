@@ -454,9 +454,8 @@ final class ProvisioningAppTests: XCTestCase {
     }
 
     func testNewPaymentRouteUsesKnownNetworkDefaultWithoutLeakingFallbackFinality() throws {
-        var original = AppSettings()
+        var original = try legacyFlatSettings(confirmationBlocks: "7")
         original.rpcURL = "https://example-rpc.invalid"
-        original.confirmationBlocks = "7"
         original.provisionedOperatorAddress = nil
         let snapshot = original
         let profile = TerminalKnownChainProfile.baseSepolia
@@ -520,8 +519,9 @@ final class ProvisioningAppTests: XCTestCase {
             confirmationPolicy: .init(requiredBlocks: profile.defaultConfirmationBlocks),
             create2TestVector: profile.create2TestVector
         )
-        var raised = try AppSettings().applying(configuration, boundTo: operatorAddress)
-        raised.confirmationBlocks = "7"
+        let raised = try AppSettings()
+            .applying(configuration, boundTo: operatorAddress)
+            .updatingConfirmationBlocks(for: profile.chainID, to: 7)
 
         let reprovisioned = try raised.applying(configuration, boundTo: operatorAddress)
 
@@ -530,9 +530,40 @@ final class ProvisioningAppTests: XCTestCase {
         XCTAssertEqual(reprovisioned.confirmationBlocks, "7")
     }
 
+    func testProvisioningNewRouteInheritsGrandfatheredNetworkPolicy() throws {
+        let known = TerminalKnownChainProfile.baseSepolia
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let first = try AppSettings().applying(
+            paymentConfiguration(
+                vault: "0x2222222222222222222222222222222222222222",
+                token: "0x3333333333333333333333333333333333333333",
+                symbol: "AUDM"
+            ),
+            boundTo: operatorAddress
+        )
+        let grandfathered = try replacingStoredProfileConfirmations(
+            in: first,
+            with: ["100"]
+        )
+
+        let provisioned = try grandfathered.applying(
+            paymentConfiguration(
+                vault: "0x4444444444444444444444444444444444444444",
+                token: "0x5555555555555555555555555555555555555555",
+                symbol: "USDC"
+            ),
+            boundTo: operatorAddress
+        )
+
+        XCTAssertEqual(provisioned.paymentProfiles.count, 2)
+        XCTAssertTrue(provisioned.paymentProfiles.allSatisfy {
+            $0.chainID == String(known.chainID) && $0.confirmationBlocks == "100"
+        })
+        XCTAssertEqual(try provisioned.configuration().confirmationPolicy.requiredBlocks, 100)
+    }
+
     func testRejectedCandidateCannotPartiallyMutateExistingSettings() throws {
-        var original = AppSettings()
-        original.confirmationBlocks = "2"
+        let original = try legacyFlatSettings(confirmationBlocks: "7")
         let snapshot = original
         let profile = TerminalKnownChainProfile.baseSepolia
         let token = try PaymentToken(
@@ -594,6 +625,25 @@ final class ProvisioningAppTests: XCTestCase {
             from: JSONEncoder().encode(migrated)
         )
         XCTAssertEqual(roundTripped, migrated)
+    }
+
+    func testReleasedLegacyFlatConfirmationAboveAdjustmentCapRemainsOperational() throws {
+        let migrated = try legacyFlatSettings(
+            confirmationBlocks: "100",
+            provisionedOperatorAddress: "0x1111111111111111111111111111111111111111"
+        )
+
+        XCTAssertTrue(migrated.isProvisioned)
+        XCTAssertEqual(migrated.paymentProfiles.map(\.confirmationBlocks), ["100"])
+        XCTAssertEqual(try migrated.configuration().confirmationPolicy.requiredBlocks, 100)
+        XCTAssertNil(migrated.migrationNotice)
+
+        let roundTripped = try JSONDecoder().decode(
+            AppSettings.self,
+            from: JSONEncoder().encode(migrated)
+        )
+        XCTAssertEqual(roundTripped, migrated)
+        XCTAssertEqual(try roundTripped.configuration().confirmationPolicy.requiredBlocks, 100)
     }
 
     func testLegacyFlatFinalityAtKnownFloorRemainsProvisionedWithoutAdjustment() throws {
@@ -689,6 +739,58 @@ final class ProvisioningAppTests: XCTestCase {
                 from: JSONSerialization.data(withJSONObject: currentWithoutSelection)
             )
         )
+    }
+
+    func testV2AndCurrentCatalogsPreserveGrandfatheredConfirmationAboveAdjustmentCap() throws {
+        let profile: [String: Any] = [
+            "rpcURL": "https://sepolia.base.org",
+            "chainID": "84532",
+            "protocolVersion": "1.4.1",
+            "factory": "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
+            "receiverImplementation": "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
+            "vault": "0x3333333333333333333333333333333333333333",
+            "tokenAddress": "0x2222222222222222222222222222222222222222",
+            "tokenSymbol": "AUDM",
+            "tokenDecimals": "18",
+            "provisionedOperatorAddress": "0x1111111111111111111111111111111111111111",
+        ]
+        let v2Data = try JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 2,
+            "confirmationBlocks": "100",
+            "paymentProfiles": [profile],
+        ])
+        let migrated = try JSONDecoder().decode(AppSettings.self, from: v2Data)
+
+        XCTAssertEqual(migrated.confirmationBlocks, "100")
+        XCTAssertEqual(try migrated.configuration().confirmationPolicy.requiredBlocks, 100)
+        XCTAssertNil(migrated.migrationNotice)
+
+        let currentData = try JSONEncoder().encode(migrated)
+        let current = try JSONDecoder().decode(AppSettings.self, from: currentData)
+        XCTAssertEqual(current, migrated)
+        XCTAssertEqual(try current.configuration().confirmationPolicy.requiredBlocks, 100)
+
+        let defaults = UserDefaults.standard
+        let settingsKey = "opk.app.settings.v1"
+        let previouslyStoredSettings = defaults.object(forKey: settingsKey)
+        defer {
+            if let previouslyStoredSettings {
+                defaults.set(previouslyStoredSettings, forKey: settingsKey)
+            } else {
+                defaults.removeObject(forKey: settingsKey)
+            }
+        }
+        defaults.set(currentData, forKey: settingsKey)
+
+        let loaded = AppPreferences.loadSettingsResult()
+        XCTAssertFalse(loaded.recoveryRequired)
+        XCTAssertEqual(loaded.settings.confirmationBlocks, "100")
+        XCTAssertTrue(AppPreferences.saveSettings(loaded.settings))
+
+        let reloaded = AppPreferences.loadSettingsResult()
+        XCTAssertFalse(reloaded.recoveryRequired)
+        XCTAssertEqual(reloaded.settings, loaded.settings)
+        XCTAssertEqual(try reloaded.settings.configuration().confirmationPolicy.requiredBlocks, 100)
     }
 
     func testPersistedCatalogRejectsUnsupportedChainBeforeOfferingFunding() throws {
@@ -857,7 +959,7 @@ final class ProvisioningAppTests: XCTestCase {
         XCTAssertEqual(remaining.tokenSymbol, "AUDM")
     }
 
-    func testProfilesOnSameNetworkShareFinalityAndRejectValuesOutsideAdjustableRange() throws {
+    func testProfilesShareNetworkPolicyWhileStoredValuesRemainBackwardCompatible() throws {
         let operatorAddress = try address("0x1111111111111111111111111111111111111111")
         let known = TerminalKnownChainProfile.baseSepolia
         func configuration(vault: String, token: String) throws -> TerminalConfiguration {
@@ -903,6 +1005,13 @@ final class ProvisioningAppTests: XCTestCase {
         unsafe.confirmationBlocks = "0"
         XCTAssertThrowsError(try unsafe.configuration())
         unsafe.confirmationBlocks = "65"
+        XCTAssertEqual(try unsafe.configuration().confirmationPolicy.requiredBlocks, 65)
+        unsafe.confirmationBlocks = String(Int64.max)
+        XCTAssertEqual(
+            try unsafe.configuration().confirmationPolicy.requiredBlocks,
+            UInt64(Int64.max)
+        )
+        unsafe.confirmationBlocks = String(UInt64(Int64.max) + 1)
         XCTAssertThrowsError(try unsafe.configuration())
         XCTAssertThrowsError(
             try second.updatingConfirmationBlocks(for: known.chainID, to: 65)
@@ -933,7 +1042,7 @@ final class ProvisioningAppTests: XCTestCase {
         )
     }
 
-    func testDecodedCatalogNormalizesSameNetworkFinalityToStrongestValue() throws {
+    func testDecodedCatalogNormalizesSameNetworkFinalityToGrandfatheredStrongestValue() throws {
         let operatorAddress = try address("0x1111111111111111111111111111111111111111")
         let first = try AppSettings().applying(
             paymentConfiguration(
@@ -956,8 +1065,8 @@ final class ProvisioningAppTests: XCTestCase {
                 as? [String: Any]
         )
         var profiles = try XCTUnwrap(storedJSON["paymentProfiles"] as? [[String: Any]])
-        profiles[0]["confirmationBlocks"] = "3"
-        profiles[1]["confirmationBlocks"] = "7"
+        profiles[0]["confirmationBlocks"] = "7"
+        profiles[1]["confirmationBlocks"] = "100"
         storedJSON["paymentProfiles"] = profiles
 
         let normalized = try JSONDecoder().decode(
@@ -965,9 +1074,9 @@ final class ProvisioningAppTests: XCTestCase {
             from: JSONSerialization.data(withJSONObject: storedJSON)
         )
 
-        XCTAssertTrue(normalized.paymentProfiles.allSatisfy { $0.confirmationBlocks == "7" })
-        XCTAssertEqual(normalized.confirmationBlocks, "7")
-        XCTAssertEqual(normalized.displayedPaymentProfile.confirmationBlocks, "7")
+        XCTAssertTrue(normalized.paymentProfiles.allSatisfy { $0.confirmationBlocks == "100" })
+        XCTAssertEqual(normalized.confirmationBlocks, "100")
+        XCTAssertEqual(normalized.displayedPaymentProfile.confirmationBlocks, "100")
         XCTAssertEqual(
             normalized.migrationNotice?.adjustedConfirmationProfileIDs,
             [original.paymentProfiles[0].id]
@@ -1009,7 +1118,7 @@ final class ProvisioningAppTests: XCTestCase {
         let reloaded = AppPreferences.loadSettingsResult()
         XCTAssertNil(reloaded.settings.migrationNotice)
         XCTAssertTrue(reloaded.settings.paymentProfiles.allSatisfy {
-            $0.confirmationBlocks == "7"
+            $0.confirmationBlocks == "100"
         })
 
         profiles[0]["confirmationBlocks"] = "0"
@@ -2366,7 +2475,7 @@ final class ProvisioningAppTests: XCTestCase {
     }
 
     @MainActor
-    func testUpdatingNetworkConfirmationsRequiresAdminAndPreservesInvoiceSnapshot() async throws {
+    func testAdminMayExplicitlyLowerGrandfatheredNetworkPolicyWithoutChangingInvoice() async throws {
         let savedSettings = AppPreferences.loadSettings()
         defer { AppPreferences.saveSettings(savedSettings) }
         let container = try ModelContainer(
@@ -2385,13 +2494,17 @@ final class ProvisioningAppTests: XCTestCase {
             ),
             boundTo: operatorAddress
         )
-        let initial = try first.applying(
+        let provisioned = try first.applying(
             paymentConfiguration(
                 vault: "0x4444444444444444444444444444444444444444",
                 token: "0x5555555555555555555555555555555555555555",
                 symbol: "USDC"
             ),
             boundTo: operatorAddress
+        )
+        let initial = try replacingStoredProfileConfirmations(
+            in: provisioned,
+            with: ["100", "100"]
         )
         let capturedConfiguration = try initial.configuration()
         let capturedToken = try XCTUnwrap(capturedConfiguration.tokens.first)
@@ -2406,7 +2519,7 @@ final class ProvisioningAppTests: XCTestCase {
             request: request,
             configuration: capturedConfiguration
         )
-        XCTAssertEqual(existingInvoice.confirmationBlocks, 1)
+        XCTAssertEqual(existingInvoice.confirmationBlocks, 100)
 
         let model = AppModel(
             container: container,
@@ -2428,7 +2541,7 @@ final class ProvisioningAppTests: XCTestCase {
         )
         model.settings = initial
 
-        await model.updateConfirmationBlocks(7, for: known.chainID)
+        await model.updateConfirmationBlocks(1, for: known.chainID)
         XCTAssertEqual(model.settings, initial)
         XCTAssertEqual(
             model.errorMessage,
@@ -2436,12 +2549,12 @@ final class ProvisioningAppTests: XCTestCase {
         )
 
         model.unlockAdmin(with: "123456")
-        await model.updateConfirmationBlocks(7, for: known.chainID)
+        await model.updateConfirmationBlocks(1, for: known.chainID)
 
-        XCTAssertTrue(model.settings.paymentProfiles.allSatisfy { $0.confirmationBlocks == "7" })
-        XCTAssertEqual(existingInvoice.confirmationBlocks, 1)
+        XCTAssertTrue(model.settings.paymentProfiles.allSatisfy { $0.confirmationBlocks == "1" })
+        XCTAssertEqual(existingInvoice.confirmationBlocks, 100)
         XCTAssertEqual(model.validationMessage, "On-chain validation passed")
-        XCTAssertTrue(model.provisioningMessage?.contains("now requires 7 confirmations") == true)
+        XCTAssertTrue(model.provisioningMessage?.contains("now requires 1 confirmation") == true)
         XCTAssertNil(model.errorMessage)
     }
 
@@ -2767,8 +2880,10 @@ final class ProvisioningAppTests: XCTestCase {
         calls = await probe.calls
         XCTAssertEqual(calls, 2, "An expired proof must be fetched again")
 
-        var changed = model.settings
-        changed.confirmationBlocks = "3"
+        let changed = try model.settings.updatingConfirmationBlocks(
+            for: TerminalKnownChainProfile.baseSepolia.chainID,
+            to: 3
+        )
         model.settings = changed
         let changedConfigurationValidation = await model.validateConfiguration()
         XCTAssertTrue(changedConfigurationValidation)
@@ -2971,12 +3086,67 @@ final class ProvisioningAppTests: XCTestCase {
         )
     }
 
-    private func storedInvoice(confirmationBlocks: UInt64? = nil) throws -> StoredInvoice {
-        var settings = AppSettings()
-        if let confirmationBlocks {
-            settings.confirmationBlocks = String(confirmationBlocks)
+    private func legacyFlatSettings(
+        confirmationBlocks: String,
+        provisionedOperatorAddress: String? = nil
+    ) throws -> AppSettings {
+        var stored: [String: Any] = [
+            "rpcURL": "https://sepolia.base.org",
+            "chainID": "84532",
+            "protocolVersion": "1.4.1",
+            "factory": "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
+            "receiverImplementation": "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
+            "vault": "0x3333333333333333333333333333333333333333",
+            "tokenAddress": "0x2222222222222222222222222222222222222222",
+            "tokenSymbol": "AUDM",
+            "tokenDecimals": "18",
+            "confirmationBlocks": confirmationBlocks,
+        ]
+        if let provisionedOperatorAddress {
+            stored["provisionedOperatorAddress"] = provisionedOperatorAddress
         }
-        let configuration = try settings.configuration()
+        return try JSONDecoder().decode(
+            AppSettings.self,
+            from: JSONSerialization.data(withJSONObject: stored)
+        )
+    }
+
+    private func replacingStoredProfileConfirmations(
+        in settings: AppSettings,
+        with confirmationBlocks: [String]
+    ) throws -> AppSettings {
+        var stored = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(settings))
+                as? [String: Any]
+        )
+        var profiles = try XCTUnwrap(stored["paymentProfiles"] as? [[String: Any]])
+        guard profiles.count == confirmationBlocks.count else {
+            throw AppSettingsError.invalidValue
+        }
+        for index in profiles.indices {
+            profiles[index]["confirmationBlocks"] = confirmationBlocks[index]
+        }
+        stored["paymentProfiles"] = profiles
+        return try JSONDecoder().decode(
+            AppSettings.self,
+            from: JSONSerialization.data(withJSONObject: stored)
+        )
+    }
+
+    private func storedInvoice(confirmationBlocks: UInt64? = nil) throws -> StoredInvoice {
+        let defaultConfiguration = try AppSettings().configuration()
+        let configuration = try TerminalConfiguration(
+            chainID: defaultConfiguration.chainID,
+            rpcEndpoints: defaultConfiguration.rpcEndpoints,
+            protocolVersion: defaultConfiguration.protocolVersion,
+            deployment: defaultConfiguration.deployment,
+            tokens: defaultConfiguration.tokens,
+            confirmationPolicy: .init(
+                requiredBlocks: confirmationBlocks
+                    ?? defaultConfiguration.confirmationPolicy.requiredBlocks
+            ),
+            create2TestVector: defaultConfiguration.create2TestVector
+        )
         let request = try InvoiceFactory.create(
             terminalIdentifier: TerminalIdentifier(
                 address: address("0x1111111111111111111111111111111111111111")
