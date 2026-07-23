@@ -471,9 +471,9 @@ private func abiDynamicString(_ value: String) -> Data {
 }
 
 final class ValidationAndMonitorTests: XCTestCase {
-    private let factory = try! EthereumAddress(hex: "0x062e3b5d3107e4d1b8dDA314E16b9F8cA6EB63D5")
-    private let implementation = try! EthereumAddress(hex: "0xDAa292B1bf533737C5cE5d27F220273971Db3Bdc")
-    private let vault = try! EthereumAddress(hex: "0x1ed67E540E6AB92dC3537A7bba3BcAb6FdD69Da1")
+    private let factory = try! EthereumAddress(hex: "0xb69f725999266c6757284ca4169275c3ebde491a")
+    private let implementation = try! EthereumAddress(hex: "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f")
+    private let vault = try! EthereumAddress(hex: "0x1111111111111111111111111111111111111111")
     private let tokenAddress = try! EthereumAddress(hex: "0x7fFbA642bc902880a737cb1c18a4E9540879e211")
 
     func testConfigurationValidationChecksFullReadOnlyWiring() async throws {
@@ -548,7 +548,7 @@ final class ValidationAndMonitorTests: XCTestCase {
         let configuration = try TerminalConfiguration(
             chainID: 84_532,
             rpcEndpoints: [URL(string: "https://rpc.example")!],
-            protocolVersion: .v1_4_1,
+            protocolVersion: .v1_5,
             deployment: OPKDeployment(
                 factory: factory,
                 receiverImplementation: implementation,
@@ -1231,7 +1231,7 @@ final class ValidationAndMonitorTests: XCTestCase {
         return try TerminalConfiguration(
             chainID: 84_532,
             rpcEndpoints: [URL(string: "https://sepolia.base.org")!],
-            protocolVersion: .v1_4_1,
+            protocolVersion: .v1_5,
             deployment: deployment,
             tokens: [token],
             confirmationPolicy: .init(requiredBlocks: requiredBlocks)

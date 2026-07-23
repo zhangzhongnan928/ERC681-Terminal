@@ -265,18 +265,18 @@ class SettlementSubmitFreshnessTest {
         const val CHAIN_ID = 84532L
         const val NETWORK_NAME = "Base Sepolia"
         const val RPC_URL = "https://sepolia.base.org"
-        const val FACTORY = "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5"
-        const val RECEIVER_IMPLEMENTATION = "0xdaa292b1bf533737c5ce5d27f220273971db3bdc"
-        const val VAULT = "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1"
+        const val FACTORY = "0xb69f725999266c6757284ca4169275c3ebde491a"
+        const val RECEIVER_IMPLEMENTATION = "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f"
+        const val VAULT = "0x1111111111111111111111111111111111111111"
         const val INVOICE_ID =
             "0x294d3b9eb0136d18f2a3e8aa9c10224029893c244e822a15902256d778f7f729"
-        const val RECEIVER = "0x9107decd2cb06c57c40a663648e19cde1d52f606"
+        const val RECEIVER = "0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c"
         const val TOKEN = "0x7ffba642bc902880a737cb1c18a4e9540879e211"
         const val OPERATOR = "0x1111111111111111111111111111111111111111"
         const val CONFIRMATION_HASH =
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         const val VAULT_RUNTIME_HASH =
-            "0xe7310159a3c109346b137a989bfd213e65fe48ded6eb84dbe57a37d7a047513e"
+            "0x2ceea713f7225b17e43487b8652d8582dadd5aabefc5b9f78d231777958655b9"
         const val PROOF_ISSUED_AT = 50_000L
         const val INITIAL_NOW = 100_000L
         const val EXPIRED_AFTER_PREFLIGHT = 110_001L

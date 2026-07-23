@@ -311,7 +311,7 @@ final class PaymentProfileTests: XCTestCase {
         try TerminalConfiguration(
             chainID: chainID,
             rpcEndpoints: [URL(string: "https://rpc.example")!],
-            protocolVersion: .v1_4_1,
+            protocolVersion: .v1_5,
             deployment: OPKDeployment(
                 factory: EthereumAddress(
                     hex: "0x5555555555555555555555555555555555555555",

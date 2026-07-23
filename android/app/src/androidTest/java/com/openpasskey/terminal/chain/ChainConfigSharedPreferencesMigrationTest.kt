@@ -295,7 +295,7 @@ class ChainConfigSharedPreferencesMigrationTest {
         const val V3_CONFIG_KEY = "provisioned_config_v3"
         const val V3_PROVISIONED_KEY = "is_provisioned_v3"
         const val PROFILE_ID =
-            "eip155:84532:0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1:" +
+            "eip155:84532:0x1111111111111111111111111111111111111111:" +
                 "0x7ffba642bc902880a737cb1c18a4e9540879e211"
 
         val V2_SINGLE_PROFILE_JSON =
@@ -304,9 +304,9 @@ class ChainConfigSharedPreferencesMigrationTest {
               "networkName": "Base Sepolia",
               "rpcUrl": "https://sepolia.base.org",
               "chainId": 84532,
-              "factoryAddress": "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
-              "receiverImplementationAddress": "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
-              "vaultAddress": "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1",
+              "factoryAddress": "0xb69f725999266c6757284ca4169275c3ebde491a",
+              "receiverImplementationAddress": "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f",
+              "vaultAddress": "0x1111111111111111111111111111111111111111",
               "confirmationBlocks": 2,
               "paymentTokens": [
                 {
@@ -315,7 +315,7 @@ class ChainConfigSharedPreferencesMigrationTest {
                   "decimals": 18
                 }
               ],
-              "protocolVersion": "1.4.1",
+              "protocolVersion": "1.5",
               "provisionedOperatorAddress": "0x1111111111111111111111111111111111111111",
               "provisioned": true
             }
@@ -327,16 +327,16 @@ class ChainConfigSharedPreferencesMigrationTest {
               "networkName": "Base Sepolia",
               "rpcUrl": "https://sepolia.base.org",
               "chainId": 84532,
-              "factoryAddress": "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
-              "receiverImplementationAddress": "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
-              "vaultAddress": "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1",
+              "factoryAddress": "0xb69f725999266c6757284ca4169275c3ebde491a",
+              "receiverImplementationAddress": "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f",
+              "vaultAddress": "0x1111111111111111111111111111111111111111",
               "confirmationBlocks": $confirmationBlocks,
               "token": {
                 "address": "0x7ffba642bc902880a737cb1c18a4e9540879e211",
                 "symbol": "AUD",
                 "decimals": 18
               },
-              "protocolVersion": "1.4.1"
+              "protocolVersion": "1.5"
             }
             """.trimIndent()
 
@@ -346,8 +346,8 @@ class ChainConfigSharedPreferencesMigrationTest {
               "networkName": "Base Sepolia",
               "rpcUrl": "https://sepolia.base.org",
               "chainId": 84532,
-              "factoryAddress": "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
-              "receiverImplementationAddress": "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
+              "factoryAddress": "0xb69f725999266c6757284ca4169275c3ebde491a",
+              "receiverImplementationAddress": "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f",
               "vaultAddress": "0x2222222222222222222222222222222222222222",
               "confirmationBlocks": $confirmationBlocks,
               "token": {
@@ -355,7 +355,7 @@ class ChainConfigSharedPreferencesMigrationTest {
                 "symbol": "USDC",
                 "decimals": 6
               },
-              "protocolVersion": "1.4.1"
+              "protocolVersion": "1.5"
             }
             """.trimIndent()
 
@@ -369,16 +369,16 @@ class ChainConfigSharedPreferencesMigrationTest {
               "networkName": "Base Sepolia",
               "rpcUrl": "https://sepolia.base.org",
               "chainId": 84532,
-              "factoryAddress": "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
-              "receiverImplementationAddress": "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
-              "vaultAddress": "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1",
+              "factoryAddress": "0xb69f725999266c6757284ca4169275c3ebde491a",
+              "receiverImplementationAddress": "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f",
+              "vaultAddress": "0x1111111111111111111111111111111111111111",
               "confirmationBlocks": $confirmationBlocks,
               "paymentTokens": [{
                 "address": "0x7ffba642bc902880a737cb1c18a4e9540879e211",
                 "symbol": "AUD",
                 "decimals": 18
               }],
-              "protocolVersion": "1.4.1",
+              "protocolVersion": "1.5",
               "provisionedOperatorAddress": "0x1111111111111111111111111111111111111111",
               "provisioned": true,
               "paymentProfiles": [$profileEntries],

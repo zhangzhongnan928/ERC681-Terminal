@@ -199,29 +199,29 @@ public struct TerminalKnownChainProfile: Hashable, Sendable {
 
     public static let baseSepolia: TerminalKnownChainProfile = {
         let factory = try! EthereumAddress(
-            hex: "0x062e3b5d3107e4d1b8dDA314E16b9F8cA6EB63D5",
+            hex: "0xb69f725999266c6757284ca4169275c3ebde491a",
             allowZero: false
         )
         let implementation = try! EthereumAddress(
-            hex: "0xDAa292B1bf533737C5cE5d27F220273971Db3Bdc",
+            hex: "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f",
             allowZero: false
         )
         let vector = Create2TestVector(
             vault: try! EthereumAddress(
-                hex: "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1",
+                hex: "0x1111111111111111111111111111111111111111",
                 allowZero: false
             ),
             invoiceID: try! Bytes32(
-                hex: "0x294d3b9eb0136d18f2a3e8aa9c10224029893c244e822a15902256d778f7f729"
+                hex: "0x474614682f1d5e8e24396c2394a98425d4e8617fe699872c96182b89368e50d4"
             ),
             salt: try! Bytes32(
-                hex: "0x87810f9819659ca2d4dd62a4e7b43c87f611148a2ea26782b9b8da39a63353ce"
+                hex: "0x6ebed91ff26055c5762437f3fe8f834dde34b0dae39fd3df75dcfc1d1e064e1d"
             ),
             initCodeHash: try! Bytes32(
-                hex: "0x59a3a359c30137feff57a746e7430ee4aef036fe41906d52b4f60a78948a2051"
+                hex: "0xad563722da414e51edc3d8195e2f225d872f79ea5b511cb2c3a62d6fa1a66b02"
             ),
             expectedReceiver: try! EthereumAddress(
-                hex: "0x9107decd2cb06c57c40a663648e19cde1d52f606",
+                hex: "0x8128e3A86962519877186c5F4F0920Ba7240f5B1",
                 allowZero: false
             )
         )
@@ -235,11 +235,11 @@ public struct TerminalKnownChainProfile: Hashable, Sendable {
             defaultConfirmationBlocks: 1,
             minimumOperatorNativeReserve: UInt256(100_000_000_000_000),
             rpcEndpoint: URL(string: "https://sepolia.base.org")!,
-            protocolVersion: .v1_4_1,
+            protocolVersion: .v1_5,
             factory: factory,
             receiverImplementation: implementation,
             vaultRuntimeCodeHash: try! Bytes32(
-                hex: "0xe7310159a3c109346b137a989bfd213e65fe48ded6eb84dbe57a37d7a047513e"
+                hex: "0x2ceea713f7225b17e43487b8652d8582dadd5aabefc5b9f78d231777958655b9"
             ),
             create2TestVector: vector
         )

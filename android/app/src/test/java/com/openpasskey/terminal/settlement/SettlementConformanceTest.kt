@@ -26,8 +26,8 @@ class SettlementConformanceTest {
     fun `fixture versions and canonical authorization calldata match`() {
         assertEquals(2, root["schemaVersion"].asInt)
         assertEquals("1.5", root["paymentVectorVersion"].asString)
-        assertEquals("1.4.1", root["deploymentProtocolVersion"].asString)
-        assertEquals("1.4.1", abi["protocolVersion"].asString)
+        assertEquals("1.5", root["deploymentProtocolVersion"].asString)
+        assertEquals("1.5", abi["protocolVersion"].asString)
         assertEquals(abi["isOperatorCalldata"].asString, SettlementAbi.encodeIsOperator(abi["operator"].asString))
         assertFalse(SettlementAbi.decodeIsOperator(abi["isOperatorFalseResult"].asString))
         assertTrue(SettlementAbi.decodeIsOperator(abi["isOperatorTrueResult"].asString))

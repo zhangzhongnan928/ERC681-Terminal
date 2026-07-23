@@ -52,20 +52,20 @@ object KnownChainPolicy {
             defaultConfirmationBlocks = 1,
             minimumOperatorNativeReserve = BigInteger("100000000000000"),
             rpcUrl = "https://sepolia.base.org",
-            factory = EvmAddress.parse("0x062e3b5d3107e4d1b8dDA314E16b9F8cA6EB63D5"),
-            receiverImplementation = EvmAddress.parse("0xDAa292B1bf533737C5cE5d27F220273971Db3Bdc"),
+            factory = EvmAddress.parse("0xb69f725999266c6757284ca4169275c3ebde491a"),
+            receiverImplementation = EvmAddress.parse("0x8ba9739741ecc79b5d69fe5580d2966092e6f77f"),
             vaultRuntimeCodeHash =
-                "0xe7310159a3c109346b137a989bfd213e65fe48ded6eb84dbe57a37d7a047513e",
-            protocolVersion = "1.4.1",
-            fixtureVault = EvmAddress.parse("0x1ed67E540E6AB92dC3537A7bba3BcAb6FdD69Da1"),
+                "0x2ceea713f7225b17e43487b8652d8582dadd5aabefc5b9f78d231777958655b9",
+            protocolVersion = "1.5",
+            fixtureVault = EvmAddress.parse("0x1111111111111111111111111111111111111111"),
             fixtureInvoiceId = InvoiceId.parse(
-                "0x294d3b9eb0136d18f2a3e8aa9c10224029893c244e822a15902256d778f7f729",
+                "0x474614682f1d5e8e24396c2394a98425d4e8617fe699872c96182b89368e50d4",
             ),
             fixtureSalt =
-                "0x87810f9819659ca2d4dd62a4e7b43c87f611148a2ea26782b9b8da39a63353ce",
+                "0x6ebed91ff26055c5762437f3fe8f834dde34b0dae39fd3df75dcfc1d1e064e1d",
             fixtureInitCodeHash =
-                "0x59a3a359c30137feff57a746e7430ee4aef036fe41906d52b4f60a78948a2051",
-            fixtureReceiver = EvmAddress.parse("0x9107decd2cb06c57c40a663648e19cde1d52f606"),
+                "0xad563722da414e51edc3d8195e2f225d872f79ea5b511cb2c3a62d6fa1a66b02",
+            fixtureReceiver = EvmAddress.parse("0x8128e3A86962519877186c5F4F0920Ba7240f5B1"),
         ),
     )
 

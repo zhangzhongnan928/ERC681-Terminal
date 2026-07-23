@@ -61,19 +61,28 @@ physical-device test before release; manual entry remains available when camera 
 
 ## Configuration and safety
 
-The sample defaults to the currently deployed Base Sepolia v1.4.1-compatible stack:
+The sample defaults to the Base Sepolia v1.5 deployment trust anchors:
 
 - Chain ID: `84532`
-- Factory: `0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5`
-- Receiver implementation: `0xdaa292b1bf533737c5ce5d27f220273971db3bdc`
-- Test vault: `0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1`
+- Factory: `0xb69f725999266c6757284ca4169275c3ebde491a`
+- Receiver implementation: `0x8ba9739741ecc79b5d69fe5580d2966092e6f77f`
+- Deployed vault-proxy runtime hash: `0x2ceea713f7225b17e43487b8652d8582dadd5aabefc5b9f78d231777958655b9`
+- CREATE2 example vault: `0x1111111111111111111111111111111111111111`
 - AUD token: `0x7ffba642bc902880a737cb1c18a4e9540879e211`, 18 decimals
+
+The proxy hash is over exact on-chain bytecode with the Base Sepolia beacon immutable embedded;
+the zero-immutable artifact hash emitted by the upstream browser deployer is not valid for raw
+`eth_getCode` verification.
+
+The example vault is a deterministic off-chain vector, not a deployed merchant vault. The app
+remains unprovisioned until a portal QR identifies a live v1.5 vault and whitelisted token that pass
+the complete on-chain validation flow.
 
 Base Sepolia is the only network enabled in the production app in this release. The Swift
 payment-profile catalog remains EVM-generic, but Base Mainnet (`8453`) and other chains are rejected
-before RPC use until a frozen or multisig-governed, implementation-pinned OPK deployment and its
-CREATE2 vector, finality policy, native-currency metadata, and operator gas reserve are reviewed and
-added to the immutable app registry. Multiple vault/token profiles
+before RPC use. Mainnet v1.5 is deployed but remains disabled pending explicit product enablement,
+a reviewed operational RPC policy, and addition of its deployment pins, CREATE2 vector, finality
+policy, native-currency metadata, and operator gas reserve to the immutable app registry. Multiple vault/token profiles
 can coexist, while one selected profile supplies the exact configuration snapshot saved with each
 invoice and validated before presenting a QR. RPC
 URLs must use HTTPS, except loopback HTTP for local development, and embedded URL credentials and

@@ -19,6 +19,11 @@ class ChainConfigPolicyTest {
     }
 
     @Test
+    fun protocol14SnapshotIsNotAcceptedByTheV15OnlyTerminal() {
+        assertFalse(config().copy(protocolVersion = "1.4.1").hasCompleteProvisioning())
+    }
+
+    @Test
     fun legacySingleConfigMigratesToASelectedProfile() {
         val legacy = config()
 
@@ -231,14 +236,14 @@ class ChainConfigPolicyTest {
         networkName = "Base Sepolia",
         rpcUrl = "https://sepolia.base.org",
         chainId = 84532,
-        factoryAddress = "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
-        receiverImplementationAddress = "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
-        vaultAddress = "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1",
+        factoryAddress = "0xb69f725999266c6757284ca4169275c3ebde491a",
+        receiverImplementationAddress = "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f",
+        vaultAddress = "0x1111111111111111111111111111111111111111",
         confirmationBlocks = 1,
         paymentTokens = listOf(
             PaymentToken("0x7ffba642bc902880a737cb1c18a4e9540879e211", "AUD", 18),
         ),
-        protocolVersion = "1.4.1",
+        protocolVersion = "1.5",
         provisionedOperatorAddress = "0x1111111111111111111111111111111111111111",
         provisioned = true,
     )

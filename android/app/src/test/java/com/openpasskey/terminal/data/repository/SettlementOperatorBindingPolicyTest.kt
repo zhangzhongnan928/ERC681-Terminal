@@ -79,10 +79,10 @@ class SettlementOperatorBindingPolicyTest {
         networkName = "Base Sepolia",
         rpcUrl = "https://sepolia.base.org",
         chainId = 84532,
-        factoryAddress = "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5",
-        receiverImplementationAddress = "0xdaa292b1bf533737c5ce5d27f220273971db3bdc",
+        factoryAddress = "0xb69f725999266c6757284ca4169275c3ebde491a",
+        receiverImplementationAddress = "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f",
         vaultAddress = if (provisioned) {
-            "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1"
+            "0x1111111111111111111111111111111111111111"
         } else {
             ""
         },
@@ -92,7 +92,7 @@ class SettlementOperatorBindingPolicyTest {
         } else {
             emptyList()
         },
-        protocolVersion = if (provisioned) "1.4.1" else "",
+        protocolVersion = if (provisioned) "1.5" else "",
         provisionedOperatorAddress = boundOperator,
         provisioned = provisioned,
     )

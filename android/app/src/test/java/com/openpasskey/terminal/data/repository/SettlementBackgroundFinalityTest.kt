@@ -213,9 +213,9 @@ class SettlementBackgroundFinalityTest {
             "0x1111111111111111111111111111111111111111111111111111111111111111"
         const val BLOCK_HASH =
             "0x2222222222222222222222222222222222222222222222222222222222222222"
-        const val VAULT = "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1"
+        const val VAULT = "0x1111111111111111111111111111111111111111"
         const val TOKEN = "0x7ffba642bc902880a737cb1c18a4e9540879e211"
-        const val RECEIVER = "0x9107decd2cb06c57c40a663648e19cde1d52f606"
+        const val RECEIVER = "0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c"
 
         fun confirmingTransaction() = SettlementTransaction(
             id = TRANSACTION_ID,

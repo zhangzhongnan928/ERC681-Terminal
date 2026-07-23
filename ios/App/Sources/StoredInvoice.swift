@@ -8,7 +8,7 @@ final class StoredInvoice {
     var terminalIdentifier: String
     var rpcURL: String = ""
     var chainID: Int64
-    var protocolVersion: String = OPKProtocolVersion.v1_4_1.rawValue
+    var protocolVersion: String = OPKProtocolVersion.v1_5.rawValue
     var factory: String = ""
     var receiverImplementation: String = ""
     var vault: String
@@ -76,7 +76,7 @@ final class StoredInvoice {
     func configurationSnapshot() throws -> TerminalConfiguration {
         guard let endpoint = URL(string: rpcURL),
               let version = OPKProtocolVersion(rawValue: protocolVersion),
-              version == .v1_4_1,
+              version == .v1_5,
               let storedChainID = UInt64(exactly: chainID), storedChainID > 0,
               let decimals = UInt8(exactly: tokenDecimals),
               let blocks = UInt64(exactly: confirmationBlocks), blocks > 0

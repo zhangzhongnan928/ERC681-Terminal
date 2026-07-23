@@ -36,6 +36,6 @@ class OperatorWalletBindingPolicyTest {
         const val CHAIN_ID = 84532L
         const val OPERATOR = "0x1111111111111111111111111111111111111111"
         const val OTHER_OPERATOR = "0x2222222222222222222222222222222222222222"
-        const val VAULT = "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1"
+        const val VAULT = "0x1111111111111111111111111111111111111111"
     }
 }
