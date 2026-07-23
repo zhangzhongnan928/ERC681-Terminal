@@ -318,7 +318,7 @@ final class OperatorWalletAndSettlementTests: XCTestCase {
         let root = try loadFixture()
         XCTAssertEqual(root.schemaVersion, 2)
         XCTAssertEqual(root.paymentVectorVersion, "1.5")
-        XCTAssertEqual(root.deploymentProtocolVersion, "1.4.1")
+        XCTAssertEqual(root.deploymentProtocolVersion, "1.5")
         let fixture = root.settlementAbi
         let intent = try makeIntent()
         XCTAssertEqual(SettlementABI.sweepSessionsSelector.hexString, fixture.sweepSessionsSelector)
@@ -935,12 +935,12 @@ final class OperatorWalletAndSettlementTests: XCTestCase {
     private func makeIntent() throws -> SettlementIntent {
         try SettlementIntent(
             chainID: 84_532,
-            vault: EthereumAddress(hex: "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1"),
+            vault: EthereumAddress(hex: "0x1111111111111111111111111111111111111111"),
             token: EthereumAddress(hex: "0x7ffba642bc902880a737cb1c18a4e9540879e211"),
             sessions: [
                 SettlementSession(
                     invoiceID: Bytes32(hex: "0x294d3b9eb0136d18f2a3e8aa9c10224029893c244e822a15902256d778f7f729"),
-                    receiver: EthereumAddress(hex: "0x9107decd2cb06c57c40a663648e19cde1d52f606"),
+                    receiver: EthereumAddress(hex: "0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c"),
                     expectedAmount: UInt256(decimalString: "12340000000000000000")
                 ),
             ]

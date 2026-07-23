@@ -86,8 +86,8 @@ class ChainConfig(context: Context) {
         const val DEFAULT_NETWORK_NAME = "Base Sepolia"
         const val DEFAULT_RPC_URL = "https://sepolia.base.org"
         const val DEFAULT_CHAIN_ID = 84532L
-        const val DEFAULT_FACTORY_ADDRESS = "0x062e3b5d3107e4d1b8dDA314E16b9F8cA6EB63D5"
-        const val DEFAULT_RECEIVER_IMPLEMENTATION = "0xDAa292B1bf533737C5cE5d27F220273971Db3Bdc"
+        const val DEFAULT_FACTORY_ADDRESS = "0xb69f725999266c6757284ca4169275c3ebde491a"
+        const val DEFAULT_RECEIVER_IMPLEMENTATION = "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f"
         const val DEFAULT_CONFIRMATION_BLOCKS = 1
         const val MAX_PAYMENT_PROFILES = 32
 

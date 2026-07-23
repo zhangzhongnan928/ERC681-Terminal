@@ -1,7 +1,6 @@
 import Foundation
 
 public enum OPKProtocolVersion: String, Hashable, Sendable, Codable {
-    case v1_4_1 = "1.4.1"
     case v1_5 = "1.5"
 }
 

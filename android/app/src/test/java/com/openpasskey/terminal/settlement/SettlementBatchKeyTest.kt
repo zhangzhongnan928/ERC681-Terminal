@@ -22,7 +22,7 @@ class SettlementBatchKeyTest {
         val differentConfirmationPolicy = original.copy(confirmationBlocks = 12)
 
         assertEquals(original.settlementBatchKey(), sameSnapshot.settlementBatchKey())
-        assertEquals("1.4.1", original.settlementBatchKey().protocolVersion)
+        assertEquals("1.5", original.settlementBatchKey().protocolVersion)
         assertNotEquals(original.settlementBatchKey(), sameSymbolDifferentVault.settlementBatchKey())
         assertNotEquals(original.settlementBatchKey(), sameSymbolDifferentToken.settlementBatchKey())
         assertNotEquals(original.settlementBatchKey(), differentChain.settlementBatchKey())

@@ -572,7 +572,7 @@ class TerminalProvisionerTest {
             vaultAddress = VAULT.value,
             confirmationBlocks = confirmationBlocks,
             token = token,
-            protocolVersion = "1.4.1",
+            protocolVersion = "1.5",
         )
         return TerminalConfigSnapshot(
             networkName = profile.networkName,
@@ -594,25 +594,25 @@ class TerminalProvisionerTest {
     private companion object {
         const val OPERATOR = "0x1111111111111111111111111111111111111111"
         const val CANONICAL = "opk-terminal:provision?v=1&chainId=84532&vault=" +
-            "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1&token=" +
+            "0x3333333333333333333333333333333333333333&token=" +
             "0x7ffba642bc902880a737cb1c18a4e9540879e211&operator=$OPERATOR"
         const val KNOWN_VAULT_RUNTIME_HASH =
-            "0xe7310159a3c109346b137a989bfd213e65fe48ded6eb84dbe57a37d7a047513e"
+            "0x2ceea713f7225b17e43487b8652d8582dadd5aabefc5b9f78d231777958655b9"
         val CANONICAL_VAULT_RUNTIME: ByteArray = Numeric.hexStringToByteArray(
             "0x60806040525f8061000e610081565b368280378136915af43d5f803e15610024573d5ff35b" +
                 "3d5ffd5b90601f8019910116810190811067ffffffffffffffff82111761004a57604052565b" +
                 "634e487b7160e01b5f52604160045260245ffd5b9081602091031261007d57516001600160a0" +
                 "1b038116810361007d5790565b5f80fd5b60ff7f0869949ff70b851fd884d5dedd17ab976d41" +
                 "48e809aad6e654ec2c04f1849729541661013157604051635c60da1b60e01b81526020816004" +
-                "817f000000000000000000000000d5ed58ded083d3cc9eec949b92f1834f937caa6a60016001" +
+                "817f00000000000000000000000036540ec21ea454a11fbeb96bf7f8653d078da9cf60016001" +
                 "60a01b03165afa908115610126575f916100fa575090565b61011c915060203d60201161011f" +
                 "575b6101148183610028565b81019061005e565b90565b503d61010a565b6040513d5f823e3d" +
                 "90fd5b7f50950143dc78ff80b5cdf56436a716933e2b92eb073f4b272dec2e808d8423835460" +
                 "01600160a01b03169056fea26469706673582212202e8cd2852b590f2bda79ba8056dd697cc4" +
                 "fe00ae07dc3e33ae82e1a68109a5aa64736f6c634300081a0033",
         )
-        val FACTORY = EvmAddress.parse("0x062e3b5d3107e4d1b8dDA314E16b9F8cA6EB63D5")
-        val IMPLEMENTATION = EvmAddress.parse("0xDAa292B1bf533737C5cE5d27F220273971Db3Bdc")
-        val VAULT = EvmAddress.parse("0x1ed67E540E6AB92dC3537A7bba3BcAb6FdD69Da1")
+        val FACTORY = EvmAddress.parse("0xb69f725999266c6757284ca4169275c3ebde491a")
+        val IMPLEMENTATION = EvmAddress.parse("0x8ba9739741ecc79b5d69fe5580d2966092e6f77f")
+        val VAULT = EvmAddress.parse("0x3333333333333333333333333333333333333333")
     }
 }

@@ -53,7 +53,7 @@ ethereum:{TOKEN}@{CHAIN_ID}/transfer?address={RECEIVER}&uint256={RAW_TOKEN_UNITS
 For the shared test vector:
 
 ```text
-ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0x9107decd2cb06c57c40a663648e19cde1d52f606&uint256=12340000000000000000
+ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c&uint256=12340000000000000000
 ```
 
 Addresses are emitted in lower-case hexadecimal. The chain ID and positive `uint256` amount use plain base-10 integers without signs, exponents, leading zeroes, extra parameters, or parameter reordering. Native-asset `?value=` and `approve` fail closed. Pass the configured chain ID to the parser so a request for another chain also fails closed.
@@ -107,7 +107,7 @@ complete a partial settlement without counting an RPC replay twice. Once cumulat
 covers the original invoice, a repeat settlement still requires a new positive canonical event;
 historical proof must never turn a zero repeat event into proof of newly observed value.
 
-The reusable SDKs never sweep the receiver. A native app may pass their data-only handoff into its separate approved operator module. On the shipped legacy 1.4.1 deployment, transaction receipt success alone is not proof of settlement: the app must decode a fully matching confirmed `Swept` event and record the actual amount. A future 1.5 deployment may additionally expose settlement accounting, but the bundled deployment must not assume it.
+The reusable SDKs never sweep the receiver. A native app may pass their data-only handoff into its separate approved operator module. On the shipped v1.5 deployment, transaction receipt success alone is not proof of settlement: the app must decode a fully matching confirmed `Swept` event and record the actual amount. The token-scoped v1.5 settlement counters are supplementary state and do not replace canonical event proof.
 
 `terminalIdentifier` remains the protocol and reusable-SDK name for a generic, non-secret 20-byte
 invoice namespace. The reusable SDK does not require that namespace to have a private key. The
@@ -124,18 +124,29 @@ The default development network is Base Sepolia, chain ID `84532`:
 
 | Item | Value |
 |---|---|
-| Factory | `0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5` |
-| Receiver implementation | `0xdaa292b1bf533737c5ce5d27f220273971db3bdc` |
-| Test vault | `0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1` |
+| Factory | `0xb69f725999266c6757284ca4169275c3ebde491a` |
+| Receiver implementation | `0x8ba9739741ecc79b5d69fe5580d2966092e6f77f` |
+| Deployed vault-proxy runtime hash | `0x2ceea713f7225b17e43487b8652d8582dadd5aabefc5b9f78d231777958655b9` |
+| CREATE2 example vault | `0x1111111111111111111111111111111111111111` |
 | AUD test token | `0x7ffba642bc902880a737cb1c18a4e9540879e211` (18 decimals) |
+
+The runtime hash is over the exact on-chain proxy bytecode, including the Base Sepolia beacon
+immutable (`0x36540ec21ea454a11fbeb96bf7f8653d078da9cf`). Do not substitute the upstream browser
+deployer's zero-immutable artifact hash when validating `eth_getCode`; it does not match a
+deployed vault.
+
+The example vault is an off-chain CREATE2 test input, not a deployed merchant vault. A production
+terminal remains unprovisioned until it validates a live v1.5 merchant vault and whitelisted token
+from a portal provisioning QR.
 
 Base Sepolia is the only network enabled in the production apps in this release. The Swift and
 Kotlin profile catalogs are EVM-generic and can model routes on other EVM chains, but an app rejects
 any chain absent from its immutable enabled-network registry before RPC use. Base Mainnet (`8453`)
-remains disabled pending a frozen or multisig-governed, implementation-pinned deployment. Enabling
-it or another network requires reviewed OPK deployment constants, vault runtime hash, trusted HTTPS
-RPC, matching CREATE2 vector, finality floor/default, native-currency metadata, and minimum gas
-reserve in both native registries. A QR cannot introduce these values.
+has a v1.5 deployment but remains disabled pending explicit product enablement and a reviewed
+operational RPC policy. Enabling it or another network requires reviewed OPK deployment constants,
+vault runtime hash, trusted HTTPS RPC, matching CREATE2 vector, finality floor/default,
+native-currency metadata, and minimum gas reserve in both native registries. A QR cannot introduce
+these values.
 The enabled cross-platform pins and vectors are recorded in
 `conformance/opk-terminal-networks-v1.json`.
 
@@ -221,14 +232,16 @@ A minimal Kotlin integration looks like this. Run the RPC calls away from the UI
 ```kotlin
 import com.openpasskey.erc681.*
 
+val provisionedVault = EvmAddress.parse(requireNotNull(loadProvisionedMerchantVault()))
+val provisionedToken = EvmAddress.parse(requireNotNull(loadProvisionedPaymentToken()))
 val network = NetworkConfig(
     chainId = 84532,
     rpcUrl = "https://sepolia.base.org",
-    factory = EvmAddress.parse("0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5"),
-    receiverImplementation = EvmAddress.parse("0xdaa292b1bf533737c5ce5d27f220273971db3bdc"),
-    vault = EvmAddress.parse("0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1"),
+    factory = EvmAddress.parse("0xb69f725999266c6757284ca4169275c3ebde491a"),
+    receiverImplementation = EvmAddress.parse("0x8ba9739741ecc79b5d69fe5580d2966092e6f77f"),
+    vault = provisionedVault,
 )
-val token = EvmAddress.parse("0x7ffba642bc902880a737cb1c18a4e9540879e211")
+val token = provisionedToken
 val rpc = ReadOnlyRpcClient(network)
 val validated = rpc.validate(token, expectedDecimals = 18)
 val profile = PaymentProfile(
@@ -270,15 +283,10 @@ if (observation.status == PaymentStatus.PAID) {
 }
 ```
 
-On installations upgraded from the QR-only release, existing invoice records keep their invoice
-ID, configuration snapshot, and derived receiver. iOS also keeps the per-invoice
-`terminalIdentifier`; Android rows migrated from the earlier database schema retain an empty
-legacy operator snapshot because that preimage cannot be recovered from the invoice ID. Do not
-rewrite or reinterpret those immutable records. Every new invoice on both platforms persists the
-operator EOA used as its `terminalIdentifier`, and settlement checks that snapshot against the
-current device wallet. Historical legacy rows remain subject to the current-wallet and fresh
-on-chain authorization checks, and their receivers remain settleable by any currently authorized
-vault owner or operator.
+This release intentionally accepts protocol v1.5 configurations only. Profiles and invoices from
+pre-release v1.4 builds are unsupported and must not be reinterpreted under the v1.5 deployment
+pins. Reset any development install carrying those obsolete local records before provisioning a
+live v1.5 merchant vault.
 
 ## Swift package and iOS app
 
@@ -297,13 +305,21 @@ import Foundation
 import OPKTerminalCore
 import OPKTerminalRPC
 
+let provisionedVault = try EthereumAddress(
+    hex: loadProvisionedMerchantVault(),
+    allowZero: false
+)
+let provisionedToken = try EthereumAddress(
+    hex: loadProvisionedPaymentToken(),
+    allowZero: false
+)
 let deployment = try OPKDeployment(
-    factory: EthereumAddress(hex: "0x062e3b5d3107e4d1b8dda314e16b9f8ca6eb63d5", allowZero: false),
-    receiverImplementation: EthereumAddress(hex: "0xdaa292b1bf533737c5ce5d27f220273971db3bdc", allowZero: false),
-    vault: EthereumAddress(hex: "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1", allowZero: false)
+    factory: EthereumAddress(hex: "0xb69f725999266c6757284ca4169275c3ebde491a", allowZero: false),
+    receiverImplementation: EthereumAddress(hex: "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f", allowZero: false),
+    vault: provisionedVault
 )
 let token = try PaymentToken(
-    address: EthereumAddress(hex: "0x7ffba642bc902880a737cb1c18a4e9540879e211", allowZero: false),
+    address: provisionedToken,
     symbol: "AUD",
     decimals: 18
 )
@@ -311,7 +327,7 @@ let endpoint = URL(string: "https://sepolia.base.org")!
 let configuration = try TerminalConfiguration(
     chainID: 84_532,
     rpcEndpoints: [endpoint],
-    protocolVersion: .v1_4_1,
+    protocolVersion: .v1_5,
     deployment: deployment,
     tokens: [token],
     confirmationPolicy: .init(requiredBlocks: 1)

@@ -14,11 +14,11 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class ReadOnlyRpcClientTest {
-    private val factory = EvmAddress.parse("0x062e3b5d3107e4d1b8dDA314E16b9F8cA6EB63D5")
-    private val implementation = EvmAddress.parse("0xDAa292B1bf533737C5cE5d27F220273971Db3Bdc")
-    private val vault = EvmAddress.parse("0x1ed67E540E6AB92dC3537A7bba3BcAb6FdD69Da1")
+    private val factory = EvmAddress.parse("0xb69f725999266c6757284ca4169275c3ebde491a")
+    private val implementation = EvmAddress.parse("0x8ba9739741ecc79b5d69fe5580d2966092e6f77f")
+    private val vault = EvmAddress.parse("0x1111111111111111111111111111111111111111")
     private val token = EvmAddress.parse("0x7fFbA642bc902880a737cb1c18a4E9540879e211")
-    private val holder = EvmAddress.parse("0x9107decd2cb06c57c40a663648e19cde1d52f606")
+    private val holder = EvmAddress.parse("0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c")
     private val config = NetworkConfig(84532, "https://rpc.example.invalid", factory, implementation, vault)
 
     @Test

@@ -206,7 +206,7 @@ class OperatorWalletSweepSelectorGuardTest {
 
     private companion object {
         const val CHAIN_ID = 84532L
-        const val VAULT = "0x1ed67e540e6ab92dc3537a7bba3bcab6fdd69da1"
+        const val VAULT = "0x1111111111111111111111111111111111111111"
         const val RECEIVER = "0x3333333333333333333333333333333333333333"
         const val TOKEN = "0x4444444444444444444444444444444444444444"
         val NONCE: BigInteger = BigInteger.ONE
