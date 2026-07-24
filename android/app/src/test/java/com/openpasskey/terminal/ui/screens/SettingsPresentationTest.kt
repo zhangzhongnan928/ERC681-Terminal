@@ -7,6 +7,20 @@ import org.junit.Test
 
 class SettingsPresentationTest {
     @Test
+    fun `store links use required public labels and URLs`() {
+        assertEquals("Privacy Policy", SettingsExternalLinks.privacyPolicy.label)
+        assertEquals(
+            "https://www.openpasskey.com/privacy",
+            SettingsExternalLinks.privacyPolicy.url,
+        )
+        assertEquals("Support", SettingsExternalLinks.support.label)
+        assertEquals(
+            "https://www.openpasskey.com/about",
+            SettingsExternalLinks.support.url,
+        )
+    }
+
+    @Test
     fun `configuration validation is independent while authorization is pending`() {
         val state = SettingsState(
             setupStatus = TerminalSetupStatus.AWAITING_AUTHORIZATION,

@@ -10,6 +10,22 @@ private enum SettingsFocusField: Hashable {
     case token
 }
 
+struct SettingsExternalLink: Equatable, Sendable {
+    let label: String
+    let destination: URL
+}
+
+enum SettingsExternalLinks {
+    static let privacyPolicy = SettingsExternalLink(
+        label: "Privacy Policy",
+        destination: URL(string: "https://www.openpasskey.com/privacy")!
+    )
+    static let support = SettingsExternalLink(
+        label: "Support",
+        destination: URL(string: "https://www.openpasskey.com/about")!
+    )
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var didCopyOperator = false
@@ -37,6 +53,7 @@ struct SettingsView: View {
                 } else {
                     lockedContent
                 }
+                externalLinksSection
             }
             .scrollDismissesKeyboard(.interactively)
             .navigationTitle(model.canAccessAdmin ? "Terminal Setup" : "Terminal Status")
@@ -103,6 +120,24 @@ struct SettingsView: View {
             syncConfirmationBlocksDraft()
         }
         .onDisappear { focusedField = nil }
+    }
+
+    private var externalLinksSection: some View {
+        Section("About OPK Terminal") {
+            Link(
+                SettingsExternalLinks.privacyPolicy.label,
+                destination: SettingsExternalLinks.privacyPolicy.destination
+            )
+            .accessibilityIdentifier("privacyPolicyLink")
+            .accessibilityHint("Opens in your web browser")
+
+            Link(
+                SettingsExternalLinks.support.label,
+                destination: SettingsExternalLinks.support.destination
+            )
+            .accessibilityIdentifier("supportLink")
+            .accessibilityHint("Opens in your web browser")
+        }
     }
 
     @ViewBuilder

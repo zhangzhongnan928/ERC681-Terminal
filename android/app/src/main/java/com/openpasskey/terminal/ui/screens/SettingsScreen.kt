@@ -46,6 +46,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
@@ -63,6 +64,23 @@ import com.openpasskey.terminal.viewmodel.SettingsState
 import com.openpasskey.terminal.viewmodel.SettingsViewModel
 import com.openpasskey.terminal.viewmodel.TerminalSetupStatus
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
+
+internal data class SettingsExternalLink(
+    val label: String,
+    val url: String,
+)
+
+internal object SettingsExternalLinks {
+    val privacyPolicy = SettingsExternalLink(
+        label = "Privacy Policy",
+        url = "https://www.openpasskey.com/privacy",
+    )
+    val support = SettingsExternalLink(
+        label = "Support",
+        url = "https://www.openpasskey.com/about",
+    )
+    val all = listOf(privacyPolicy, support)
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -315,7 +333,26 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                     )
                 }
             }
+            item { ExternalLinksCard() }
             item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun ExternalLinksCard() {
+    val uriHandler = LocalUriHandler.current
+    Card(Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text("About OPK Terminal", style = MaterialTheme.typography.titleMedium)
+            SettingsExternalLinks.all.forEach { link ->
+                TextButton(onClick = { uriHandler.openUri(link.url) }) {
+                    Text(link.label)
+                }
+            }
         }
     }
 }

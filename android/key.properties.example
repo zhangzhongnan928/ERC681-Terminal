@@ -1,0 +1,7 @@
+# Copy this file to android/key.properties, keep it mode 600, and replace
+# every placeholder. The keystore must be an absolute path outside the repo.
+storeFile=/absolute/path/outside/repository/opk-terminal-upload.p12
+storeType=PKCS12
+storePassword=REPLACE_WITH_UPLOAD_KEYSTORE_PASSWORD
+keyAlias=opk-terminal-upload
+keyPassword=REPLACE_WITH_UPLOAD_KEY_PASSWORD

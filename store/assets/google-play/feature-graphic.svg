@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1024"
+  height="500"
+  viewBox="0 0 1024 500"
+  role="img"
+  aria-labelledby="title description"
+>
+  <title id="title">OPK Terminal</title>
+  <desc id="description">Base Sepolia merchant testnet terminal</desc>
+
+  <!-- The palette and icon geometry are copied from ios/App/Resources/AppIcon.svg. -->
+  <rect width="1024" height="500" fill="#1A1A2E"/>
+  <svg x="18" y="40" width="420" height="420" viewBox="0 0 108 108">
+    <rect width="108" height="108" fill="#1A1A2E"/>
+    <path fill="#00D4AA" d="M34 34h40v40H34z"/>
+    <path fill="#1A1A2E" d="M38 38h32v32H38z"/>
+    <path fill="#00D4AA" d="M42 48h6v2h-6zm0 4h10v2H42zm0 4h8v2h-8zm0-12 3-3 3 3z"/>
+  </svg>
+
+  <text
+    x="388"
+    y="220"
+    fill="#00D4AA"
+    font-family="Arial, Helvetica, sans-serif"
+    font-size="72"
+    font-weight="700"
+    letter-spacing="-1"
+  >OPK Terminal</text>
+  <path d="M392 252h520" fill="none" stroke="#00D4AA" stroke-width="4"/>
+  <text
+    x="392"
+    y="307"
+    fill="#00D4AA"
+    font-family="Arial, Helvetica, sans-serif"
+    font-size="29"
+    font-weight="700"
+  >Base Sepolia merchant</text>
+  <text
+    x="392"
+    y="348"
+    fill="#00D4AA"
+    font-family="Arial, Helvetica, sans-serif"
+    font-size="29"
+    font-weight="400"
+  >testnet terminal</text>
+</svg>
