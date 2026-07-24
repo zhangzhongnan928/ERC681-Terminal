@@ -53,10 +53,10 @@ territories at submission time.
 ## Apple App Privacy
 
 Do not publish **Data Not Collected** solely because the checked-in privacy manifest is empty.
-The live privacy URL currently identifies itself as a draft/not-for-reliance document and does not
-specifically disclose OPK Terminal's Base Sepolia JSON-RPC requests or the RPC provider's handling
-of them. Treat both the policy text and the missing terminal/RPC disclosure as owner/legal input,
-not as a submission-ready privacy position.
+The live privacy URL no longer identifies itself as a draft, but it does not specifically disclose
+OPK Terminal's Base Sepolia JSON-RPC requests, the RPC provider's handling of them, or Android ML
+Kit diagnostics and usage metrics. Treat those missing app-specific disclosures as owner/legal
+input, not as a submission-ready privacy position.
 
 - Base's published privacy policy says its services may collect IP/derived-location and
   device/browser information and may analyse public blockchain data including wallet addresses,
@@ -172,9 +172,9 @@ All apps must complete the Financial features declaration.
 
 ## Store operations
 
-- [ ] Publish a binding, app-specific privacy policy. The current URL labels itself a
-  draft/not-for-reliance document and does not specifically disclose the terminal's Base Sepolia
-  RPC requests or provider handling.
+- [ ] Approve app-specific privacy disclosures. The current URL no longer labels itself a draft,
+  but it does not specifically disclose the terminal's Base Sepolia RPC requests, provider
+  handling, or Android ML Kit diagnostics and usage metrics.
 - [ ] Confirm the About page is an adequate Support URL or publish a dedicated support page with a
   monitored contact method.
 - [ ] Keep the review portal, Base Sepolia vault, RPC, faucet/test funding, and token available

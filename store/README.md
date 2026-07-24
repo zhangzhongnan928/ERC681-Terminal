@@ -21,11 +21,11 @@ not included.
 
 ## Submission blockers
 
-1. **Privacy policy is not submission-ready.** `https://www.openpasskey.com/privacy` is live, but
-   on 24 July 2026 it labels itself a working draft, says it is not legal advice and should not be
-   relied on until reviewed, and does not specifically disclose OPK Terminal's Base Sepolia
-   JSON-RPC requests or the RPC provider's handling of them. The owner/legal team must publish a
-   binding, app-specific policy before submission.
+1. **Privacy policy still needs app-specific review.** `https://www.openpasskey.com/privacy` is
+   live and no longer labels itself a draft as of 24 July 2026, but it does not specifically
+   disclose OPK Terminal's Base Sepolia JSON-RPC requests, the RPC provider's handling of them, or
+   Android ML Kit diagnostics and usage metrics. The owner/legal team must approve app-specific
+   disclosures before submission.
 2. **A self-service review environment is required.** Provisioning is bound to the operator EOA
    created on the review device. A static QR prepared in advance cannot exercise the complete
    flow. Keep a live Base Sepolia review vault/token, Merchant Portal access, test ETH, and test

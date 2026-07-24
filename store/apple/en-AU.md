@@ -84,4 +84,5 @@ placeholders or commit review credentials to this repository.
 - Confirm organisation enrolment and the financial/cryptocurrency classification described in
   `../console-declarations.md`.
 - Confirm the copyright owner and distribution territories.
-- Publish a binding privacy policy before using the URL above in a submission.
+- Confirm the live privacy policy includes the approved OPK Terminal data-practice disclosures
+  before using the URL above in a submission.

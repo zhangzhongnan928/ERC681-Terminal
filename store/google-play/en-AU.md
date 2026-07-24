@@ -80,4 +80,5 @@ provisioning. Do not submit placeholders or commit credentials to this repositor
 - Complete the target-audience and content-rating questionnaires honestly. This is a business tool,
   not a child-directed app.
 - Confirm all distribution territories with legal/compliance.
-- Publish a binding privacy policy and enter a monitored support email before submission.
+- Confirm the live privacy policy includes the approved OPK Terminal data-practice disclosures
+  and enter a monitored support email before submission.
