@@ -6,10 +6,10 @@ Terminal `0.1.12` (build/version code `13`).
 ## Status
 
 The copy is ready to paste after the owner resolves the blockers below. The pack includes a
-validated Google Play icon and feature graphic, five current Android physical-device screenshots,
-five iPhone 6.9-inch screenshots, and four iPad 13-inch screenshots. Credentials, a live
-provisioning QR, Google Play signing material, console configuration, and legal determinations are
-not included.
+validated Google Play icon and feature graphic, five current Android phone screenshots, five
+7-inch tablet screenshots, five 10-inch tablet screenshots, five iPhone 6.9-inch screenshots, and
+four iPad 13-inch screenshots. Credentials, a live provisioning QR, Google Play signing material,
+console configuration, and legal determinations are not included.
 
 ## Contents
 
