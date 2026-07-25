@@ -15,6 +15,30 @@ After confirmation, the native app may sign exactly one allowed contract method:
 `ClearingVault.sweepSessions`. The receiver contract then moves the payment into the merchant
 vault; the terminal never chooses a payout destination.
 
+## For wallet developers
+
+Terminals present payment requests as canonical ERC-681 ERC-20 transfer URIs:
+
+```text
+ethereum:{TOKEN}@{CHAIN_ID}/transfer?address={RECEIVER}&uint256={RAW_TOKEN_UNITS}
+```
+
+Example (Base Sepolia, 12.34 units, 18-decimal token):
+
+```text
+ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c&uint256=12340000000000000000
+```
+
+A wallet is compatible if it scans this QR, prefills
+`token.transfer(receiver, amount)` on the specified chain, and lets the user send. Use raw integer
+token units only: no exponents, no percent-encoding, and no native value.
+
+Machine-readable vectors, including CREATE2 receiver derivation, are in
+[`conformance/opk-erc681-v1.json`](./conformance/opk-erc681-v1.json). Base Sepolia test QR codes
+are available on request from [v@openpasskey.com](mailto:v@openpasskey.com). See
+[erc681.org](https://erc681.org/) for the ERC-681 specification, wallet-adoption research, and
+developer resources.
+
 ## Safety boundary
 
 - ERC-20 `transfer` QR payments only
