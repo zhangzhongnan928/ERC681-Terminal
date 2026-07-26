@@ -4,7 +4,7 @@ enum ReviewerDemoCopy {
     static let safetyBannerLabel =
         "OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS"
     static let isolationDetail =
-        "Offline, in-memory preview. No wallet, network request, signing, broadcast, or storage is used."
+        "Offline, in-memory product tour. No wallet, network request, signing, broadcast, or storage is used."
 
     static let sampleAmount = "1.00"
     static let sampleSymbol = "USDC"

@@ -11,6 +11,7 @@ final class ReviewerDemoTests: XCTestCase {
         )
         XCTAssertTrue(ReviewerDemoCopy.isolationDetail.contains("Offline"))
         XCTAssertTrue(ReviewerDemoCopy.isolationDetail.contains("in-memory"))
+        XCTAssertTrue(ReviewerDemoCopy.isolationDetail.contains("product tour"))
     }
 
     func testSamplePaymentURIIsCanonicalBaseSepoliaERC681() throws {

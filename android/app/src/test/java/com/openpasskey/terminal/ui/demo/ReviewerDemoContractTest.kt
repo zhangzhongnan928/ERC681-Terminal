@@ -15,6 +15,7 @@ class ReviewerDemoContractTest {
             "OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS",
             ReviewerDemoCopy.BANNER_LABEL,
         )
+        assertTrue(ReviewerDemoCopy.SAFETY_EXPLANATION.startsWith("Offline product tour."))
         assertTrue(ReviewerDemoCopy.SAFETY_EXPLANATION.contains("Nothing leaves this screen"))
         assertTrue(ReviewerDemoCopy.RESET_EXPLANATION.contains("memory only"))
         assertEquals("1.00", ReviewerDemoCopy.SAMPLE_AMOUNT)

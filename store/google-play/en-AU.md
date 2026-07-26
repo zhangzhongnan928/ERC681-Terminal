@@ -56,8 +56,8 @@ Requirements:
 • Base Sepolia test ETH on the terminal operator for settlement gas
 • a compatible customer wallet for sending the designated Base Sepolia test token
 
-This app is intended for merchant and technical testing. Customers do not need OPK Terminal to scan
-and pay a merchant's displayed QR.
+This app is intended for merchants evaluating Base Sepolia payment workflows. Customers do not
+need OPK Terminal to scan and pay a merchant's displayed QR.
 
 ## Version 0.1.12 release notes (500 max)
 
@@ -67,7 +67,7 @@ First public-store build of OPK Terminal:
 • OpenPasskey provisioning for up to 32 vault/token profiles
 • ERC-681 payment QR display and on-chain confirmation monitoring
 • device-protected, constrained settlement and local history
-• clearly labelled, isolated offline Base Sepolia evaluation demo
+• clearly labelled, isolated offline Base Sepolia product tour
 • in-app Privacy Policy and Support links
 
 ## Review access
@@ -84,5 +84,6 @@ provisioning. Do not submit placeholders or commit credentials to this repositor
   not a child-directed app.
 - Confirm all distribution territories with legal/compliance.
 - Confirm the live privacy policy retains the approved first-party OPK Terminal statement and
-  enter a monitored support email. Do not add RPC-provider collection wording solely to mirror
-  store answers; complete Play Data safety separately under Google's definitions.
+  enter a monitored support email. Before submission, reconcile that page with Google's separate
+  requirement for a comprehensive policy covering relevant off-device handling and recipient
+  parties; the Play Data safety form and linked policy must not contradict each other.

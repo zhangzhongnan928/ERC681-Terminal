@@ -50,7 +50,7 @@ struct TerminalLaunchChooserView: View {
                     }
 
                     Text(
-                        "Open the live merchant terminal to continue setup and operations, or explore the isolated App Review demo."
+                        "Open the live merchant terminal to continue setup and operations, or explore the isolated offline product tour."
                     )
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -65,7 +65,7 @@ struct TerminalLaunchChooserView: View {
                         .accessibilityIdentifier("launchOpenLiveTerminalButton")
 
                         Button(action: onExploreDemo) {
-                            Label("Explore offline demo", systemImage: "sparkles")
+                            Label("Explore offline product tour", systemImage: "sparkles")
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
@@ -75,7 +75,7 @@ struct TerminalLaunchChooserView: View {
 
                     GroupBox {
                         VStack(alignment: .leading, spacing: 8) {
-                            Label("OFFLINE DEMO", systemImage: "eye.fill")
+                            Label("OFFLINE PRODUCT TOUR", systemImage: "eye.fill")
                                 .font(.headline)
                             Text(
                                 "BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS"
@@ -83,7 +83,7 @@ struct TerminalLaunchChooserView: View {
                                 .font(.caption.weight(.bold))
                                 .foregroundStyle(.orange)
                             Text(
-                                "The demo is offline and in memory. It does not open the live terminal, create a wallet, read saved setup, or connect to a network."
+                                "The product tour is offline and in memory. It does not open the live terminal, create a wallet, read saved setup, or connect to a network."
                             )
                             .font(.footnote)
                             .foregroundStyle(.secondary)

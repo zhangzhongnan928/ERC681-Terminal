@@ -1,7 +1,7 @@
 # Store reviewer instructions
 
 Use these notes for OPK Terminal `0.1.12` build `14`. The primary review path is the isolated,
-in-app offline reviewer demo. It requires no account, credentials, provisioning QR, external
+in-app offline product tour. It requires no account, credentials, provisioning QR, external
 hardware, test funds, or network connection.
 
 The demo is intentionally and persistently labelled:
@@ -22,7 +22,7 @@ It has no app account, advertising SDK, in-app purchases, or subscriptions.
 
 No review credentials are required. To review the offline representative preview:
 
-1. Launch OPK Terminal and tap **Explore offline demo**.
+1. Launch OPK Terminal and tap **Explore offline product tour**.
 2. Confirm the persistent banner says **OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO
    NETWORK · NO REAL FUNDS**.
 3. On **Demo Checkout**, inspect the locally rendered sample ERC-681 payment QR and tap
@@ -35,7 +35,7 @@ No review credentials are required. To review the offline representative preview
 
 The separate **Open live terminal** path creates a device-local merchant operator and requires a
 merchant to authorise and provision it through the companion OpenPasskey Merchant Portal. This
-external merchant setup is not required for the reviewer demo. The live operator key remains
+external merchant setup is not required for the offline product tour. The live operator key remains
 device-protected and is used only for the terminal's constrained settlement flow.
 
 Support: `dev@openpasskey.com` and `https://www.openpasskey.com/support`.
@@ -52,7 +52,7 @@ sign-in exists, and no credentials are required for the self-contained review pa
 
 Reviewer steps:
 
-1. Launch OPK Terminal and tap **Explore offline reviewer demo**.
+1. Launch OPK Terminal and tap **Explore offline product tour**.
 2. Confirm the persistent banner says **OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO
    NETWORK · NO REAL FUNDS**.
 3. On **Checkout preview**, inspect the locally rendered sample ERC-681 payment QR and tap
@@ -63,7 +63,7 @@ Reviewer steps:
 6. Use the back arrow to close the demo. Reopening it starts again at the initial waiting state.
 
 The separate **Set up / open terminal** path is the live merchant path and requires an authorised
-Base Sepolia Merchant Portal provisioning payload. The offline reviewer demo does not open that
+Base Sepolia Merchant Portal provisioning payload. The offline product tour does not open that
 path or any of its dependencies.
 
 If Google Play review requires a live Base Sepolia transaction in addition to the offline

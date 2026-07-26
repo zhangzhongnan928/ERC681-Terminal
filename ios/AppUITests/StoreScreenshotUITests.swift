@@ -63,7 +63,7 @@ final class StoreScreenshotUITests: XCTestCase {
 
         let demoButton = app.buttons["launchReviewerDemoButton"]
         XCTAssertTrue(demoButton.exists)
-        XCTAssertEqual(demoButton.label, "Explore offline demo")
+        XCTAssertEqual(demoButton.label, "Explore offline product tour")
         demoButton.tap()
 
         let safetyLabel = element("reviewerDemoSafetyLabel")

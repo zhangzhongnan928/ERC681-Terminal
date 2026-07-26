@@ -10,10 +10,13 @@ unverified claims.
 
 | Existing asset | Inventory | Readiness |
 | --- | --- | --- |
-| Signed Android build-14 phone PNGs | 5 files in `store/assets/google-play/phone-build14-signed-api36`, all 1440 × 2560, captured from the exact signed `0.1.12` / code 14 release APK on an API 36 emulator on 26 July 2026 | **Current signed-build phone set.** RGB/no alpha; visually inspected; dimensions satisfy Play's mandatory rules and 1080 × 1920-or-greater portrait recommendation. Screens truthfully show the cold-launch choice and isolated simulated demo. |
+| Signed Android build-14 product-tour PNGs | 5 files in `store/assets/google-play/phone-build14-signed-api36`, all 1440 × 2560, captured from device-specific splits generated from the exact signed `0.1.12` / code 14 / target-API-36 AAB on an API 36 emulator on 26 July 2026 | **Current signed-build product-tour set.** RGB/no alpha; visually inspected; dimensions satisfy Play's mandatory rules and 1080 × 1920-or-greater portrait recommendation. Screens truthfully show the cold-launch choice and isolated simulated tour. |
+| Signed Android build-14 live first-run PNGs | 5 files in `store/assets/google-play/phone-build14-core-aab-api36`, all 1440 × 2560, captured from the live merchant path in the same installed AAB splits on 26 July 2026 | **Current signed-build merchant-core set.** RGB/no alpha; visually inspected; no wallet was created and no provisioning/payment was fabricated. Screens show setup-required Checkout, empty History, settlement safety, the pre-authentication protected-wallet review, and Privacy/Support. |
 | Uploaded Android build-13 physical-device PNGs | 5 files in `store/assets/google-play/phone`, all 720 × 1440, captured from `0.1.12` / code 13 on an iMin L2s Pro on 24 July 2026 | **Technically valid historical set.** Uploaded to the Play listing draft; RGB/no alpha; dimensions satisfy Play's 320–3840 px and 2:1 rules. They predate the build-14 cold-launch choice and are not build-14 verification evidence. |
 | Older Android UI-test PNGs | 25 files in `artifacts/ui-test`, all 1080 × 2400, captured 19 July 2026 | **Do not submit.** They predate the current operator-wallet/provisioning flow. Their 20:9 ratio also exceeds Play's current rule that the long side be no more than twice the short side. |
 | iOS UI-test PNGs | 5 files in `artifacts/ui-test`, all 1206 × 2622, captured 19 July 2026 | **Do not submit.** They predate the current flow and are 6.3-inch captures, not the primary 6.9-inch set requested here. |
+| App Store build-14 iPhone merchant-core PNGs | 5 files in `store/assets/apple/build-14-core/iphone-6.9`, all 1320 × 2868, captured from the `0.1.12` / build 14 simulator app on an iPhone 17 Pro Max, iOS 26.5, on 26 July 2026 | **Current simulator merchant-core set.** RGB/no alpha; clean UI-test rerun passed; visually inspected. Screens show genuine first-run Checkout, empty History, settlement safety, Terminal Setup, and Privacy/Support without fabricating provisioning or payment state. Recheck against the eventual signed archive. |
+| App Store build-14 iPad merchant-core PNGs | 5 files in `store/assets/apple/build-14-core/ipad-13`, all 2064 × 2752, captured from the same build-14 source on an iPad Pro 13-inch (M5), iOS 26.5, on 26 July 2026 | **Current simulator merchant-core set.** RGB/no alpha; clean UI-test rerun passed; visually inspected. Images 4 and 5 are byte-identical because Privacy/Support already fit on the Terminal Setup screen; upload only one of the duplicate pair. Recheck against the eventual signed archive. |
 | App Store build-14 iPhone candidate PNGs | 5 files in `store/assets/apple/build-14/iphone-6.9`, all 1320 × 2868, captured from the `0.1.12` / build 14 simulator app on an iPhone 17 Pro Max, iOS 26.5, on 26 July 2026 | **Current simulator candidate set.** RGB/no alpha; visually inspected; the dedicated UI test passed. Screens truthfully show the cold-launch choice and isolated simulated demo. Recheck against the eventual signed App Store archive before replacing the uploaded build-13 set. |
 | App Store build-14 iPad candidate PNGs | 5 files in `store/assets/apple/build-14/ipad-13`, all 2064 × 2752, captured from the `0.1.12` / build 14 simulator app on an iPad Pro 13-inch (M5), iOS 26.5, on 26 July 2026 | **Current simulator candidate set.** RGB/no alpha; visually inspected; all five came from one passing dedicated UI-test run. Recheck against the eventual signed App Store archive before replacing the uploaded build-13 set. |
 | Apple app icon | `ios/App/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png`, 1024 × 1024 PNG, no alpha | Ready as the source Apple icon, subject to owner brand review. |
@@ -29,9 +32,12 @@ unverified claims.
 
 | Store slot | Exact house target | Count | Format |
 | --- | --- | --- | --- |
-| App Store iPhone 6.9-inch — build-14 candidate | **1320 × 2868 portrait** | 5 included; Apple accepts 1–10 | PNG or JPEG, no alpha |
-| App Store iPad 13-inch — build-14 candidate | **2064 × 2752 portrait** | 5 included; at least 1 required because the app supports iPad | PNG or JPEG, no alpha |
-| Google Play phone — signed build-14 set | **1440 × 2560 portrait (9:16)** | 5 included; Play requires at least 2 and allows up to 8 | 24-bit PNG, no alpha |
+| App Store iPhone 6.9-inch — build-14 merchant-core set | **1320 × 2868 portrait** | 5 included; Apple accepts 1–10 | PNG or JPEG, no alpha |
+| App Store iPad 13-inch — build-14 merchant-core set | **2064 × 2752 portrait** | 5 retained; upload 4 unique images; at least 1 required because the app supports iPad | PNG or JPEG, no alpha |
+| App Store iPhone 6.9-inch — build-14 product-tour set | **1320 × 2868 portrait** | 5 included; curate at most 10 total across both current sets | PNG or JPEG, no alpha |
+| App Store iPad 13-inch — build-14 product-tour set | **2064 × 2752 portrait** | 5 included; curate at most 10 total across both current sets | PNG or JPEG, no alpha |
+| Google Play phone — signed build-14 product-tour set | **1440 × 2560 portrait (9:16)** | 5 included; Play requires at least 2 and allows up to 8 total | 24-bit PNG, no alpha |
+| Google Play phone — signed build-14 live first-run set | **1440 × 2560 portrait (9:16)** | 5 included; curate at most 8 total across both current sets | 24-bit PNG, no alpha |
 | Google Play phone — historical build-13 set | **720 × 1440 portrait (2:1)** | 5 preserved; do not relabel as build 14 | 24-bit PNG, no alpha |
 | Google Play 7-inch tablet | **1080 × 1920 portrait (9:16)** | 5 included | 24-bit PNG, no alpha |
 | Google Play 10-inch tablet | **1440 × 2560 portrait (9:16)** | 5 included | 24-bit PNG, no alpha |
@@ -42,16 +48,39 @@ Apple currently accepts additional 6.9-inch portrait sizes (1260 × 2736 and 129
 additional 13-inch iPad portrait size (2048 × 2732). Standardise this release on the house targets
 above so each device set is internally consistent.
 
-## App Store build-14 candidate capture sequence
+## App Store build-14 merchant-core capture sequence
+
+The two five-image sets under `store/assets/apple/build-14-core` were captured from the exact tree
+recorded by source/assets commit `477817a59ecce16319fc13023fbe575e88ebd9a6`. Clean dedicated
+UI-test reruns passed on both devices, every final PNG is byte-identical to its kept non-failure
+XCTest attachment, and all 10 images passed visual obstruction and format checks. No operator
+wallet, provisioning, invoice, payment, or settlement was created.
+
+1. **Checkout setup required** — live Checkout blocks payment creation until the device-local
+   operator and merchant configuration exist.
+2. **Empty payment history** — explains where created ERC-681 requests and observed payments
+   appear.
+3. **Settlement safety** — describes review, authentication, confirmation, and reconciliation
+   safeguards without depicting a funded session.
+4. **Terminal Setup** — shows the genuine first-run operator, Admin PIN, portal import, and
+   readiness steps.
+5. **Privacy and support** — shows the in-app Privacy Policy and Support links. On iPad this image
+   is byte-identical to screen 4 because the complete content already fits; do not upload both.
+
+For the App Store listing, lead with the merchant-core screens and add only the product-tour
+screens needed to show the QR, simulated paid transition, and in-memory history. Keep the
+simulation banner visible on every product-tour screenshot.
+
+## App Store build-14 product-tour capture sequence
 
 The two five-image sets under `store/assets/apple/build-14` were captured from the build-14 app
-target at source revision `1b866fef4cf965df836c17addfc91612b06d9fb2`. The capture harness ran
+target at source revision `477817a59ecce16319fc13023fbe575e88ebd9a6`. The capture harness ran
 with live bootstrap forbidden. These are simulator candidates, not evidence of the eventual signed
 App Store archive; preserve the uploaded build-13 sets until archive-parity review justifies
 replacement. Screenshots 2–5 keep the full
 `OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS` banner visible.
 
-1. **Cold-launch choice** — live merchant setup and the isolated offline reviewer demo are clearly
+1. **Cold-launch choice** — live merchant setup and the isolated offline product tour are clearly
    separated before either path opens.
 2. **Simulated checkout waiting** — 1.00 USDC sample, Waiting status, and a locally rendered fixed
    dummy ERC-681 QR.
@@ -63,14 +92,15 @@ replacement. Screenshots 2–5 keep the full
 
 ## Signed build-14 phone capture sequence
 
-The five images in `store/assets/google-play/phone-build14-signed-api36` were captured from the
-exact signed build-14 release APK. They show only the real cold-launch and isolated offline-demo
-UI, with no fabricated provisioning, live network state, production data, or available settlement.
-Screenshots 2–5 keep the full simulation/testnet/no-network/no-real-funds banner visible.
+The five images in `store/assets/google-play/phone-build14-signed-api36` were captured from
+device-specific splits generated from the exact signed target-API-36 AAB. They show only the real
+cold-launch and isolated offline-product-tour UI, with no fabricated provisioning, live network
+state, production data, or available settlement. Screenshots 2–5 keep the full
+simulation/testnet/no-network/no-real-funds banner visible.
 
-1. **Cold-launch choice** — live merchant setup and the isolated offline reviewer demo are clearly
+1. **Cold-launch choice** — live merchant setup and the isolated offline product tour are clearly
    separated before any live component opens.
-   - Play alt text: `OPK Terminal launch screen offering live merchant setup or an isolated offline reviewer demo.`
+   - Play alt text: `OPK Terminal launch screen offering live merchant setup or an isolated offline product tour.`
 2. **Simulated checkout waiting** — 1.00 USDC sample, Waiting status, and a locally rendered fixed
    dummy ERC-681 QR.
    - Play alt text: `Offline Base Sepolia demo showing a simulated 1 USDC checkout, Waiting status, and dummy ERC-681 QR.`
@@ -83,11 +113,32 @@ Screenshots 2–5 keep the full simulation/testnet/no-network/no-real-funds bann
    action; no authentication, signing, RPC, or broadcast is available.
    - Play alt text: `Offline settlement preview with dummy addresses and the settlement action disabled.`
 
+## Signed build-14 live first-run phone capture sequence
+
+The five images in `store/assets/google-play/phone-build14-core-aab-api36` use the live merchant
+path from the same installed AAB splits. No operator wallet, provisioning payload, invoice,
+payment, or settlement was created. The wallet review was canceled before authentication.
+
+1. **Checkout setup required** — live Checkout blocks payment creation until a terminal operator
+   and merchant configuration exist.
+2. **Empty payment history** — explains where created ERC-681 requests and observed payments
+   appear.
+3. **Settlement safety** — shows the live settlement review, authentication, confirmation, and
+   reconciliation safeguards without fabricating a funded session.
+4. **Protected-wallet review** — the reversible pre-authentication dialog explains Android
+   Keystore protection and that the merchant passkey is not stored on the terminal.
+5. **Privacy and support** — Settings shows setup status plus the in-app Privacy Policy and Support
+   links.
+
+For Play's eight-image maximum, lead with merchant-core screens and add only the product-tour
+screens needed to demonstrate the QR, paid transition, and in-memory history. Keep the simulation
+banner visible on every product-tour image.
+
 ## Historical build-13 live-terminal capture sequence
 
 The five preserved Android build-13 captures use the live Base Sepolia test story below. The
 preserved Apple build-13 sets document the then-current direct first-run and setup experience.
-Build 14 adds a cold-launch choice and isolated offline reviewer demo that are absent from those
+Build 14 adds a cold-launch choice and isolated offline product tour that are absent from those
 sets. The signed build-14 phone set above supersedes them as current cold-launch/demo evidence.
 Retain these historical live-terminal screens only with their original provenance, and recheck any
 one selected for submission against the live path in build 14. Do not fabricate a ready terminal.

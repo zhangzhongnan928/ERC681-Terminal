@@ -41,7 +41,7 @@ import androidx.compose.ui.unit.dp
 import com.openpasskey.terminal.ui.components.QRCodeView
 
 /**
- * A self-contained reviewer preview. Its only input is a close callback, and its state is held
+ * A self-contained offline product tour. Its only input is a close callback, and its state is held
  * with [remember] rather than saveable or persistent storage so every closed/relaunched session
  * starts at Checkout / Waiting.
  */
@@ -53,7 +53,7 @@ internal fun ReviewerDemoScreen(onClose: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Offline reviewer demo") },
+                title = { Text("Offline product tour") },
                 navigationIcon = {
                     IconButton(
                         onClick = onClose,
@@ -61,7 +61,7 @@ internal fun ReviewerDemoScreen(onClose: () -> Unit) {
                     ) {
                         Icon(
                             Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Close reviewer demo",
+                            contentDescription = "Close product tour",
                         )
                     }
                 },

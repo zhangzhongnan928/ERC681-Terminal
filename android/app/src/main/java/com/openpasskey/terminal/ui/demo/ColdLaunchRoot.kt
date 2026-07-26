@@ -105,7 +105,7 @@ private fun ColdLaunchChoice(
             textAlign = TextAlign.Center,
         )
         Text(
-            "Terminal setup & review",
+            "Merchant terminal setup",
             modifier = Modifier.padding(top = 8.dp, bottom = 24.dp),
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -142,12 +142,12 @@ private fun ColdLaunchChoice(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text(
-                    "App reviewer?",
+                    "Explore OPK Terminal",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    "Explore a self-contained offline preview before any wallet, storage, " +
+                    "Take a self-contained offline product tour before any wallet, storage, " +
                         "authentication, or network service is opened.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -158,7 +158,7 @@ private fun ColdLaunchChoice(
                         .testTag("cold_launch_reviewer_demo"),
                 ) {
                     Icon(Icons.Default.PlayCircleOutline, contentDescription = null)
-                    Text("  Explore offline reviewer demo")
+                    Text("  Explore offline product tour")
                 }
                 Text(
                     "This preview does not configure or authorize the terminal.",
