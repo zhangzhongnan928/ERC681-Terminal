@@ -1,7 +1,7 @@
 package com.openpasskey.terminal.ui.demo
 
 /**
- * Static, non-secret sample content for the reviewer-only offline preview.
+ * Static, non-secret sample content for the offline product tour.
  *
  * This contract deliberately contains only immutable values and a pure state reducer. It has no
  * Android, repository, persistence, wallet, authentication, signing, or network dependencies.
@@ -13,7 +13,7 @@ internal object ReviewerDemoCopy {
     const val NETWORK_LABEL = "BASE SEPOLIA TESTNET"
     const val FUNDS_LABEL = "NO REAL FUNDS"
     const val SAFETY_EXPLANATION =
-        "Offline reviewer preview. Nothing leaves this screen: no account, wallet, PIN, " +
+        "Offline product tour. Nothing leaves this screen: no account, wallet, PIN, " +
             "authentication, network request, signing, or transaction is used."
     const val RESET_EXPLANATION =
         "Demo activity is held in memory only and resets when you close this preview."

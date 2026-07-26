@@ -51,7 +51,11 @@ class ColdLaunchDemoIsolationTest {
         }
 
         composeRule.onNodeWithTag("cold_launch_choice").assertIsDisplayed()
+        composeRule.onNodeWithText("Explore OPK Terminal").assertIsDisplayed()
+        composeRule.onNodeWithText("Explore offline product tour", substring = true)
+            .assertIsDisplayed()
         composeRule.onNodeWithTag("cold_launch_reviewer_demo").performClick()
+        composeRule.onNodeWithText("Offline product tour").assertIsDisplayed()
         composeRule.onNodeWithText(ReviewerDemoCopy.BANNER_LABEL).assertIsDisplayed()
         composeRule.onNodeWithTag("reviewer_demo_simulate_payment").performClick()
         composeRule.onNodeWithText("Paid").assertIsDisplayed()

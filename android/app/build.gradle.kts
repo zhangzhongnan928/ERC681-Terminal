@@ -96,12 +96,12 @@ val playSigningPassword: String? = playSigningProperties?.let { properties ->
 
 android {
     namespace = "com.openpasskey.terminal"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.openpasskey.terminal"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 14
         versionName = "0.1.12"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
