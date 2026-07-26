@@ -1,6 +1,6 @@
 # App Store Connect and Play Console declaration checklist
 
-Evidence snapshot: repository state inspected on 24 July 2026 for `0.1.12` / build `13`.
+Evidence snapshot: repository state inspected on 26 July 2026 for `0.1.12` / build `14`.
 
 This is a code-grounded submission checklist, not legal advice. Store answers must also reflect the
 actual production services, contracts, privacy policy, developer account, and distribution
@@ -18,8 +18,8 @@ territories at submission time.
   configured merchant vault. It is not a general customer wallet.
 - Android's app-owned manifest declares `INTERNET` and `CAMERA`, with camera hardware optional.
   The verified release merged manifest also contains `USE_BIOMETRIC`, legacy `USE_FINGERPRINT`,
-  and `ACCESS_NETWORK_STATE` from platform/dependency manifests. iOS declares Camera and Face ID
-  usage descriptions.
+  and the app-local `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` from platform/dependency manifests.
+  iOS declares Camera and Face ID usage descriptions.
 - Camera scanning is limited to terminal provisioning and configuration-address QR codes. A
   scanned payment QR does not initiate a payment.
 - Invoice, settlement, configuration, admin-PIN verifier, and operator-key material are stored
@@ -29,13 +29,11 @@ territories at submission time.
   request and network connection metadata.
 - No advertising, social-login, app account, StoreKit, Play Billing, or subscription SDK was found.
 - The iOS target has no general-purpose analytics or crash-reporting SDK.
-- Android includes Google's bundled ML Kit barcode SDK. Google's published all-feature disclosure
-  says ML Kit collects device/app information, a per-install identifier, performance metrics, API
-  configuration, feature input/output size and version, event types, and error codes for
-  diagnostics and usage analytics. The app deliberately disables ML Kit auto-zoom, so the
-  additional auto-zoom session, zoom-level, and predicted-coordinate fields do not apply.
-- The iOS privacy manifest currently declares no tracking, no tracking domains, no collected data
-  types, and UserDefaults reason `CA92.1`.
+- Android decodes QR camera frames entirely on-device with ZXing. The release dependency graph
+  contains no ML Kit, Firebase, or Google Data Transport component.
+- The iOS privacy manifest declares no tracking or tracking domains; it declares Coarse Location,
+  User ID, Purchase History, and Other Financial Info as linked, non-tracking data used for App
+  Functionality, plus UserDefaults reason `CA92.1`.
 
 ## Monetisation and accounts
 
@@ -52,65 +50,58 @@ territories at submission time.
 
 ## Apple App Privacy
 
-Do not publish **Data Not Collected** solely because the checked-in privacy manifest is empty.
-The live privacy URL no longer identifies itself as a draft, but it does not specifically disclose
-OPK Terminal's Base Sepolia JSON-RPC requests, the RPC provider's handling of them, or Android ML
-Kit diagnostics and usage metrics. Treat those missing app-specific disclosures as owner/legal
-input, not as a submission-ready privacy position.
+The public OpenPasskey privacy page states the first-party fact that OpenPasskey operates no app
+backend and does not receive or store OPK Terminal app data. Keep that public statement limited to
+OpenPasskey's own practices; do not add RPC-provider collection wording to it. App Store Connect's
+answers are a separate, store-scoped compliance declaration and must still cover app-originated
+transfers to third parties. Do not publish **Data Not Collected** in App Store Connect: the app
+sends JSON-RPC requests directly to Base's public RPC service, and Base's published policy
+describes collection and retention beyond real-time request processing.
 
-- Base's published privacy policy says its services may collect IP/derived-location and
-  device/browser information and may analyse public blockchain data including wallet addresses,
-  transaction IDs, digital signatures, amounts, and timestamps. Confirm in writing whether and how
-  those practices apply to the public `https://sepolia.base.org` endpoint used by this app.
-- [ ] Obtain written confirmation of the Base Sepolia RPC operator's handling of IP addresses,
-  JSON-RPC payloads, wallet addresses, transaction data, logging, retention, and secondary use.
-- [ ] Confirm whether the RPC operator is a “third-party partner” and whether any transmission
-  qualifies for Apple's collection exceptions.
-- [ ] Confirm the data practices of every included production SDK, including the barcode-scanning
-  dependency on Android for the cross-platform Play disclosure.
-- [ ] If the service-provider review supports **Data Not Collected**, keep the privacy manifest,
-  App Store privacy answers, and published privacy policy aligned.
-- [ ] Otherwise disclose the applicable categories and purposes. Likely review candidates include
-  identifiers/network data and financial or transaction information sent for app functionality;
-  do not select a category without mapping it to Apple's current definitions.
+- Base's published privacy policy says its services may collect IP/derived-location information
+  and may analyse public blockchain data including wallet addresses, transaction IDs, digital
+  signatures, amounts, and timestamps.
+- [x] Camera frames and QR values stay on-device. Android's scanner uses ZXing and the iOS scanner
+  uses AVFoundation; neither scanner has an upload or telemetry path.
+- [ ] Disclose **Coarse Location**, **User ID**, **Purchase History**, and
+  **Other Financial Info** as linked data used for App Functionality. Base's published policy and
+  the app's JSON-RPC payloads support these categories.
+- [x] Do not declare **Device ID**: no stable device identifier is sent by the app.
+- [ ] Remove **Other Data** unless a separate production flow supports it.
 - [ ] Tracking: **No**, subject to confirming that no production service links app data across
   companies for advertising or measurement.
 
 Local-only data is not automatically “collected” under store definitions, but the following still
-requires secure handling and accurate policy text: the operator private key, salted Admin PIN
-verifier, vault/token configuration, invoices, amounts, receiver addresses, transaction hashes,
-settlement evidence, and local history.
+requires secure handling and accurate store declarations: the operator private key, salted Admin
+PIN verifier, vault/token configuration, invoices, amounts, receiver addresses, transaction
+hashes, settlement evidence, and local history. This does not require adding provider practices to
+OpenPasskey's first-party public privacy statement.
 
 ## Google Play Data safety
 
 - [ ] Data encrypted in transit: **Yes for app-controlled traffic**; Android cleartext traffic is
   disabled and the compiled RPC URL is HTTPS.
-- [ ] Declare ML Kit's documented all-feature collection: device/app information, a per-install
-  identifier, performance metrics, API configuration, feature input/output size and version, event
-  types, and error codes, used for diagnostics and usage analytics. Map these to the current Play
-  categories (likely Device or other IDs plus App info and performance / Diagnostics) using the
-  exact live form wording.
-- [ ] ML Kit says this diagnostic/usage data is encrypted in transit and is not transferred to
-  third parties. Confirm the release's exact `com.google.mlkit:barcode-scanning:17.3.0` behaviour
-  against the current vendor disclosure when submitting.
 - [ ] Data deletion request: determine from the final declaration. Local data can be removed by
-  uninstalling/resetting, but public blockchain transactions cannot be deleted; explain this in
-  the privacy policy rather than promising deletion of on-chain records.
-- [ ] Data collection: do not answer **No data collected**. ML Kit's vendor disclosure already
-  establishes diagnostic/usage collection; the Base RPC assessment may add further categories.
+  uninstalling/resetting, but public blockchain transactions cannot be deleted. Explain this in
+  the Play form or review notes where requested; do not expand the first-party public privacy page
+  with provider wording.
+- [ ] Data collection: do not answer **No data collected**. Base says its service collects and
+  retains IP-derived location, device/network information, wallet addresses, and blockchain
+  transaction data.
 - [ ] Data sharing: answer separately from collection. Reconcile Play's service-provider
-  definitions with Google's statement that ML Kit does not transfer its collected data to third
-  parties and with Base's role for RPC traffic.
-- [ ] Map every transmitted field to current Play categories and purposes. The app sends public
-  EVM addresses, blockchain queries, and signed transaction payloads for app functionality; the
-  RPC provider may also log IP/device-network metadata.
-- [ ] Camera images and decoded QR values: source behaviour is on-device parsing and no upload path
-  was found. ML Kit's barcode disclosure does not list image or decoded-value collection, but
-  confirm the exact release artefact's current SDK guidance when submitting.
+  definitions and exceptions with Base's role for RPC traffic. Without a processor agreement or
+  a documented exception, conservatively answer that the applicable data is shared with Base.
+- [ ] Declare **Approximate location**, **User IDs**, **Purchase history**,
+  and **Other financial info** for required App Functionality, based on Base's current published
+  privacy policy and the JSON-RPC fields sent by the app.
+- [x] Do not declare **Device or other IDs**: no stable device identifier is sent by the app.
+- [x] Camera images and decoded QR values: on-device only; do not declare them as collected.
 - [ ] Advertising purpose: **No** based on source and vendor disclosure.
-- [ ] Analytics purpose: **Yes for ML Kit's documented SDK diagnostics and usage analytics**;
-  describe it narrowly and do not imply OpenPasskey profiles terminal behaviour itself.
-- [ ] Reconcile Play answers with the final privacy policy and Apple answers.
+- [x] App interactions, Diagnostics, and Other app performance data: do not select these solely for
+  QR scanning; the ML Kit telemetry dependency has been removed.
+- [ ] Keep Play and Apple answers mutually consistent while preserving their separate store scope.
+  They must not contradict the first-party public policy, but provider-specific store disclosures
+  do not need to be copied into that policy.
 
 ## Financial and blockchain declarations
 
@@ -119,11 +110,11 @@ settlement evidence, and local history.
 All apps must complete the Financial features declaration.
 
 - [ ] Do **not** default to “My app doesn't provide any financial features.”
-- [ ] Conservatively assess **Mobile payments and digital wallets** because the app presents
-  merchant payment QRs and settles received test tokens.
-- [ ] Conservatively assess **Cryptocurrency wallet** because the app creates and stores a
-  non-custodial merchant operator private key, even though it has no customer custody and is
-  testnet-only.
+- [x] Select **Mobile payments and digital wallets** because the app is a merchant tool that
+  presents payment QRs and settles received Base Sepolia test tokens.
+- [x] Do **not** select **Cryptocurrency wallet**. OPK Terminal is classified as a merchant
+  payment terminal, not a general-purpose wallet or financial-services provider. Its
+  device-protected operator key is limited to authorised terminal settlement.
 - [ ] Answer exchange, token sale/purchase, token rewards/earnings, NFT, lending, money transfer,
   and mining questions **No** where the final console wording matches the verified implementation.
 - [ ] Describe it as Base Sepolia testnet-only and non-custodial in any explanation field.
@@ -160,8 +151,8 @@ All apps must complete the Financial features declaration.
 
 - [ ] Permission declaration: explain Camera as an optional, user-initiated QR scanner.
 - [ ] The merged release also contains Biometric/Fingerprint for protecting operator-key use and
-  Access Network State for included Android/ML Kit components; describe these accurately if the
-  console surfaces them.
+  an app-local signature permission used for non-exported dynamic receivers; describe these
+  accurately if the console surfaces them.
 - [ ] No location, contacts, microphone, phone, SMS, storage, notification, or broad media
   permission is declared by the app manifest.
 - [ ] Complete App access using the live reviewer instructions.
@@ -172,14 +163,16 @@ All apps must complete the Financial features declaration.
 
 ## Store operations
 
-- [ ] Approve app-specific privacy disclosures. The current URL no longer labels itself a draft,
-  but it does not specifically disclose the terminal's Base Sepolia RPC requests, provider
-  handling, or Android ML Kit diagnostics and usage metrics.
-- [ ] Confirm the About page is an adequate Support URL or publish a dedicated support page with a
-  monitored contact method.
+- [ ] Verify the app-specific privacy statement published by OpenPasskey website PR #86. It states
+  the first-party fact that OpenPasskey does not collect or store OPK Terminal data and that QR
+  processing stays on-device.
+- [ ] Keep RPC-provider collection and sharing analysis in these store compliance declarations;
+  do not add that provider wording to the first-party public privacy page.
+- [ ] Verify `https://www.openpasskey.com/support` is live and that its contact method is monitored.
 - [ ] Keep the review portal, Base Sepolia vault, RPC, faucet/test funding, and token available
   throughout review.
-- [ ] Upload only the fresh assets listed in `assets/CAPTURE_MANIFEST.md`.
+- [ ] Use only assets verified against build 14. Preserve the documented build-13 capture and
+  upload provenance rather than relabelling those assets as build-14 evidence.
 - [ ] Review all text and screenshots in the live console after upload.
 - [ ] Select manual release if the owner wants a final approval gate after store review.
 
@@ -197,7 +190,5 @@ All apps must complete the Financial features declaration.
   https://support.google.com/googleplay/android-developer/answer/13849271
 - Google Play blockchain-based content:
   https://support.google.com/googleplay/android-developer/answer/13607354
-- ML Kit Android data disclosure:
-  https://developers.google.com/ml-kit/android-data-disclosure
 - Base Global Privacy Policy:
   https://docs.base.org/privacy-policy

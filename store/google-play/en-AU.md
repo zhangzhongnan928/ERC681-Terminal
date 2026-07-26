@@ -1,5 +1,7 @@
 # Google Play — English (Australia)
 
+Release target: OPK Terminal `0.1.12` version code `14`.
+
 ## Product details
 
 | Field | Draft value |
@@ -13,9 +15,9 @@
 | Contains ads | No |
 | In-app products/subscriptions | None |
 | Privacy Policy URL | https://www.openpasskey.com/privacy |
-| Website | https://www.openpasskey.com |
-| Support URL | https://www.openpasskey.com/about |
-| Support email | [OWNER: enter monitored support email] |
+| Website (support contact) | https://www.openpasskey.com/support |
+| Support URL | https://www.openpasskey.com/support |
+| Support email | dev@openpasskey.com |
 
 ## Short description (80 max)
 
@@ -65,6 +67,7 @@ First public-store build of OPK Terminal:
 • OpenPasskey provisioning for up to 32 vault/token profiles
 • ERC-681 payment QR display and on-chain confirmation monitoring
 • device-protected, constrained settlement and local history
+• clearly labelled, isolated offline Base Sepolia evaluation demo
 • in-app Privacy Policy and Support links
 
 ## Review access
@@ -80,5 +83,6 @@ provisioning. Do not submit placeholders or commit credentials to this repositor
 - Complete the target-audience and content-rating questionnaires honestly. This is a business tool,
   not a child-directed app.
 - Confirm all distribution territories with legal/compliance.
-- Confirm the live privacy policy includes the approved OPK Terminal data-practice disclosures
-  and enter a monitored support email before submission.
+- Confirm the live privacy policy retains the approved first-party OPK Terminal statement and
+  enter a monitored support email. Do not add RPC-provider collection wording solely to mirror
+  store answers; complete Play Data safety separately under Google's definitions.

@@ -8,7 +8,6 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
@@ -44,11 +43,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.google.mlkit.vision.barcode.BarcodeScanner
-import com.google.mlkit.vision.barcode.BarcodeScannerOptions
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.common.InputImage
 import com.openpasskey.terminal.provisioning.TerminalProvisioningPayloadCodec
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -287,39 +281,43 @@ private class ConfigurationQrAnalyzer(
     private val onBarcode: (String) -> Unit,
     private val onError: (String) -> Unit,
 ) : ImageAnalysis.Analyzer {
-    private val processing = AtomicBoolean(false)
     private val failureReported = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
-    private val scanner: BarcodeScanner = BarcodeScanning.getClient(
-        BarcodeScannerOptions.Builder()
-            // Deliberately omit ZoomSuggestionOptions: ML Kit auto-zoom stays disabled.
-            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-            .build(),
-    )
     private var lastValue: String? = null
     private var lastValueAtMillis: Long = 0
+    private var lastDecodeAtNanos: Long = 0
 
-    @ExperimentalGetImage
     override fun analyze(imageProxy: ImageProxy) {
-        if (!processing.compareAndSet(false, true)) {
+        if (closed.get()) {
             imageProxy.close()
             return
         }
 
-        val mediaImage = imageProxy.image
-        if (mediaImage == null) {
-            processing.set(false)
+        val nowNanos = System.nanoTime()
+        if (nowNanos - lastDecodeAtNanos < MIN_DECODE_INTERVAL_NANOS) {
             imageProxy.close()
             return
         }
+        lastDecodeAtNanos = nowNanos
 
-        val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-        scanner.process(image)
-            .addOnSuccessListener { barcodes ->
-                if (closed.get()) return@addOnSuccessListener
-                val value = barcodes.firstNotNullOfOrNull { it.rawValue }
+        try {
+            val plane = imageProxy.planes.firstOrNull()
+                ?: error("Camera frame has no luminance plane")
+            val luminance = OnDeviceQrDecoder.copyLuminancePlane(
+                buffer = plane.buffer,
+                width = imageProxy.width,
+                height = imageProxy.height,
+                rowStride = plane.rowStride,
+                pixelStride = plane.pixelStride,
+            )
+            val value = OnDeviceQrDecoder.decode(
+                luminance = luminance,
+                width = imageProxy.width,
+                height = imageProxy.height,
+            )
+            if (value != null && !closed.get()) {
                 val now = System.currentTimeMillis()
-                if (value != null && (value != lastValue || now - lastValueAtMillis >= 1_500)) {
+                if (value != lastValue || now - lastValueAtMillis >= 1_500) {
                     lastValue = value
                     lastValueAtMillis = now
                     mainExecutor.execute {
@@ -327,23 +325,24 @@ private class ConfigurationQrAnalyzer(
                     }
                 }
             }
-            .addOnFailureListener {
-                if (!closed.get() && failureReported.compareAndSet(false, true)) {
-                    mainExecutor.execute {
-                        if (!closed.get()) {
-                            onError("QR scanning failed. You can still paste the address.")
-                        }
+        } catch (_: RuntimeException) {
+            if (!closed.get() && failureReported.compareAndSet(false, true)) {
+                mainExecutor.execute {
+                    if (!closed.get()) {
+                        onError("QR scanning failed. You can still paste the address.")
                     }
                 }
             }
-            .addOnCompleteListener {
-                processing.set(false)
-                imageProxy.close()
-            }
+        } finally {
+            imageProxy.close()
+        }
     }
 
     fun close() {
         closed.set(true)
-        scanner.close()
+    }
+
+    private companion object {
+        const val MIN_DECODE_INTERVAL_NANOS = 150_000_000L
     }
 }

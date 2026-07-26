@@ -7,13 +7,15 @@ keystore and its passwords outside source control.
 
 1. Confirm the Google Play developer account and legal publisher before creating an upload key.
 2. Create a dedicated Play upload key in a password-protected PKCS12 or JKS keystore outside this
-   repository, then back it up in the organisation's credential vault.
+   repository, then back it up in the organisation's credential vault. Store the shared store/key
+   password in a separate external file containing only that password.
 3. Copy `android/key.properties.example` to the ignored `android/key.properties`, replace every
-   placeholder, and set both files to mode `600`.
+   placeholder, and set the keystore, password file, and properties file to mode `600`.
 4. Enrol the public certificate as the app's upload certificate when Play Console requests it.
 
-Do not use the Android debug key, the Play-managed app-signing key, or a keystore checked into the
-repository. Do not pass signing passwords as command-line or Gradle `-P` values.
+Do not use the Android debug key, the Play-managed app-signing key, or a keystore/password file
+checked into the repository. Do not put the password directly in `key.properties` or pass it as a
+command-line or Gradle `-P` value.
 
 ## Build
 

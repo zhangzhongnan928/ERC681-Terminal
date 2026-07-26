@@ -1,5 +1,7 @@
 # Apple App Store — English (Australia)
 
+Release target: OPK Terminal `0.1.12` build `14`.
+
 ## Product details
 
 | Field | Draft value |
@@ -8,11 +10,11 @@
 | Subtitle (30 max) | Base Sepolia merchant terminal |
 | Primary language | English (Australia) |
 | Primary category | Business |
-| Secondary category | Finance — optional; owner/legal to confirm |
+| Secondary category | None |
 | Price | Free (tier 0 / AUD 0.00) |
 | In-app purchases | None |
 | Privacy Policy URL | https://www.openpasskey.com/privacy |
-| Support URL | https://www.openpasskey.com/about |
+| Support URL | https://www.openpasskey.com/support |
 | Marketing URL | https://www.openpasskey.com |
 | Copyright | 2026 OpenPasskey Pty Ltd — owner to confirm exact rights-holder text |
 
@@ -70,6 +72,7 @@ First public-store build of OPK Terminal:
 • OpenPasskey provisioning for up to 32 vault/token profiles
 • ERC-681 payment QR display and on-chain confirmation monitoring
 • device-protected, constrained settlement and local history
+• clearly labelled, isolated offline Base Sepolia evaluation demo
 • in-app Privacy Policy and Support links
 
 ## App Review notes
@@ -79,10 +82,14 @@ placeholders or commit review credentials to this repository.
 
 ## Owner decisions before paste
 
-- Confirm that **Business** is the primary category and whether **Finance** should be secondary.
+- Keep **Business** as the primary category and no secondary category; OPK Terminal is a merchant
+  tool, not a financial-services app.
 - Complete the current age-rating questionnaire honestly; do not assume a rating from this draft.
 - Confirm organisation enrolment and the financial/cryptocurrency classification described in
   `../console-declarations.md`.
 - Confirm the copyright owner and distribution territories.
-- Confirm the live privacy policy includes the approved OPK Terminal data-practice disclosures
-  before using the URL above in a submission.
+- Keep the homepage only as the optional **Marketing URL**. The required **Support URL** is the
+  dedicated live `https://www.openpasskey.com/support` page.
+- Confirm the live privacy policy retains the approved first-party OPK Terminal statement before
+  using the URL above. Do not add RPC-provider collection wording solely to mirror store answers;
+  complete App Store privacy separately under Apple's definitions.

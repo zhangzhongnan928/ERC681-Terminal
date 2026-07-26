@@ -77,7 +77,7 @@ internal object SettingsExternalLinks {
     )
     val support = SettingsExternalLink(
         label = "Support",
-        url = "https://www.openpasskey.com/about",
+        url = "https://www.openpasskey.com/support",
     )
     val all = listOf(privacyPolicy, support)
 }

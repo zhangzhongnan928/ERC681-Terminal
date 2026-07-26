@@ -8,10 +8,19 @@ final class KeyboardDismissalUITests: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchEnvironment["OPK_UI_TEST_KEYCHAIN_NAMESPACE"] = UUID().uuidString
+        let isOfflineReviewerDemoTest = name.contains(
+            "testColdLaunchOfflineReviewerDemoIsIsolatedLabeledAndReset"
+        )
+        if isOfflineReviewerDemoTest {
+            app.launchEnvironment["OPK_UI_TEST_FORBID_LIVE_BOOTSTRAP"] = "1"
+        }
         if name.contains("testReadyCheckoutFixtureSwitchesOneWholePaymentProfileAtATime") {
             app.launchEnvironment["OPK_UI_TEST_CHECKOUT_FIXTURE"] = "ready"
         }
         app.launch()
+        if !isOfflineReviewerDemoTest {
+            openLiveTerminal()
+        }
     }
 
     override func tearDownWithError() throws {
@@ -30,6 +39,52 @@ final class KeyboardDismissalUITests: XCTestCase {
         setupButton.tap()
 
         XCTAssertTrue(app.navigationBars["Terminal Setup"].waitForExistence(timeout: 5))
+    }
+
+    func testColdLaunchOfflineReviewerDemoIsIsolatedLabeledAndReset() {
+        XCTAssertTrue(element(identifier: "terminalLaunchChooser").waitForExistence(timeout: 5))
+
+        let demoButton = app.buttons["launchReviewerDemoButton"]
+        XCTAssertTrue(demoButton.exists)
+        XCTAssertEqual(demoButton.label, "Explore offline demo")
+        demoButton.tap()
+
+        XCTAssertTrue(element(identifier: "reviewerDemoRoot").waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            element(identifier: "reviewerDemoSafetyLabel").label,
+            "OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS"
+        )
+        XCTAssertTrue(element(identifier: "reviewerDemoQRCode").exists)
+        XCTAssertEqual(
+            element(identifier: "reviewerDemoPaymentStatus").label,
+            "Waiting for payment"
+        )
+
+        app.buttons["reviewerDemoSimulatePaymentButton"].tap()
+        XCTAssertEqual(element(identifier: "reviewerDemoPaymentStatus").label, "Paid")
+
+        app.tabBars.buttons["History"].tap()
+        XCTAssertTrue(app.navigationBars["Demo History"].waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            element(identifier: "reviewerDemoHistoryStatus").value as? String,
+            "Paid"
+        )
+
+        app.tabBars.buttons["Settlement"].tap()
+        XCTAssertTrue(app.navigationBars["Demo Settlement"].waitForExistence(timeout: 5))
+        let settlementButton = app.buttons["reviewerDemoSettlementDisabledButton"]
+        XCTAssertTrue(settlementButton.exists)
+        XCTAssertFalse(settlementButton.isEnabled)
+
+        app.buttons["reviewerDemoCloseButton"].tap()
+        XCTAssertTrue(element(identifier: "terminalLaunchChooser").waitForExistence(timeout: 5))
+
+        app.buttons["launchReviewerDemoButton"].tap()
+        XCTAssertTrue(element(identifier: "reviewerDemoQRCode").waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            element(identifier: "reviewerDemoPaymentStatus").label,
+            "Waiting for payment"
+        )
     }
 
     func testFirstRunAllowsOperatorBeforePINAndPINKeyboardCanBeDismissed() {
@@ -52,6 +107,7 @@ final class KeyboardDismissalUITests: XCTestCase {
         app.terminate()
         app.launchEnvironment["OPK_UI_TEST_CHECKOUT_FIXTURE"] = "ready"
         app.launch()
+        openLiveTerminal()
 
         XCTAssertTrue(app.navigationBars["Checkout"].waitForExistence(timeout: 5))
 
@@ -137,6 +193,7 @@ final class KeyboardDismissalUITests: XCTestCase {
             XCUIDevice.shared.orientation = .portrait
         }
         app.launch()
+        openLiveTerminal()
 
         XCTAssertTrue(app.navigationBars["Checkout"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Create operator wallet"].exists)
@@ -180,5 +237,14 @@ final class KeyboardDismissalUITests: XCTestCase {
 
     private func element(identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    private func openLiveTerminal(
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let liveButton = app.buttons["launchOpenLiveTerminalButton"]
+        XCTAssertTrue(liveButton.waitForExistence(timeout: 5), file: file, line: line)
+        liveButton.tap()
     }
 }

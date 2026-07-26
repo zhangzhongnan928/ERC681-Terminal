@@ -15,7 +15,7 @@ class SettingsPresentationTest {
         )
         assertEquals("Support", SettingsExternalLinks.support.label)
         assertEquals(
-            "https://www.openpasskey.com/about",
+            "https://www.openpasskey.com/support",
             SettingsExternalLinks.support.url,
         )
     }
