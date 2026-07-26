@@ -9,10 +9,18 @@ final class StoreScreenshotUITests: XCTestCase {
         app = XCUIApplication()
         app.launchEnvironment["OPK_UI_TEST_KEYCHAIN_NAMESPACE"] =
             "store-screenshots-\(UUID().uuidString)"
+        let isOfflineReviewerDemoCapture = name.contains(
+            "testCaptureOfflineReviewerDemoStoreScreenshots"
+        )
+        if isOfflineReviewerDemoCapture {
+            app.launchEnvironment["OPK_UI_TEST_FORBID_LIVE_BOOTSTRAP"] = "1"
+        }
         app.launch()
-        let liveButton = app.buttons["launchOpenLiveTerminalButton"]
-        XCTAssertTrue(liveButton.waitForExistence(timeout: 5))
-        liveButton.tap()
+        if !isOfflineReviewerDemoCapture {
+            let liveButton = app.buttons["launchOpenLiveTerminalButton"]
+            XCTAssertTrue(liveButton.waitForExistence(timeout: 5))
+            liveButton.tap()
+        }
     }
 
     override func tearDownWithError() throws {
@@ -49,6 +57,44 @@ final class StoreScreenshotUITests: XCTestCase {
         capture("05-privacy-support")
     }
 
+    func testCaptureOfflineReviewerDemoStoreScreenshots() {
+        XCTAssertTrue(element("terminalLaunchChooser").waitForExistence(timeout: 5))
+        capture("01-cold-launch-choice")
+
+        let demoButton = app.buttons["launchReviewerDemoButton"]
+        XCTAssertTrue(demoButton.exists)
+        XCTAssertEqual(demoButton.label, "Explore offline demo")
+        demoButton.tap()
+
+        let safetyLabel = element("reviewerDemoSafetyLabel")
+        XCTAssertTrue(safetyLabel.waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            safetyLabel.label,
+            "OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS"
+        )
+        XCTAssertTrue(element("reviewerDemoQRCode").exists)
+        XCTAssertEqual(element("reviewerDemoPaymentStatus").label, "Waiting for payment")
+        capture("02-offline-demo-waiting")
+
+        app.buttons["reviewerDemoSimulatePaymentButton"].tap()
+        XCTAssertEqual(element("reviewerDemoPaymentStatus").label, "Paid")
+        capture("03-offline-demo-paid")
+
+        selectDemoTab("History")
+        XCTAssertTrue(app.navigationBars["Demo History"].waitForExistence(timeout: 5))
+        XCTAssertTrue(safetyLabel.exists)
+        XCTAssertEqual(element("reviewerDemoHistoryStatus").value as? String, "Paid")
+        capture("04-offline-demo-history")
+
+        selectDemoTab("Settlement")
+        XCTAssertTrue(app.navigationBars["Demo Settlement"].waitForExistence(timeout: 5))
+        XCTAssertTrue(safetyLabel.exists)
+        let disabledSettlement = app.buttons["reviewerDemoSettlementDisabledButton"]
+        XCTAssertTrue(disabledSettlement.exists)
+        XCTAssertFalse(disabledSettlement.isEnabled)
+        capture("05-offline-demo-settlement")
+    }
+
     private func selectTab(
         _ label: String,
         file: StaticString = #filePath,
@@ -64,5 +110,20 @@ final class StoreScreenshotUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func selectDemoTab(
+        _ label: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let tab = element(label)
+        XCTAssertTrue(tab.waitForExistence(timeout: 5), file: file, line: line)
+        XCTAssertTrue(tab.isHittable, file: file, line: line)
+        tab.tap()
+    }
+
+    private func element(_ identifier: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
 }
