@@ -23,6 +23,8 @@ access, legal acceptances, and final owner-controlled submissions are not includ
 
 - `apple/en-AU.md` — App Store metadata.
 - `google-play/en-AU.md` — Google Play metadata.
+- `google-play/CLOSED_TEST_HANDOFF.md` — personal-account closed-test gate, tester onboarding,
+  feedback checklist, and roster placeholders.
 - `review/reviewer-instructions.md` — offline review path and live-testnet fallback instructions.
 - `console-declarations.md` — code-grounded App Store Connect and Play Console checklist.
 - `assets/CAPTURE_MANIFEST.md` — asset inventory, capture provenance, and exact export targets.

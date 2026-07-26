@@ -12,10 +12,15 @@ It contains no live or fabricated payment QR.
 | `store-icon-512.png` | Google Play store icon | 512 × 512, 8-bit RGBA PNG, alpha present and fully opaque, 3,608 bytes |
 | `feature-graphic-1024x500.png` | Google Play feature graphic | 1024 × 500, 8-bit RGB PNG, no alpha, 19,284 bytes |
 | `feature-graphic.svg` | Editable feature-graphic source | 1024 × 500 SVG; only `#1A1A2E` and `#00D4AA` are specified |
+| `phone-build14-signed-api36/*.png` | Signed build-14 phone screenshots | Five 1440 × 2560 8-bit RGB PNGs, no alpha; exact signed `0.1.12` version-code-14 APK |
 
 The store icon is a pixel-identical RGB rendering of the approved source icon at 512 × 512. Its
 alpha channel is deliberately retained for Play's 32-bit PNG requirement, with every alpha sample
 set to 255. The feature graphic has an opaque `#1A1A2E` background and no alpha channel.
+
+The signed build-14 screenshot set has its capture provenance, truthful state descriptions, alt
+text, conversion checks, and SHA-256 hashes in `phone-build14-signed-api36/README.md`. Existing
+`phone/` images are preserved as historical build-13 captures and were not overwritten.
 
 ## Rebuild
 

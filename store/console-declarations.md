@@ -32,8 +32,11 @@ territories at submission time.
 - Android decodes QR camera frames entirely on-device with ZXing. The release dependency graph
   contains no ML Kit, Firebase, or Google Data Transport component.
 - The iOS privacy manifest declares no tracking or tracking domains; it declares Coarse Location,
-  User ID, Purchase History, and Other Financial Info as linked, non-tracking data used for App
-  Functionality, plus UserDefaults reason `CA92.1`.
+  User ID, Device ID, Purchase History, and Other Financial Info as linked, non-tracking data used
+  for App Functionality, plus UserDefaults reason `CA92.1`.
+- The device-local operator EOA is persistent for the app installation, is expressly used as the
+  terminal identifier, and is sent in JSON-RPC calls. Under the stores' identifier definitions it
+  is a Device ID / Device or other ID as well as a blockchain account-level identifier.
 
 ## Monetisation and accounts
 
@@ -63,10 +66,10 @@ describes collection and retention beyond real-time request processing.
   signatures, amounts, and timestamps.
 - [x] Camera frames and QR values stay on-device. Android's scanner uses ZXing and the iOS scanner
   uses AVFoundation; neither scanner has an upload or telemetry path.
-- [ ] Disclose **Coarse Location**, **User ID**, **Purchase History**, and
-  **Other Financial Info** as linked data used for App Functionality. Base's published policy and
-  the app's JSON-RPC payloads support these categories.
-- [x] Do not declare **Device ID**: no stable device identifier is sent by the app.
+- [ ] Disclose **Coarse Location**, **User ID**, **Device ID**, **Purchase History**, and
+  **Other Financial Info** as linked data used for App Functionality. Base's published policy,
+  the persistent per-install operator EOA, and the app's JSON-RPC payloads support these
+  categories.
 - [ ] Remove **Other Data** unless a separate production flow supports it.
 - [ ] Tracking: **No**, subject to confirming that no production service links app data across
   companies for advertising or measurement.
@@ -91,10 +94,10 @@ OpenPasskey's first-party public privacy statement.
 - [ ] Data sharing: answer separately from collection. Reconcile Play's service-provider
   definitions and exceptions with Base's role for RPC traffic. Without a processor agreement or
   a documented exception, conservatively answer that the applicable data is shared with Base.
-- [ ] Declare **Approximate location**, **User IDs**, **Purchase history**,
-  and **Other financial info** for required App Functionality, based on Base's current published
-  privacy policy and the JSON-RPC fields sent by the app.
-- [x] Do not declare **Device or other IDs**: no stable device identifier is sent by the app.
+- [ ] Declare **Approximate location**, **User IDs**, **Device or other IDs**,
+  **Purchase history**, and **Other financial info** for required App Functionality, based on
+  Base's current published privacy policy, the persistent per-install operator EOA, and the
+  JSON-RPC fields sent by the app.
 - [x] Camera images and decoded QR values: on-device only; do not declare them as collected.
 - [ ] Advertising purpose: **No** based on source and vendor disclosure.
 - [x] App interactions, Diagnostics, and Other app performance data: do not select these solely for
