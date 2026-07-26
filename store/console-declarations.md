@@ -10,6 +10,7 @@ territories at submission time.
 
 - Android application ID: `com.openpasskey.terminal`; iOS bundle ID:
   `com.openpasskey.terminal.ios`.
+- Android build 14 compiles against and targets API 36, with minimum SDK 26.
 - Base Sepolia (`84532`) is the only enabled network. The compiled endpoint is
   `https://sepolia.base.org`; Base Mainnet is disabled.
 - The app creates a device-local merchant operator EOA. Android protects it with Android Keystore
@@ -31,9 +32,10 @@ territories at submission time.
 - The iOS target has no general-purpose analytics or crash-reporting SDK.
 - Android decodes QR camera frames entirely on-device with ZXing. The release dependency graph
   contains no ML Kit, Firebase, or Google Data Transport component.
-- The iOS privacy manifest declares no tracking or tracking domains; it declares Coarse Location,
-  User ID, Device ID, Purchase History, and Other Financial Info as linked, non-tracking data used
-  for App Functionality, plus UserDefaults reason `CA92.1`.
+- The current iOS privacy manifest is a conservative draft. It declares no tracking or tracking
+  domains; it presently lists Coarse Location, User ID, Device ID, Purchase History, and Other
+  Financial Info as linked, non-tracking data used for App Functionality, plus UserDefaults reason
+  `CA92.1`. Those five data-type mappings are not yet an approved final App Store answer.
 - The device-local operator EOA is persistent for the app installation, is expressly used as the
   terminal identifier, and is sent in JSON-RPC calls. Under the stores' identifier definitions it
   is a Device ID / Device or other ID as well as a blockchain account-level identifier.
@@ -54,22 +56,29 @@ territories at submission time.
 ## Apple App Privacy
 
 The public OpenPasskey privacy page states the first-party fact that OpenPasskey operates no app
-backend and does not receive or store OPK Terminal app data. Keep that public statement limited to
-OpenPasskey's own practices; do not add RPC-provider collection wording to it. App Store Connect's
-answers are a separate, store-scoped compliance declaration and must still cover app-originated
-transfers to third parties. Do not publish **Data Not Collected** in App Store Connect: the app
-sends JSON-RPC requests directly to Base's public RPC service, and Base's published policy
-describes collection and retention beyond real-time request processing.
+backend and does not receive or store OPK Terminal app data. Leave that first-party statement
+unchanged unless the owner expressly approves different public wording.
+
+“Serverless for OpenPasskey” is not the same as “all processing stays on the device.” The live app
+sends HTTPS JSON-RPC requests directly to Base's public RPC endpoint. Apple's definition of
+collection depends on whether the developer or a third-party partner can access transmitted data
+for longer than real-time request servicing. Base's published policy describes collection and
+retention, but the app integrates no Base SDK or Base-supplied code. Because Apple's definition of
+a third-party partner expressly refers to external-vendor code added to the app, the treatment of a
+direct public RPC endpoint is not conclusively resolved by source inspection alone.
 
 - Base's published privacy policy says its services may collect IP/derived-location information
   and may analyse public blockchain data including wallet addresses, transaction IDs, digital
   signatures, amounts, and timestamps.
 - [x] Camera frames and QR values stay on-device. Android's scanner uses ZXing and the iOS scanner
   uses AVFoundation; neither scanner has an upload or telemetry path.
-- [ ] Disclose **Coarse Location**, **User ID**, **Device ID**, **Purchase History**, and
-  **Other Financial Info** as linked data used for App Functionality. Base's published policy,
-  the persistent per-install operator EOA, and the app's JSON-RPC payloads support these
-  categories.
+- [ ] Do not submit **Data Not Collected** or the current conservative five-type draft until the
+  owner/legal reviewer decides how the direct Base RPC service fits Apple's third-party-partner
+  definition.
+- [ ] If using the conservative approach, validate each category separately. Coarse Location,
+  Device ID, and Other Financial Info have direct evidence; the additional User ID and Purchase
+  History mappings require an explicit rationale rather than treating every wallet address or
+  blockchain query as both categories automatically.
 - [ ] Remove **Other Data** unless a separate production flow supports it.
 - [ ] Tracking: **No**, subject to confirming that no production service links app data across
   companies for advertising or measurement.
@@ -85,26 +94,27 @@ OpenPasskey's first-party public privacy statement.
 - [ ] Data encrypted in transit: **Yes for app-controlled traffic**; Android cleartext traffic is
   disabled and the compiled RPC URL is HTTPS.
 - [ ] Data deletion request: determine from the final declaration. Local data can be removed by
-  uninstalling/resetting, but public blockchain transactions cannot be deleted. Explain this in
-  the Play form or review notes where requested; do not expand the first-party public privacy page
-  with provider wording.
-- [ ] Data collection: do not answer **No data collected**. Base says its service collects and
-  retains IP-derived location, device/network information, wallet addresses, and blockchain
-  transaction data.
+  uninstalling/resetting, but public blockchain transactions cannot be deleted.
+- [ ] Data collection: do not answer **No data collected**. Google defines collection as
+  transmitting user data from the app off the device, regardless of whether OpenPasskey operates
+  the receiving server. Google also requires ephemeral off-device processing to be included in the
+  form response. The live app transmits JSON-RPC payloads and connection metadata to Base, whose
+  policy describes retention beyond ephemeral request processing.
 - [ ] Data sharing: answer separately from collection. Reconcile Play's service-provider
   definitions and exceptions with Base's role for RPC traffic. Without a processor agreement or
   a documented exception, conservatively answer that the applicable data is shared with Base.
-- [ ] Declare **Approximate location**, **User IDs**, **Device or other IDs**,
-  **Purchase history**, and **Other financial info** for required App Functionality, based on
-  Base's current published privacy policy, the persistent per-install operator EOA, and the
-  JSON-RPC fields sent by the app.
+- [ ] Candidate required-functionality categories are **Approximate location**, **Device or other
+  IDs**, and **Other financial info**. Validate **User IDs** and **Purchase history** separately
+  against the final Play definitions and the exact RPC fields before selecting them.
 - [x] Camera images and decoded QR values: on-device only; do not declare them as collected.
 - [ ] Advertising purpose: **No** based on source and vendor disclosure.
 - [x] App interactions, Diagnostics, and Other app performance data: do not select these solely for
   QR scanning; the ML Kit telemetry dependency has been removed.
-- [ ] Keep Play and Apple answers mutually consistent while preserving their separate store scope.
-  They must not contradict the first-party public policy, but provider-specific store disclosures
-  do not need to be copied into that policy.
+- [ ] Google requires the linked privacy policy to comprehensively disclose app access,
+  collection, use, sharing, retention/deletion, and relevant recipient parties. The current
+  first-party-only public statement should not be changed without owner approval, but it does not
+  presently support a Google submission that declares Base-bound data. Treat this as a submission
+  blocker rather than filing a contradictory or incomplete declaration.
 
 ## Financial and blockchain declarations
 
@@ -169,8 +179,9 @@ All apps must complete the Financial features declaration.
 - [ ] Verify the app-specific privacy statement published by OpenPasskey website PR #86. It states
   the first-party fact that OpenPasskey does not collect or store OPK Terminal data and that QR
   processing stays on-device.
-- [ ] Keep RPC-provider collection and sharing analysis in these store compliance declarations;
-  do not add that provider wording to the first-party public privacy page.
+- [ ] Keep the public first-party statement unchanged unless the owner approves a revision. Before
+  Google submission, reconcile it with Google's comprehensive privacy-policy requirement; do not
+  file a contradictory Data safety answer.
 - [ ] Verify `https://www.openpasskey.com/support` is live and that its contact method is monitored.
 - [ ] Keep the review portal, Base Sepolia vault, RPC, faucet/test funding, and token available
   throughout review.
@@ -186,7 +197,11 @@ All apps must complete the Financial features declaration.
 - Apple screenshot specifications:
   https://developer.apple.com/help/app-store-connect/reference/app-information/screenshot-specifications/
 - Apple App Privacy:
-  https://developer.apple.com/help/app-store-connect/manage-app-information/manage-app-privacy/
+  https://developer.apple.com/app-store/app-privacy-details/
+- Google Play Data safety:
+  https://support.google.com/googleplay/android-developer/answer/10787469
+- Google Play User Data:
+  https://support.google.com/googleplay/android-developer/answer/10144311
 - Google Play preview assets:
   https://support.google.com/googleplay/android-developer/answer/9866151
 - Google Play Financial features declaration:

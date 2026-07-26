@@ -15,7 +15,7 @@ Release target: OPK Terminal `0.1.12` build `14`.
 | In-app purchases | None |
 | Privacy Policy URL | https://www.openpasskey.com/privacy |
 | Support URL | https://www.openpasskey.com/support |
-| Marketing URL | https://www.openpasskey.com |
+| Marketing URL | Leave blank |
 | Copyright | 2026 OpenPasskey Pty Ltd — owner to confirm exact rights-holder text |
 
 ## Promotional text (170 max)
@@ -57,8 +57,8 @@ Requirements:
 • Base Sepolia test ETH on the terminal operator for settlement gas
 • a compatible customer wallet for sending the designated Base Sepolia test token
 
-This app is intended for merchant and technical testing. Customers do not need OPK Terminal to scan
-and pay a merchant's displayed QR.
+This app is intended for merchants evaluating Base Sepolia payment workflows. Customers do not
+need OPK Terminal to scan and pay a merchant's displayed QR.
 
 ## Keywords (100 bytes max)
 
@@ -72,7 +72,7 @@ First public-store build of OPK Terminal:
 • OpenPasskey provisioning for up to 32 vault/token profiles
 • ERC-681 payment QR display and on-chain confirmation monitoring
 • device-protected, constrained settlement and local history
-• clearly labelled, isolated offline Base Sepolia evaluation demo
+• clearly labelled, isolated offline Base Sepolia product tour
 • in-app Privacy Policy and Support links
 
 ## App Review notes
@@ -88,8 +88,10 @@ placeholders or commit review credentials to this repository.
 - Confirm organisation enrolment and the financial/cryptocurrency classification described in
   `../console-declarations.md`.
 - Confirm the copyright owner and distribution territories.
-- Keep the homepage only as the optional **Marketing URL**. The required **Support URL** is the
-  dedicated live `https://www.openpasskey.com/support` page.
+- Leave the optional **Marketing URL** blank because the general homepage describes capabilities
+  outside this Base Sepolia-only app. The required **Support URL** is the dedicated live
+  `https://www.openpasskey.com/support` page.
 - Confirm the live privacy policy retains the approved first-party OPK Terminal statement before
-  using the URL above. Do not add RPC-provider collection wording solely to mirror store answers;
-  complete App Store privacy separately under Apple's definitions.
+  using the URL above. Complete App Store privacy separately under Apple's definitions, and do not
+  submit either **Data Not Collected** or the current conservative manifest draft until the direct
+  Base RPC treatment is explicitly approved.

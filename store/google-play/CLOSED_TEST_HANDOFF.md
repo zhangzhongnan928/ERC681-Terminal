@@ -23,6 +23,12 @@ production readiness.
 Use Play Console's Dashboard as the source of truth for progress and eligibility. The earliest
 application point is after the twelfth qualifying tester has completed the full continuous period.
 
+The current closed-test candidate is OPK Terminal `0.1.12` / version code `14`, targets API 36,
+and is staged locally as
+`artifacts/android/v0.1.12/OPK-Terminal-v0.1.12-build14-play-signed.aab` with SHA-256
+`d6ed150884e21f1491ed9dba68bf249af77be9cd95989b265eb8ef7c6e896b76`. This meets Google's
+31 August 2026 Android 16 target requirement; do not upload the retired target-35 build.
+
 ## Candidate roster
 
 Every address must be registered to a Google Account; this can be a Gmail, Google Workspace, or
@@ -50,8 +56,9 @@ Testers should be representative of intended merchant users and Android devices.
 ## Owner-controlled setup and onboarding
 
 1. Finish the app setup tasks required by Play Console.
-2. Build, sign, and verify the intended build-14 AAB. The saved build-13 internal-test draft
-   predates the isolated offline demo and must not be used as build-14 evidence.
+2. Re-verify and upload the intended signed build-14/API-36 AAB above. The saved build-13
+   internal-test draft predates the isolated offline product tour and must not be used as build-14
+   evidence.
 3. In **Testing > Closed testing**, create or manage the closed track. On its **Testers** tab,
    create/select an email list and add the 12 confirmed Google-account addresses. A CSV import
    replaces the list's existing contents, so review it before saving.
@@ -84,7 +91,7 @@ credentials in feedback.
 
 After installation:
 
-1. Cold-launch OPK Terminal and tap **Explore offline reviewer demo**.
+1. Cold-launch OPK Terminal and tap **Explore offline product tour**.
 2. Confirm the banner remains visible:
    `OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS`.
 3. On Checkout, confirm the sample ERC-681 QR renders and tap **Simulate payment received**.
@@ -139,3 +146,4 @@ closed-test gate and must be completed by the account owner if it appears on the
 - [App testing requirements for new personal developer accounts](https://support.google.com/googleplay/android-developer/answer/14151465?hl=en)
 - [Set up an open, closed, or internal test](https://support.google.com/googleplay/android-developer/answer/9845334?hl=en-EN)
 - [Device verification requirements for new developer accounts](https://support.google.com/googleplay/android-developer/answer/14316361?hl=en)
+- [Target API level requirements](https://support.google.com/googleplay/android-developer/answer/11926878?hl=en)

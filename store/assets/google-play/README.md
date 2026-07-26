@@ -12,15 +12,20 @@ It contains no live or fabricated payment QR.
 | `store-icon-512.png` | Google Play store icon | 512 × 512, 8-bit RGBA PNG, alpha present and fully opaque, 3,608 bytes |
 | `feature-graphic-1024x500.png` | Google Play feature graphic | 1024 × 500, 8-bit RGB PNG, no alpha, 19,284 bytes |
 | `feature-graphic.svg` | Editable feature-graphic source | 1024 × 500 SVG; only `#1A1A2E` and `#00D4AA` are specified |
-| `phone-build14-signed-api36/*.png` | Signed build-14 phone screenshots | Five 1440 × 2560 8-bit RGB PNGs, no alpha; exact signed `0.1.12` version-code-14 APK |
+| `phone-build14-signed-api36/*.png` | Signed build-14 product-tour phone screenshots | Five 1440 × 2560 8-bit RGB PNGs, no alpha; device-specific splits generated from the exact signed API-36 AAB |
+| `phone-build14-core-aab-api36/*.png` | Signed build-14 live first-run phone screenshots | Five 1440 × 2560 8-bit RGB PNGs, no alpha; live merchant path from the same installed AAB splits, without fabricated provisioning |
 
 The store icon is a pixel-identical RGB rendering of the approved source icon at 512 × 512. Its
 alpha channel is deliberately retained for Play's 32-bit PNG requirement, with every alpha sample
 set to 255. The feature graphic has an opaque `#1A1A2E` background and no alpha channel.
 
-The signed build-14 screenshot set has its capture provenance, truthful state descriptions, alt
-text, conversion checks, and SHA-256 hashes in `phone-build14-signed-api36/README.md`. Existing
-`phone/` images are preserved as historical build-13 captures and were not overwritten.
+The two signed build-14 screenshot sets have their capture provenance, truthful state
+descriptions, conversion checks, and SHA-256 hashes in their local README files. Use a curated
+maximum of eight phone screenshots in Play Console: combine the live first-run merchant screens
+with the product-tour checkout/payment screens so the listing presents core functionality and
+clearly distinguishes every simulated state. Existing `phone/` images are preserved as historical
+build-13 captures and were not overwritten. The exact release code and current screenshot PNGs are
+recorded by source/assets commit `477817a59ecce16319fc13023fbe575e88ebd9a6`.
 
 ## Rebuild
 
