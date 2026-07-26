@@ -65,6 +65,35 @@ val playKeystoreFile: File? = playSigningProperties?.let { properties ->
     resolved
 }
 
+val playSigningPassword: String? = playSigningProperties?.let { properties ->
+    val configured = File(properties.requiredSigningValue("passwordFile"))
+    if (!configured.isAbsolute) {
+        throw GradleException(
+            "passwordFile in android/key.properties must be an absolute path."
+        )
+    }
+
+    val resolved = configured.canonicalFile
+    if (!resolved.isFile || !resolved.canRead()) {
+        throw GradleException(
+            "passwordFile must point to a readable external file."
+        )
+    }
+
+    val repositoryRoot =
+        rootProject.projectDir.parentFile.canonicalFile.toPath()
+    if (resolved.toPath().startsWith(repositoryRoot)) {
+        throw GradleException(
+            "The Google Play upload password file must be stored outside this repository."
+        )
+    }
+
+    resolved.readText()
+        .trimEnd('\r', '\n')
+        .takeIf { it.isNotEmpty() }
+        ?: throw GradleException("passwordFile must not be empty.")
+}
+
 android {
     namespace = "com.openpasskey.terminal"
     compileSdk = 35
@@ -73,7 +102,7 @@ android {
         applicationId = "com.openpasskey.terminal"
         minSdk = 26
         targetSdk = 35
-        versionCode = 13
+        versionCode = 14
         versionName = "0.1.12"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -90,12 +119,10 @@ android {
 
                 storeFile = requireNotNull(playKeystoreFile)
                 storeType = configuredStoreType
-                storePassword =
-                    properties.requiredSigningValue("storePassword")
+                storePassword = requireNotNull(playSigningPassword)
                 keyAlias =
                     properties.requiredSigningValue("keyAlias")
-                keyPassword =
-                    properties.requiredSigningValue("keyPassword")
+                keyPassword = requireNotNull(playSigningPassword)
             }
         }
     }
@@ -178,7 +205,6 @@ dependencies {
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
-    implementation(libs.mlkit.barcode.scanning)
 
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)

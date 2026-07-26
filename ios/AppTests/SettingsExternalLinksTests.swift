@@ -10,11 +10,11 @@ final class SettingsExternalLinksTests: XCTestCase {
         )
     }
 
-    func testSupportLinkUsesPublicAboutPage() {
+    func testSupportLinkUsesPublicSupportPage() {
         XCTAssertEqual(SettingsExternalLinks.support.label, "Support")
         XCTAssertEqual(
             SettingsExternalLinks.support.destination.absoluteString,
-            "https://www.openpasskey.com/about"
+            "https://www.openpasskey.com/support"
         )
     }
 }

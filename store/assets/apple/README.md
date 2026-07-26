@@ -1,7 +1,7 @@
 # App Store screenshots
 
 These screenshots were captured on 24 July 2026 from the OPK Terminal `0.1.12`
-(`CURRENT_PROJECT_VERSION 13`) simulator product generated from the current source.
+(`CURRENT_PROJECT_VERSION 13`) simulator product generated from the then-current source snapshot.
 
 - iPhone set: 5 portrait PNGs at 1320 × 2868, captured on an iPhone 16 Pro Max simulator.
 - iPad set: 4 portrait PNGs at 2064 × 2752, captured on an iPad Pro 13-inch (M4), iOS 18.4.
@@ -11,7 +11,11 @@ These screenshots were captured on 24 July 2026 from the OPK Terminal `0.1.12`
 - The iPhone screenshot UI test passed. On the iOS 18.4 iPad runtime, the XCTest runner failed to
   launch with `NSPOSIXErrorDomain code 1`; the already-built app product was installed directly,
   launched successfully, and captured through Simulator instead.
-- Recheck every screen against the archived App Store build before console submission.
+- These captures predate the build-14 cold-launch choice. Preserve their build-13 provenance; they
+  may depict live-terminal feature screens but must not be described as build-14 first-run
+  captures.
+- Recheck or recapture every screen against the archived build-14 App Store candidate before
+  console submission.
 
 ## SHA-256
 

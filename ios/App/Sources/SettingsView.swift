@@ -22,7 +22,7 @@ enum SettingsExternalLinks {
     )
     static let support = SettingsExternalLink(
         label: "Support",
-        destination: URL(string: "https://www.openpasskey.com/about")!
+        destination: URL(string: "https://www.openpasskey.com/support")!
     )
 }
 

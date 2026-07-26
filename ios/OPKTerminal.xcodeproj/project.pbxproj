@@ -14,6 +14,7 @@
 		243B86D5F9F16944DB0F35F6 /* StoredSettlement.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4989A551BB01926EC91CF2B /* StoredSettlement.swift */; };
 		24A3B3857C566A3E872078E1 /* AdminPINStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23CECB404EFECABF9287D18E /* AdminPINStore.swift */; };
 		2F13DF7FB8F29D5F70B6668F /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F336BEA05ED67165F7EEB27E /* AppModel.swift */; };
+		30D25C67C1C7319196FB38DE /* TerminalLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9910C38E5E9E44403E568A58 /* TerminalLaunch.swift */; };
 		37BD6907BFAFECED9C45DCA1 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E2580CFEBF610B95FE105C6 /* AppSettings.swift */; };
 		498C710650A0729BCAA01E63 /* OPKTerminalOperator in Frameworks */ = {isa = PBXBuildFile; productRef = 90808346033FEC346AAA9AAD /* OPKTerminalOperator */; };
 		55524B8FD1BC7FF27AA2FFC5 /* OperatorResetSafety.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0426521B7E20B2920D3725 /* OperatorResetSafety.swift */; };
@@ -26,11 +27,14 @@
 		AEFF5C1D371AFEC63EF71D07 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = AD692CE282BE1225E849A3B5 /* PrivacyInfo.xcprivacy */; };
 		B0190206586F87221C7EA5F6 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 756E5FDEC605676AF960EE9B /* SettingsView.swift */; };
 		CCEFA0A1E5AABB9EC56F9F4E /* SettlementBatchGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60225D816DE46A29E091EF08 /* SettlementBatchGrouping.swift */; };
+		CD2C38291552A745A3A8EEB3 /* LiveTerminalRoot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CD63D4CA27B2E403B065503 /* LiveTerminalRoot.swift */; };
 		CE107B3D5F39B62D29C5AFAF /* StoredInvoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = C793156B47CF83EA94F702DC /* StoredInvoice.swift */; };
+		D049C26F41A70832492ACB66 /* ReviewerDemoTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6123D641171E066F0298A35 /* ReviewerDemoTests.swift */; };
 		D956810EF9C3953161BF677F /* QRCodeImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6205D28D194FF1F1ABFEE432 /* QRCodeImage.swift */; };
 		E10950392415D8088C0E0617 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 454F035A1B4282472EBE46B5 /* ContentView.swift */; };
 		E8ED3530BDCEEAD129C18608 /* SettingsRecoveryAndSettlementGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8576D4EB72C210318311796 /* SettingsRecoveryAndSettlementGuardTests.swift */; };
 		E9FEADCFEDC07B1690B88069 /* OPKTerminalApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA8D918A4F1E641C77252BF8 /* OPKTerminalApp.swift */; };
+		EC5F9A8541A9D58DFA3EA101 /* ReviewerDemo.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0C2EFE579DBE6C55543E894 /* ReviewerDemo.swift */; };
 		F71F83A66D812664E182B08E /* ConfigurationAddressScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFBB39B22012F5CB338817C2 /* ConfigurationAddressScanner.swift */; };
 		FAE99C53F80A7601E337156E /* StoreScreenshotUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F4C3E2A1BF43A3EA3879BC5 /* StoreScreenshotUITests.swift */; };
 		FAF3036E94175E3DBD309AB3 /* OPKTerminalOperator in Frameworks */ = {isa = PBXBuildFile; productRef = AFD32C7E83DA8AC8ADB7EB8E /* OPKTerminalOperator */; };
@@ -69,17 +73,21 @@
 		668F190B8477B82612A8E736 /* OPKTerminalAppTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = OPKTerminalAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		756E5FDEC605676AF960EE9B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		78F1B7CE154D7DEE04117BA2 /* ProvisioningAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProvisioningAppTests.swift; sourceTree = "<group>"; };
+		7CD63D4CA27B2E403B065503 /* LiveTerminalRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveTerminalRoot.swift; sourceTree = "<group>"; };
+		9910C38E5E9E44403E568A58 /* TerminalLaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalLaunch.swift; sourceTree = "<group>"; };
 		A4989A551BB01926EC91CF2B /* StoredSettlement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoredSettlement.swift; sourceTree = "<group>"; };
 		AA8D918A4F1E641C77252BF8 /* OPKTerminalApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OPKTerminalApp.swift; sourceTree = "<group>"; };
 		AD692CE282BE1225E849A3B5 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		ADC1BA20DF852782F0A85D8E /* SettlementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettlementView.swift; sourceTree = "<group>"; };
 		AF3186D9262E76F3AD24EAE8 /* SettingsExternalLinksTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsExternalLinksTests.swift; sourceTree = "<group>"; };
+		B0C2EFE579DBE6C55543E894 /* ReviewerDemo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewerDemo.swift; sourceTree = "<group>"; };
 		BFBB39B22012F5CB338817C2 /* ConfigurationAddressScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationAddressScanner.swift; sourceTree = "<group>"; };
 		C793156B47CF83EA94F702DC /* StoredInvoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoredInvoice.swift; sourceTree = "<group>"; };
 		CA0426521B7E20B2920D3725 /* OperatorResetSafety.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorResetSafety.swift; sourceTree = "<group>"; };
 		CEB6EA3CDCC2868247582FAC /* ios */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ios; path = .; sourceTree = SOURCE_ROOT; };
 		E635A3DB06657654B0D55367 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F336BEA05ED67165F7EEB27E /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		F6123D641171E066F0298A35 /* ReviewerDemoTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewerDemoTests.swift; sourceTree = "<group>"; };
 		F8576D4EB72C210318311796 /* SettingsRecoveryAndSettlementGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsRecoveryAndSettlementGuardTests.swift; sourceTree = "<group>"; };
 		FD186F6FBA69C3785543AEE5 /* TerminalReadiness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalReadiness.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -152,14 +160,17 @@
 				BFBB39B22012F5CB338817C2 /* ConfigurationAddressScanner.swift */,
 				454F035A1B4282472EBE46B5 /* ContentView.swift */,
 				12F51EF9245CE3080AD46C1C /* KeyboardDismissToolbar.swift */,
+				7CD63D4CA27B2E403B065503 /* LiveTerminalRoot.swift */,
 				CA0426521B7E20B2920D3725 /* OperatorResetSafety.swift */,
 				AA8D918A4F1E641C77252BF8 /* OPKTerminalApp.swift */,
 				6205D28D194FF1F1ABFEE432 /* QRCodeImage.swift */,
+				B0C2EFE579DBE6C55543E894 /* ReviewerDemo.swift */,
 				756E5FDEC605676AF960EE9B /* SettingsView.swift */,
 				60225D816DE46A29E091EF08 /* SettlementBatchGrouping.swift */,
 				ADC1BA20DF852782F0A85D8E /* SettlementView.swift */,
 				C793156B47CF83EA94F702DC /* StoredInvoice.swift */,
 				A4989A551BB01926EC91CF2B /* StoredSettlement.swift */,
+				9910C38E5E9E44403E568A58 /* TerminalLaunch.swift */,
 				FD186F6FBA69C3785543AEE5 /* TerminalReadiness.swift */,
 			);
 			path = Sources;
@@ -170,6 +181,7 @@
 			children = (
 				78F1B7CE154D7DEE04117BA2 /* ProvisioningAppTests.swift */,
 				5EB426733A1D240E64951D19 /* ResetAndSettlementGroupingTests.swift */,
+				F6123D641171E066F0298A35 /* ReviewerDemoTests.swift */,
 				AF3186D9262E76F3AD24EAE8 /* SettingsExternalLinksTests.swift */,
 				F8576D4EB72C210318311796 /* SettingsRecoveryAndSettlementGuardTests.swift */,
 			);
@@ -331,14 +343,17 @@
 				F71F83A66D812664E182B08E /* ConfigurationAddressScanner.swift in Sources */,
 				E10950392415D8088C0E0617 /* ContentView.swift in Sources */,
 				18294CDA1F24EC91C766555B /* KeyboardDismissToolbar.swift in Sources */,
+				CD2C38291552A745A3A8EEB3 /* LiveTerminalRoot.swift in Sources */,
 				E9FEADCFEDC07B1690B88069 /* OPKTerminalApp.swift in Sources */,
 				55524B8FD1BC7FF27AA2FFC5 /* OperatorResetSafety.swift in Sources */,
 				D956810EF9C3953161BF677F /* QRCodeImage.swift in Sources */,
+				EC5F9A8541A9D58DFA3EA101 /* ReviewerDemo.swift in Sources */,
 				B0190206586F87221C7EA5F6 /* SettingsView.swift in Sources */,
 				CCEFA0A1E5AABB9EC56F9F4E /* SettlementBatchGrouping.swift in Sources */,
 				107353DCB6A3E4028A50B95B /* SettlementView.swift in Sources */,
 				CE107B3D5F39B62D29C5AFAF /* StoredInvoice.swift in Sources */,
 				243B86D5F9F16944DB0F35F6 /* StoredSettlement.swift in Sources */,
+				30D25C67C1C7319196FB38DE /* TerminalLaunch.swift in Sources */,
 				59923466552070005599E7E4 /* TerminalReadiness.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -349,6 +364,7 @@
 			files = (
 				2436BEC402F17C6C3F93D22E /* ProvisioningAppTests.swift in Sources */,
 				5B7EA10B53873A3A531E7BA6 /* ResetAndSettlementGroupingTests.swift in Sources */,
+				D049C26F41A70832492ACB66 /* ReviewerDemoTests.swift in Sources */,
 				82F76DAE3B74D7BC0AC0E42D /* SettingsExternalLinksTests.swift in Sources */,
 				E8ED3530BDCEEAD129C18608 /* SettingsRecoveryAndSettlementGuardTests.swift in Sources */,
 			);
@@ -431,7 +447,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 13;
+				CURRENT_PROJECT_VERSION = 14;
 				DEVELOPMENT_TEAM = 3272Q6WG52;
 				INFOPLIST_FILE = App/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -624,7 +640,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 13;
+				CURRENT_PROJECT_VERSION = 14;
 				DEVELOPMENT_TEAM = 3272Q6WG52;
 				INFOPLIST_FILE = App/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (

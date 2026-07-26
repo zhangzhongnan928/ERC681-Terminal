@@ -1,22 +1,26 @@
 # Store asset inventory and capture manifest
 
 Policy dimensions checked against the official Apple and Google documentation on 24 July 2026.
-Capture the shipping `0.1.12` / build `13` app. Do not fabricate screens, upscale stale captures,
-or insert unverified claims.
+The release candidate is `0.1.12` / build `14`. The existing build-13 captures and their provenance
+are preserved below; do not relabel them as build-14 captures. Recheck or recapture every submitted
+screen from the exact build-14 candidate. Do not fabricate screens, upscale stale captures, or
+insert unverified claims.
 
 ## Existing asset inventory
 
 | Existing asset | Inventory | Readiness |
 | --- | --- | --- |
-| Current Android physical-device PNGs | 5 files in `store/assets/google-play/phone`, all 720 × 1440, captured from `0.1.12` / code 13 on an iMin L2s Pro on 24 July 2026 | **Uploadable mandatory set.** Actual current UI; RGB/no alpha; dimensions satisfy Play's 320–3840 px and 2:1 rules. The 720 px short side does not meet the optional 1080 px recommendation-placement guidance. |
+| Uploaded Android build-13 physical-device PNGs | 5 files in `store/assets/google-play/phone`, all 720 × 1440, captured from `0.1.12` / code 13 on an iMin L2s Pro on 24 July 2026 | **Technically valid historical set.** Uploaded to the Play listing draft; RGB/no alpha; dimensions satisfy Play's 320–3840 px and 2:1 rules. They predate the build-14 cold-launch choice and are not build-14 verification evidence. |
 | Older Android UI-test PNGs | 25 files in `artifacts/ui-test`, all 1080 × 2400, captured 19 July 2026 | **Do not submit.** They predate the current operator-wallet/provisioning flow. Their 20:9 ratio also exceeds Play's current rule that the long side be no more than twice the short side. |
 | iOS UI-test PNGs | 5 files in `artifacts/ui-test`, all 1206 × 2622, captured 19 July 2026 | **Do not submit.** They predate the current flow and are 6.3-inch captures, not the primary 6.9-inch set requested here. |
 | Apple app icon | `ios/App/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png`, 1024 × 1024 PNG, no alpha | Ready as the source Apple icon, subject to owner brand review. |
 | Android launcher icon | Adaptive vector foreground/background resources only | App launcher-ready. |
-| Google Play icon | `store/assets/google-play/store-icon-512.png`, 512 × 512 8-bit RGBA PNG, fully opaque alpha | Ready. Deterministically rendered from the approved `ios/App/Resources/AppIcon.svg`; 3,608 bytes. |
-| Google Play feature graphic | `store/assets/google-play/feature-graphic-1024x500.png`, 1024 × 500 8-bit RGB PNG, no alpha; editable source alongside it | Generated and technically validated. Obtain final owner/design approval before upload. |
-| Current iPhone screenshots | 5 files in `store/assets/apple/iphone-6.9`, all 1320 × 2868, captured from `0.1.12` / build 13 on an iPhone 16 Pro Max simulator on 24 July 2026 | **Uploadable technical set.** Actual current first-run UI; RGB/no alpha; exact 6.9-inch house target. |
-| Current iPad screenshots | 4 files in `store/assets/apple/ipad-13`, all 2064 × 2752, captured from the same `0.1.12` / build 13 simulator product on an iPad Pro 13-inch (M4), iOS 18.4, on 24 July 2026 | **Uploadable technical set.** Actual current first-run UI; RGB/no alpha; exact 13-inch house target. |
+| Google Play icon | `store/assets/google-play/store-icon-512.png`, 512 × 512 8-bit RGBA PNG, fully opaque alpha | Uploaded and attached to the Play listing draft on 26 July 2026. Deterministically rendered from `ios/App/Resources/AppIcon.svg`; 3,608 bytes. |
+| Google Play feature graphic | `store/assets/google-play/feature-graphic-1024x500.png`, 1024 × 500 8-bit RGB PNG, no alpha; editable source alongside it | Technically validated, uploaded, and attached to the Play listing draft on 26 July 2026. |
+| Uploaded Google Play 7-inch tablet PNGs | 5 files in `store/assets/google-play/tablet-7`, all 1080 × 1920 | Attached to the Play listing draft on 26 July 2026. Exact capture-build provenance is not documented in this folder; do not relabel them as build-14 evidence without candidate verification. |
+| Uploaded Google Play 10-inch tablet PNGs | 5 files in `store/assets/google-play/tablet-10`, all 1440 × 2560 | Attached to the Play listing draft on 26 July 2026. Exact capture-build provenance is not documented in this folder; do not relabel them as build-14 evidence without candidate verification. |
+| Uploaded iPhone build-13 screenshots | 5 files in `store/assets/apple/iphone-6.9`, all 1320 × 2868, captured from `0.1.12` / build 13 on an iPhone 16 Pro Max simulator on 24 July 2026 | **Technically valid historical set.** Uploaded in App Store Connect; RGB/no alpha; exact 6.9-inch house target. They predate the build-14 cold-launch choice and must not be described as build-14 first-run captures. |
+| Uploaded iPad build-13 screenshots | 4 files in `store/assets/apple/ipad-13`, all 2064 × 2752, captured from the same `0.1.12` / build 13 simulator product on an iPad Pro 13-inch (M4), iOS 18.4, on 24 July 2026 | **Technically valid historical set.** Uploaded in App Store Connect; RGB/no alpha; exact 13-inch house target. They predate the build-14 cold-launch choice and must not be described as build-14 first-run captures. |
 
 ## Exact submission targets
 
@@ -26,6 +30,8 @@ or insert unverified claims.
 | App Store iPad 13-inch | **2064 × 2752 portrait** | 4 included; at least 1 required because the app supports iPad | PNG or JPEG, no alpha |
 | Google Play phone — current mandatory set | **720 × 1440 portrait (2:1)** | 5 included; Play requires at least 2 and allows up to 8 | 24-bit PNG, no alpha |
 | Google Play phone — future promotion-optimised set | **1080 × 1920 portrait (9:16)** | 4–8 | JPEG or 24-bit PNG, no alpha |
+| Google Play 7-inch tablet | **1080 × 1920 portrait (9:16)** | 5 included | 24-bit PNG, no alpha |
+| Google Play 10-inch tablet | **1440 × 2560 portrait (9:16)** | 5 included | 24-bit PNG, no alpha |
 | Google Play feature graphic | **1024 × 500** | 1 required | JPEG or 24-bit PNG, no alpha |
 | Google Play store icon | **512 × 512** | 1 required | 32-bit PNG with alpha, maximum 1024 KB |
 
@@ -35,10 +41,13 @@ above so each device set is internally consistent.
 
 ## Capture sequence
 
-The five Android captures use the dedicated Base Sepolia demo story below. The current Apple sets
-instead document the genuine first-run and setup experience because a reviewer-specific,
-operator-bound provisioning QR does not yet exist. Do not fabricate a ready Apple terminal.
-Capture actual UI with no device frames or marketing overlays.
+The five preserved Android build-13 captures use the live Base Sepolia test story below. The
+preserved Apple build-13 sets document the then-current direct first-run and setup experience.
+Build 14 adds a cold-launch choice and isolated offline reviewer demo that are absent from those
+sets. Before submission, capture at least one accurate build-14 cold-launch or offline-demo image
+from the exact candidate, and recheck every retained live-terminal feature screen after selecting
+the live path. Do not fabricate a ready terminal. Capture actual UI with no device frames or
+marketing overlays.
 
 1. **Base Sepolia terminal ready** — Checkout with the Base Sepolia Ready header, selected
    test-token profile, authorised operator, and ready state. Avoid exposing portal credentials.

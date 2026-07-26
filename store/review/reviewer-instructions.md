@@ -1,99 +1,87 @@
-# Store reviewer instructions template
+# Store reviewer instructions
 
-These notes are a template, not a working review credential set. Replace every bracketed value in
-the store consoles immediately before submission. Keep credentials out of source control.
+Use these notes for OPK Terminal `0.1.12` build `14`. The primary review path is the isolated,
+in-app offline reviewer demo. It requires no account, credentials, provisioning QR, external
+hardware, test funds, or network connection.
 
-## Review environment that the owner must keep live
+The demo is intentionally and persistently labelled:
 
-| Item | Submission-time value |
-| --- | --- |
-| Review Merchant Portal URL | `[LIVE_REVIEW_PORTAL_URL]` |
-| Portal access instructions | `[REVIEW_PORTAL_ACCESS_OR_DEMO_ACCOUNT]` |
-| Base Sepolia review vault | `[BASE_SEPOLIA_REVIEW_VAULT_ADDRESS]` |
-| Supported test token | `[BASE_SEPOLIA_TEST_TOKEN_ADDRESS_AND_SYMBOL]` |
-| Operator-authorisation method | `[PORTAL_GRANT_OPERATOR_STEPS]` |
-| Live provisioning QR method | `[GENERATE_QR_BOUND_TO_REVIEW_DEVICE_OPERATOR]` |
-| Base Sepolia test ETH method | `[TEST_ETH_FAUCET_OR_PREFUNDED_METHOD]` |
-| Test-token payment method | `[TEST_PAYER_WALLET_OR_FAUCET_STEPS]` |
-| Review support contact | `[MONITORED_EMAIL_AND_PHONE_WITH_TIME_ZONE]` |
+> OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS
 
-The provisioning payload contains the operator EOA created on the review device. Therefore, a
-static provisioning QR generated before installation will not work. The reviewer must be able to
-authorise the newly displayed operator and generate a matching live QR without waiting for manual
-intervention.
+It uses fixed public dummy values and in-memory state only. It does not read or create the live
+terminal wallet, Keychain/Keystore data, saved configuration, invoices, preferences, or database;
+it cannot authenticate, sign, broadcast, contact an RPC service, or settle a transaction. Closing
+the demo discards its state.
 
 ## Apple App Review notes
 
-OPK Terminal 0.1.12 is a merchant terminal for Base Sepolia testnet only. Base Mainnet and all
+OPK Terminal is a merchant payment terminal for Base Sepolia testnet only. Base Mainnet and all
 other production networks are disabled. The app does not provide a cryptocurrency exchange,
 mining, token purchases, token rewards, customer-wallet custody, or customer private-key storage.
-It has no app account, advertising SDK, OpenPasskey-operated general-purpose analytics SDK,
-in-app purchases, or subscriptions.
+It has no app account, advertising SDK, in-app purchases, or subscriptions.
 
-The app creates one device-local merchant operator EOA. Its private key remains protected by the
-device and can sign only a constrained settlement sweep to the configured merchant vault.
+No review credentials are required. To review the offline representative preview:
 
-Full review requires the companion OpenPasskey Merchant Portal because every provisioning QR is
-bound to the operator generated on the review device.
+1. Launch OPK Terminal and tap **Explore offline demo**.
+2. Confirm the persistent banner says **OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO
+   NETWORK · NO REAL FUNDS**.
+3. On **Demo Checkout**, inspect the locally rendered sample ERC-681 payment QR and tap
+   **Simulate test payment**.
+4. Tap **View demo history**, or select the **History** tab, to inspect the in-memory sample
+   invoice and its paid status.
+5. Select **Settlement**. The illustrative settlement is visible, but
+   **Settlement disabled in demo** cannot authenticate, sign, or broadcast.
+6. Tap **Close demo**. Reopening the demo starts again at the initial waiting state.
 
-Review steps:
+The separate **Open live terminal** path creates a device-local merchant operator and requires a
+merchant to authorise and provision it through the companion OpenPasskey Merchant Portal. This
+external merchant setup is not required for the reviewer demo. The live operator key remains
+device-protected and is used only for the terminal's constrained settlement flow.
 
-1. Open **Settings** and select **Create protected operator wallet**. Complete the system
-   authentication prompt.
-2. Set and confirm a six-digit local Admin PIN. This PIN protects local setup controls and is not
-   an OpenPasskey account credential.
-3. Copy the displayed operator address or scan its pairing QR in
-   `[LIVE_REVIEW_PORTAL_URL]`. Access the portal using
-   `[REVIEW_PORTAL_ACCESS_OR_DEMO_ACCOUNT]`.
-4. In the portal, select Base Sepolia vault `[BASE_SEPOLIA_REVIEW_VAULT_ADDRESS]` and test token
-   `[BASE_SEPOLIA_TEST_TOKEN_ADDRESS_AND_SYMBOL]`; authorise the displayed operator using
-   `[PORTAL_GRANT_OPERATOR_STEPS]`.
-5. Generate the live provisioning QR for that same operator using
-   `[GENERATE_QR_BOUND_TO_REVIEW_DEVICE_OPERATOR]`. In OPK Terminal, select **Scan first payment
-   profile** and scan it. Camera access is used only for provisioning/configuration QR codes.
-6. Fund the operator with Base Sepolia test ETH using
-   `[TEST_ETH_FAUCET_OR_PREFUNDED_METHOD]`, then refresh readiness until the profile is ready.
-7. On **Checkout**, select the provisioned profile, enter `1.00`, and create the ERC-681 payment QR.
-8. Send the designated Base Sepolia test token using `[TEST_PAYER_WALLET_OR_FAUCET_STEPS]`. Wait
-   for the app to show the required confirmation.
-9. Open **History** to inspect the invoice. Open **Settle**, review the constrained sweep, and
-   complete the Face ID/device-authentication prompt to submit it.
+Support: `dev@openpasskey.com` and `https://www.openpasskey.com/support`.
 
-No real-value payment is required or supported. If any review resource is unavailable, contact
-`[MONITORED_EMAIL_AND_PHONE_WITH_TIME_ZONE]`.
+If App Review requires a live Base Sepolia transaction in addition to the offline representative
+preview, contact `dev@openpasskey.com`. OpenPasskey can provide time-bound testnet provisioning
+assistance during review; no production network or real-value funds are supported.
 
 ## Google Play App access instructions
 
-Some functionality is restricted until a merchant authorises and provisions the device-created
-operator. No account is created inside OPK Terminal.
+Select the Play Console option that says some functionality is restricted, because the live
+merchant terminal requires external merchant authorisation and provisioning. No app account or
+sign-in exists, and no credentials are required for the self-contained review path.
 
-Use `[LIVE_REVIEW_PORTAL_URL]` with `[REVIEW_PORTAL_ACCESS_OR_DEMO_ACCOUNT]`, then follow these
-steps:
+Reviewer steps:
 
-1. In OPK Terminal **Settings**, select **Create protected wallet** and complete the Android
-   biometric or device-credential prompt.
-2. Enter and confirm the six-digit local Admin PIN, then select **Set admin PIN**.
-3. Copy the operator address or scan its pairing QR in the review Merchant Portal.
-4. Authorise the operator for Base Sepolia vault `[BASE_SEPOLIA_REVIEW_VAULT_ADDRESS]` and token
-   `[BASE_SEPOLIA_TEST_TOKEN_ADDRESS_AND_SYMBOL]`.
-5. Generate a provisioning QR bound to that operator and scan it with **Scan merchant portal
-   setup**.
-6. Fund settlement gas through `[TEST_ETH_FAUCET_OR_PREFUNDED_METHOD]` and refresh readiness.
-7. Create a `1.00` payment QR from **Checkout**, pay it using
-   `[TEST_PAYER_WALLET_OR_FAUCET_STEPS]`, inspect **History**, and authenticate the constrained
-   settlement.
+1. Launch OPK Terminal and tap **Explore offline reviewer demo**.
+2. Confirm the persistent banner says **OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO
+   NETWORK · NO REAL FUNDS**.
+3. On **Checkout preview**, inspect the locally rendered sample ERC-681 payment QR and tap
+   **Simulate payment received**.
+4. Select **History** to inspect the in-memory sample payment and paid status.
+5. Select **Settlement**. The illustrative information is visible, but
+   **Settlement disabled in demo** cannot authenticate, sign, or broadcast.
+6. Use the back arrow to close the demo. Reopening it starts again at the initial waiting state.
+
+The separate **Set up / open terminal** path is the live merchant path and requires an authorised
+Base Sepolia Merchant Portal provisioning payload. The offline reviewer demo does not open that
+path or any of its dependencies.
+
+If Google Play review requires a live Base Sepolia transaction in addition to the offline
+representative preview, contact `dev@openpasskey.com`. OpenPasskey can provide time-bound testnet
+provisioning assistance during review; no production network or real-value funds are supported.
 
 The app is Base Sepolia testnet-only. It has no exchange, mining, customer custody, app account,
-ads, in-app products, or subscriptions. Support:
-`[MONITORED_EMAIL_AND_PHONE_WITH_TIME_ZONE]`.
+ads, in-app products, or subscriptions.
 
-## Pre-submission review-environment check
+Support: `dev@openpasskey.com` and `https://www.openpasskey.com/support`.
 
-- Perform the entire flow on a clean iPhone/iPad and a clean Android device using the exact
-  credentials and URLs placed in the consoles.
-- Confirm the portal account is not protected by an unavailable employee passkey or one-time code.
-- Confirm the review vault remains deployed, the token remains whitelisted, and the operator can
-  be authorised without production funds.
-- Confirm test ETH and test tokens are available for multiple review attempts.
-- Keep the public Base Sepolia RPC and Merchant Portal available for the full review window.
-- Remove all placeholders from both consoles.
+## Pre-submission verification
+
+- [ ] Run the reviewer steps on a clean iPhone/iPad using the exact App Store archive.
+- [ ] Run the reviewer steps on a clean Android device using the exact signed Play AAB.
+- [ ] Confirm demo entry does not prompt for camera, biometrics, PIN, notification, or network
+  access.
+- [ ] Confirm demo close/reopen restores Checkout/Waiting and no demo item appears in live history.
+- [ ] Confirm the exact safety banner remains visible on Checkout, History, and Settlement.
+- [ ] Confirm neither store console contains a placeholder or promises live review credentials.
+- [ ] Keep `dev@openpasskey.com` monitored throughout both reviews.

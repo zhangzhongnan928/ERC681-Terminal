@@ -10,6 +10,9 @@ final class StoreScreenshotUITests: XCTestCase {
         app.launchEnvironment["OPK_UI_TEST_KEYCHAIN_NAMESPACE"] =
             "store-screenshots-\(UUID().uuidString)"
         app.launch()
+        let liveButton = app.buttons["launchOpenLiveTerminalButton"]
+        XCTAssertTrue(liveButton.waitForExistence(timeout: 5))
+        liveButton.tap()
     }
 
     override func tearDownWithError() throws {

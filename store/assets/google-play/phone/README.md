@@ -3,7 +3,8 @@
 These five screenshots were captured on 24 July 2026 from OPK Terminal `0.1.12`
 (`versionCode 13`) running on the dedicated iMin L2s Pro test terminal.
 
-- Build source: the current `0.1.12` sources, installed as a debug APK with `adb install -r`.
+- Build source: the then-current `0.1.12` / version-code-13 sources, installed as a debug APK with
+  `adb install -r`.
 - Existing app data was preserved; the device's first-install timestamp did not change.
 - Capture format: 720 × 1440, 8-bit RGB PNG, no alpha.
 - Store status: satisfies Google Play's mandatory 320–3840 px and 2:1 rules. It does not meet the
@@ -11,8 +12,10 @@ These five screenshots were captured on 24 July 2026 from OPK Terminal `0.1.12`
 - Content: Base Sepolia testnet only. Images show public/truncated testnet identifiers and test-token
   activity, with no personal or production data.
 - The temporary `12.34 AUD` screenshot invoice auto-expired after capture.
-- Limitation: these were captured from a debug APK, not from the still-unsigned Play AAB. Recheck
-  the screens against the final signed AAB before console submission.
+- Limitation: these were captured from a debug APK, not from the signed build-13 AAB or the
+  build-14 release candidate. They predate the build-14 cold-launch choice. Preserve this
+  provenance and recheck or recapture the screens against the final signed build-14 AAB before
+  console submission.
 
 ## SHA-256
 
