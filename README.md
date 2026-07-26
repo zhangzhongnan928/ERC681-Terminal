@@ -160,6 +160,20 @@ The current implementation still lacks cross-operator `Swept`-log discovery and 
 replacement/cancellation; see the recovery limits in [MOBILE_SDK.md](./MOBILE_SDK.md) before
 operating the settlement wallet.
 
+## Set up a terminal
+
+Use the [OPK Pay Merchant Portal](https://paymentportal.openpasskey.com/) from a separate trusted
+phone or computer. Create or select the merchant vault, choose **Add Terminal**, scan the operator
+QR shown by the terminal, authorize that operator, then scan the portal's generated provisioning QR
+back into the terminal.
+
+The portal source and its detailed
+[Terminal Setup Flow](https://github.com/Open-Passkey/OPK-Pay-Merchant-Portal#terminal-setup-flow)
+are in the
+[Open-Passkey/OPK-Pay-Merchant-Portal](https://github.com/Open-Passkey/OPK-Pay-Merchant-Portal)
+repository. See [PROVISIONING.md](./PROVISIONING.md) for the exact provisioning payload and the
+terminal's device-side verification boundary.
+
 ## Verify
 
 Requirements: JDK 17, Android SDK platform 35, Swift 6.1+, XcodeGen, ripgrep (`rg`), and a full Xcode
