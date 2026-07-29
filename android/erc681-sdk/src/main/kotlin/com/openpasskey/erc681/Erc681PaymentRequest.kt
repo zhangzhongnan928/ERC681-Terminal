@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Victor Zhang
+
 package com.openpasskey.erc681
 
 /** The only supported payment rail: an ERC-20 transfer requested through ERC-681. */

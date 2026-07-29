@@ -192,6 +192,31 @@ See [PROVISIONING.md](./PROVISIONING.md) for the portal pairing and chain-derive
 and [MOBILE_SDK.md](./MOBILE_SDK.md) for SDK examples, exact configuration, lifecycle details, and
 build outputs.
 
+## Security and risk
+
+This code has not been independently audited. Base Sepolia (`84532`) is the only network enabled
+in shipped builds; Base Mainnet and every other network remain disabled as described above.
+
+The safety boundary documented here describes the behaviour of this source tree, built as
+published, against the pinned deployments in `conformance/`. Those properties are not guaranteed
+to survive a fork, a configuration change, an added network, or a substituted contract deployment.
+Running this software with real value is at the operator's own risk; see sections 7 and 8 of
+[LICENSE](./LICENSE).
+
+Report vulnerabilities privately — see [SECURITY.md](./SECURITY.md). Do not open a public issue
+for a security problem.
+
 ## License
 
-Proprietary — OpenPasskey Pty Ltd | ACN 688 670 420
+Licensed under the Apache License, Version 2.0. See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
+
+Code copyright 2026 Victor Zhang.
+
+The license covers source code, documentation, build scripts, and conformance vectors. It does
+not cover the OPK, OPK Pay, OPK Terminal, and OpenPasskey names, the logo, the application icon,
+the store icon, or the feature graphic. Those are trademarks and brand assets of OpenPasskey Pty
+Ltd (ACN 688 670 420) and are reserved. Forks may ship, but must rebrand — see
+[TRADEMARK.md](./TRADEMARK.md).
+
+Contributions are accepted under Apache-2.0 with a DCO sign-off; see
+[CONTRIBUTING.md](./CONTRIBUTING.md).

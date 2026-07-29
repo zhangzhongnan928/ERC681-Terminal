@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Victor Zhang
+
 import Foundation
 
 public enum ERC681Error: Error, Equatable, Sendable {

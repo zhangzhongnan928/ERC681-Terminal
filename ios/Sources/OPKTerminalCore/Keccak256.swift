@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Victor Zhang
+
 import Foundation
 
 /// Ethereum Keccak-256 (legacy Keccak padding 0x01, not standardized SHA3-256).

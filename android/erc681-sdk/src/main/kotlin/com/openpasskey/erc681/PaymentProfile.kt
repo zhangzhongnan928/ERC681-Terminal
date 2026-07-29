@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Victor Zhang
+
 package com.openpasskey.erc681
 
 /** ERC-20 metadata verified against the configured EVM network. */
