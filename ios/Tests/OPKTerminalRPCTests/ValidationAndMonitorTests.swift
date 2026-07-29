@@ -305,20 +305,33 @@ private actor BatchedPaymentRPC: EthereumBatchReadRPC {
     private(set) var batches = [[EthereumReadBatchRequest]]()
     private(set) var directBlockHashReads = 0
     private(set) var maximumInFlightBatches = 0
+    private(set) var pendingBalanceReads = 0
     private var inFlightBatches = 0
     private var headHashReads = 0
     let replaceFinalHeadHash: Bool
+    let pendingBalance: UInt256?
+    let pendingStalls: Bool
+    let tokenWhitelisted: Bool
+    let operatorIsAuthorized: Bool
 
     init(
         chainID: UInt64,
         token: EthereumAddress,
         balance: UInt256,
-        replaceFinalHeadHash: Bool = false
+        replaceFinalHeadHash: Bool = false,
+        pendingBalance: UInt256? = nil,
+        pendingStalls: Bool = false,
+        tokenWhitelisted: Bool = true,
+        operatorIsAuthorized: Bool = true
     ) {
         reportedChainID = chainID
         self.token = token
         self.balance = balance
         self.replaceFinalHeadHash = replaceFinalHeadHash
+        self.pendingBalance = pendingBalance
+        self.pendingStalls = pendingStalls
+        self.tokenWhitelisted = tokenWhitelisted
+        self.operatorIsAuthorized = operatorIsAuthorized
     }
 
     func batch(_ requests: [EthereumReadBatchRequest]) async throws -> [EthereumReadBatchResult] {
@@ -327,32 +340,58 @@ private actor BatchedPaymentRPC: EthereumBatchReadRPC {
         maximumInFlightBatches = max(maximumInFlightBatches, inFlightBatches)
         try await Task.sleep(for: .milliseconds(5))
         inFlightBatches -= 1
-        return try requests.map { request in
+        var results = [EthereumReadBatchResult]()
+        results.reserveCapacity(requests.count)
+        for request in requests {
             switch request {
             case .chainID:
-                return .quantity(reportedChainID)
+                results.append(.quantity(reportedChainID))
             case .blockNumber:
-                return .quantity(100)
+                results.append(.quantity(100))
             case .latestBlockIdentity:
-                return .blockIdentity(number: 100, hash: fixtureBlockHash(100))
+                results.append(.blockIdentity(number: 100, hash: fixtureBlockHash(100)))
             case let .canonicalBlockHash(block):
                 if block == 100 {
                     headHashReads += 1
                     let fork: UInt64 = replaceFinalHeadHash ? 1 : 0
-                    return .blockHash(fixtureBlockHash(block, fork: fork))
+                    results.append(.blockHash(fixtureBlockHash(block, fork: fork)))
+                } else {
+                    results.append(.blockHash(fixtureBlockHash(block)))
                 }
-                return .blockHash(fixtureBlockHash(block))
             case let .call(address, data, block):
-                guard address == token,
-                      Data(data.prefix(4)) == ABI.balanceOfSelector,
-                      block == .number(100)
-                else { throw URLError(.badServerResponse) }
-                return .data(ABI.word(balance))
+                let selector = Data(data.prefix(4))
+                if selector == ABI.isPaymentTokenSelector {
+                    guard block == .number(100) else { throw URLError(.badServerResponse) }
+                    results.append(.data(ABI.word(tokenWhitelisted ? UInt256(1) : UInt256(0))))
+                } else if selector == ABI.isOperatorSelector {
+                    guard block == .number(100) else { throw URLError(.badServerResponse) }
+                    results.append(.data(ABI.word(operatorIsAuthorized ? UInt256(1) : UInt256(0))))
+                } else if selector == ABI.ownerSelector {
+                    guard block == .number(100) else { throw URLError(.badServerResponse) }
+                    // A fixed non-matching owner: authorization in these fixtures is decided by
+                    // the isOperator flag alone.
+                    results.append(.data(ABI.word(UInt256(0xBEEF))))
+                } else {
+                    guard address == token, selector == ABI.balanceOfSelector
+                    else { throw URLError(.badServerResponse) }
+                    if block == .pending {
+                        pendingBalanceReads += 1
+                        if pendingStalls {
+                            try await Task.sleep(for: .seconds(60))
+                        }
+                        guard let pendingBalance else { throw URLError(.badServerResponse) }
+                        results.append(.data(ABI.word(pendingBalance)))
+                    } else {
+                        guard block == .number(100) else { throw URLError(.badServerResponse) }
+                        results.append(.data(ABI.word(balance)))
+                    }
+                }
             case let .code(_, block):
                 guard block == .number(100) else { throw URLError(.badServerResponse) }
-                return .data(Data())
+                results.append(.data(Data()))
             }
         }
+        return results
     }
 
     func chainID() async throws -> UInt64 { reportedChainID }
@@ -696,6 +735,333 @@ final class ValidationAndMonitorTests: XCTestCase {
         XCTAssertEqual(directBlockHashReads, 0)
     }
 
+    func testPendingBalanceHintRidesBesideTheFixedHeadProofWithoutJoiningIt() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 2)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+        let rpc = BatchedPaymentRPC(
+            chainID: configuration.chainID,
+            token: tokenAddress,
+            balance: .zero,
+            pendingBalance: UInt256(1_000)
+        )
+        let monitor = PaymentMonitor(
+            rpc: rpc,
+            confirmationPolicy: configuration.confirmationPolicy
+        )
+
+        let observation = try await monitor.sample(
+            request,
+            expectedChainID: configuration.chainID,
+            includePendingBalanceHint: true
+        )
+
+        XCTAssertEqual(
+            observation.status,
+            .waiting,
+            "An advisory mempool hint must never join payment classification"
+        )
+        XCTAssertEqual(observation.balance, .zero)
+        XCTAssertEqual(observation.pendingBalanceHint, UInt256(1_000))
+        XCTAssertNil(observation.thresholdCursor)
+
+        func isAdvisory(_ batch: [EthereumReadBatchRequest]) -> Bool {
+            batch.contains { request in
+                if case let .call(_, _, block) = request { return block == .pending }
+                return false
+            }
+        }
+        let batches = await rpc.batches
+        let advisoryBatches = batches.filter(isAdvisory)
+        XCTAssertEqual(advisoryBatches.count, 1, "One advisory batch rides beside the proof")
+        XCTAssertEqual(advisoryBatches[0].count, 1)
+        let proofBatches = batches.filter { !isAdvisory($0) }
+        XCTAssertEqual(
+            proofBatches.map(\.count),
+            [2, 1, 1],
+            "The three-wave fixed-head proof shape must be unchanged"
+        )
+        XCTAssertEqual(proofBatches[0], [.chainID, .latestBlockIdentity])
+        let lastBatch = try XCTUnwrap(batches.last)
+        XCTAssertEqual(
+            lastBatch,
+            [.canonicalBlockHash(100)],
+            "The final canonical-identity check must close the sample after the advisory read settles"
+        )
+    }
+
+    func testStalledAdvisoryReadCannotDelayTheCanonicalSampleBeyondItsBound() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 2)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+        let rpc = BatchedPaymentRPC(
+            chainID: configuration.chainID,
+            token: tokenAddress,
+            balance: UInt256(400),
+            pendingBalance: UInt256(999),
+            pendingStalls: true
+        )
+        let monitor = PaymentMonitor(
+            rpc: rpc,
+            confirmationPolicy: configuration.confirmationPolicy
+        )
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        let observation = try await monitor.sample(
+            request,
+            expectedChainID: configuration.chainID,
+            includePendingBalanceHint: true
+        )
+
+        let elapsed = clock.now - start
+        XCTAssertLessThan(
+            elapsed,
+            .seconds(4),
+            "A stalled advisory read must be abandoned at its bound, not awaited"
+        )
+        XCTAssertNil(observation.pendingBalanceHint)
+        XCTAssertEqual(observation.status, .partial(received: UInt256(400)))
+        let batches = await rpc.batches
+        let lastBatch = try XCTUnwrap(batches.last)
+        XCTAssertEqual(
+            lastBatch,
+            [.canonicalBlockHash(100)],
+            "The final canonical-identity check still closes the sample"
+        )
+    }
+
+    func testPendingBalanceHintFailureNeverFailsTheCanonicalSample() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 2)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+        // pendingBalance nil makes the fixture reject the advisory read entirely.
+        let rpc = BatchedPaymentRPC(
+            chainID: configuration.chainID,
+            token: tokenAddress,
+            balance: UInt256(400),
+            pendingBalance: nil
+        )
+        let monitor = PaymentMonitor(
+            rpc: rpc,
+            confirmationPolicy: configuration.confirmationPolicy
+        )
+
+        let observation = try await monitor.sample(
+            request,
+            expectedChainID: configuration.chainID,
+            includePendingBalanceHint: true
+        )
+
+        XCTAssertEqual(observation.status, .partial(received: UInt256(400)))
+        XCTAssertNil(
+            observation.pendingBalanceHint,
+            "An incompatible or failing pending read degrades to no hint"
+        )
+        let pendingReads = await rpc.pendingBalanceReads
+        XCTAssertEqual(pendingReads, 1)
+    }
+
+    func testDefaultSampleNeverIssuesAdvisoryPendingReads() async throws {
+        let configuration = try makeConfiguration(requiredBlocks: 2)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: configuration.tokens[0],
+            configuration: configuration,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            nonce: .zero
+        )
+        let rpc = BatchedPaymentRPC(
+            chainID: configuration.chainID,
+            token: tokenAddress,
+            balance: UInt256(400),
+            pendingBalance: UInt256(999)
+        )
+        let monitor = PaymentMonitor(
+            rpc: rpc,
+            confirmationPolicy: configuration.confirmationPolicy
+        )
+
+        let observation = try await monitor.sample(
+            request,
+            expectedChainID: configuration.chainID
+        )
+
+        XCTAssertNil(observation.pendingBalanceHint)
+        let pendingReads = await rpc.pendingBalanceReads
+        XCTAssertEqual(
+            pendingReads,
+            0,
+            "Settlement revalidation and SDK default sampling must stay hint-free"
+        )
+    }
+
+    func testPollCadenceAcceleratesOnlyForABoundedWindowAfterProgress() throws {
+        let base = Date(timeIntervalSince1970: 1_000)
+        let defaultInterval: UInt64 = 5_000_000_000
+        let accelerated: UInt64 = 2_000_000_000
+        func observation(
+            _ status: PaymentStatus,
+            balance: UInt256 = .zero,
+            hint: UInt256? = nil
+        ) -> PaymentObservation {
+            PaymentObservation(
+                invoiceID: .zero,
+                blockNumber: 100,
+                blockHash: fixtureBlockHash(100),
+                balance: balance,
+                status: status,
+                thresholdBlock: nil,
+                thresholdBlockHash: nil,
+                pendingBalanceHint: hint
+            )
+        }
+
+        var cadence = PaymentPollCadence()
+        XCTAssertEqual(
+            cadence.interval(
+                after: observation(.waiting),
+                defaultInterval: defaultInterval,
+                acceleratedInterval: accelerated,
+                now: base
+            ),
+            defaultInterval,
+            "An idle QR keeps the slower default cadence"
+        )
+        XCTAssertEqual(
+            cadence.interval(
+                after: observation(.waiting, hint: UInt256(400)),
+                defaultInterval: defaultInterval,
+                acceleratedInterval: accelerated,
+                now: base.addingTimeInterval(5)
+            ),
+            accelerated,
+            "A new mempool hint opens a bounded acceleration window"
+        )
+        XCTAssertEqual(
+            cadence.interval(
+                after: observation(.waiting, hint: UInt256(400)),
+                defaultInterval: defaultInterval,
+                acceleratedInterval: accelerated,
+                now: base.addingTimeInterval(10)
+            ),
+            accelerated,
+            "The window persists while it is still open"
+        )
+        XCTAssertEqual(
+            cadence.interval(
+                after: observation(.waiting, hint: UInt256(400)),
+                defaultInterval: defaultInterval,
+                acceleratedInterval: accelerated,
+                now: base.addingTimeInterval(41)
+            ),
+            defaultInterval,
+            "A stuck unchanged pending transaction cannot extend its own window"
+        )
+        XCTAssertEqual(
+            cadence.interval(
+                after: observation(.partial(received: UInt256(100)), balance: UInt256(100)),
+                defaultInterval: defaultInterval,
+                acceleratedInterval: accelerated,
+                now: base.addingTimeInterval(50)
+            ),
+            accelerated,
+            "A canonical balance increase re-opens the window"
+        )
+        XCTAssertEqual(
+            cadence.interval(
+                after: observation(.partial(received: UInt256(100)), balance: UInt256(100)),
+                defaultInterval: defaultInterval,
+                acceleratedInterval: accelerated,
+                now: base.addingTimeInterval(81)
+            ),
+            defaultInterval,
+            "A static partial balance falls back to the default cadence"
+        )
+        XCTAssertEqual(
+            cadence.interval(
+                after: observation(
+                    .confirming(received: UInt256(1_000), confirmations: 1, required: 2),
+                    balance: UInt256(1_000)
+                ),
+                defaultInterval: defaultInterval,
+                acceleratedInterval: accelerated,
+                now: base.addingTimeInterval(85)
+            ),
+            accelerated,
+            "Confirmation progress inside an unfinished window accelerates"
+        )
+
+        // A flaky pending endpoint that flaps 400 -> nil -> 400 must not count the SAME stuck
+        // transaction as new progress after its window expired.
+        var flapping = PaymentPollCadence()
+        _ = flapping.interval(
+            after: observation(.waiting, hint: UInt256(400)),
+            defaultInterval: defaultInterval,
+            acceleratedInterval: accelerated,
+            now: base
+        )
+        _ = flapping.interval(
+            after: observation(.waiting),
+            defaultInterval: defaultInterval,
+            acceleratedInterval: accelerated,
+            now: base.addingTimeInterval(31)
+        )
+        XCTAssertEqual(
+            flapping.interval(
+                after: observation(.waiting, hint: UInt256(400)),
+                defaultInterval: defaultInterval,
+                acceleratedInterval: accelerated,
+                now: base.addingTimeInterval(36)
+            ),
+            defaultInterval,
+            "A reappearing unchanged hint is not new progress"
+        )
+
+        var terminal = PaymentPollCadence()
+        XCTAssertEqual(
+            terminal.interval(
+                after: observation(.paid(received: UInt256(1_000)), balance: UInt256(1_000)),
+                defaultInterval: defaultInterval,
+                acceleratedInterval: accelerated,
+                now: base
+            ),
+            defaultInterval,
+            "Terminal states never accelerate"
+        )
+
+        var floor = PaymentPollCadence()
+        XCTAssertEqual(
+            floor.interval(
+                after: observation(.waiting, hint: UInt256(1)),
+                defaultInterval: 1_000,
+                acceleratedInterval: 2_000,
+                now: base
+            ),
+            1_000,
+            "The accelerated cadence can never exceed the configured default"
+        )
+    }
+
     func testObservationStreamRetriesAvailabilityFailuresAndCanonicalReplacement() async throws {
         let configuration = try makeConfiguration(requiredBlocks: 1)
         let request = try InvoiceFactory.create(
@@ -879,14 +1245,21 @@ final class ValidationAndMonitorTests: XCTestCase {
         let proof = try await ReceiverFreshnessValidator(rpc: stableRPC).validate(
             receiver: vault,
             token: tokenAddress,
+            vault: vault,
+            operatorAddress: vault,
             expectedChainID: 84_532
         )
         XCTAssertEqual(proof.blockNumber, 100)
         XCTAssertEqual(proof.blockHash, fixtureBlockHash(100))
         XCTAssertTrue(proof.receiverCode.isEmpty)
         XCTAssertTrue(proof.tokenBalance.isZero)
+        XCTAssertTrue(proof.tokenWhitelisted, "The live whitelist fact rides in the same fixed head")
+        XCTAssertTrue(
+            proof.operatorAuthorized,
+            "The live authorization fact rides in the same fixed head"
+        )
         let stableBatches = await stableRPC.batches
-        XCTAssertEqual(stableBatches.map(\.count), [2, 2, 1])
+        XCTAssertEqual(stableBatches.map(\.count), [2, 5, 1])
         XCTAssertEqual(stableBatches[0], [.chainID, .latestBlockIdentity])
         XCTAssertTrue(stableBatches[1].allSatisfy { request in
             switch request {
@@ -905,6 +1278,8 @@ final class ValidationAndMonitorTests: XCTestCase {
             _ = try await ReceiverFreshnessValidator(rpc: reorgRPC).validate(
                 receiver: vault,
                 token: tokenAddress,
+                vault: vault,
+                operatorAddress: vault,
                 expectedChainID: 84_532
             )
             XCTFail("Expected receiver freshness to reject a canonical replacement")

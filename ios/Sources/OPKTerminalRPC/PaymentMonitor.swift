@@ -112,6 +112,42 @@ public struct ReceiverFreshnessProof: Hashable, Sendable {
     public let blockHash: Bytes32
     public let receiverCode: Data
     public let tokenBalance: UInt256
+    /// Live vault whitelist state for the invoice token, proven at the same fixed head as the
+    /// receiver reads. Mutable authorization facts must never be served from a cached
+    /// configuration proof at QR-publication time.
+    public let tokenWhitelisted: Bool
+    /// Live vault authorization for the terminal operator (isOperator, or vault owner), proven
+    /// at the same fixed head and bracketed by the same canonical-identity check as every other
+    /// read in this proof. A reorg during sampling fails the whole proof closed instead of
+    /// leaving authorization anchored to a different block than the receiver facts.
+    public let operatorAuthorized: Bool
+
+    public init(
+        blockNumber: UInt64,
+        blockHash: Bytes32,
+        receiverCode: Data,
+        tokenBalance: UInt256,
+        tokenWhitelisted: Bool,
+        operatorAuthorized: Bool
+    ) {
+        self.blockNumber = blockNumber
+        self.blockHash = blockHash
+        self.receiverCode = receiverCode
+        self.tokenBalance = tokenBalance
+        self.tokenWhitelisted = tokenWhitelisted
+        self.operatorAuthorized = operatorAuthorized
+    }
+
+    /// Canonical `owner()` words are 32 bytes with 12 leading zero bytes. Anything else is
+    /// treated as not-matching rather than a proof failure, because `isOperator` alone can
+    /// still authorize publication.
+    static func ownerMatches(_ ownerData: Data, operatorAddress: EthereumAddress) -> Bool {
+        guard ownerData.count == 32,
+              ownerData.prefix(12).allSatisfy({ $0 == 0 }),
+              let owner = try? EthereumAddress(data: ownerData.suffix(20))
+        else { return false }
+        return owner == operatorAddress
+    }
 }
 
 /// Proves a newly derived receiver is unused at one fixed canonical block. This is intentionally
@@ -127,8 +163,19 @@ public struct ReceiverFreshnessValidator: Sendable {
     public func validate(
         receiver: EthereumAddress,
         token: EthereumAddress,
+        vault: EthereumAddress,
+        operatorAddress: EthereumAddress,
         expectedChainID: UInt64
     ) async throws -> ReceiverFreshnessProof {
+        let whitelistCallData = ABI.encodeCall(
+            selector: ABI.isPaymentTokenSelector,
+            words: [ABI.word(token)]
+        )
+        let isOperatorCallData = ABI.encodeCall(
+            selector: ABI.isOperatorSelector,
+            words: [ABI.word(operatorAddress)]
+        )
+        let ownerCallData = ABI.encodeCall(selector: ABI.ownerSelector)
         if let batchRPC = rpc as? any EthereumBatchReadRPC {
             let anchor = try await batchRPC.batch([.chainID, .latestBlockIdentity])
             guard anchor.count == 2,
@@ -152,10 +199,16 @@ public struct ReceiverFreshnessValidator: Sendable {
                     ),
                     block: block
                 ),
+                .call(address: vault, data: whitelistCallData, block: block),
+                .call(address: vault, data: isOperatorCallData, block: block),
+                .call(address: vault, data: ownerCallData, block: block),
             ])
-            guard proof.count == 2,
+            guard proof.count == 5,
                   case let .data(receiverCode) = proof[0],
-                  case let .data(balanceData) = proof[1]
+                  case let .data(balanceData) = proof[1],
+                  case let .data(whitelistData) = proof[2],
+                  case let .data(isOperatorData) = proof[3],
+                  case let .data(ownerData) = proof[4]
             else { throw RPCDecodingError.invalidData("receiver freshness proof") }
             let final = try await batchRPC.batch([.canonicalBlockHash(head)])
             guard final.count == 1, case let .blockHash(finalBlockHash) = final[0] else {
@@ -168,7 +221,13 @@ public struct ReceiverFreshnessValidator: Sendable {
                 blockNumber: head,
                 blockHash: finalBlockHash,
                 receiverCode: receiverCode,
-                tokenBalance: try ABI.decodeUInt256(balanceData)
+                tokenBalance: try ABI.decodeUInt256(balanceData),
+                tokenWhitelisted: try ABI.decodeBool(whitelistData),
+                operatorAuthorized: (try ABI.decodeBool(isOperatorData))
+                    || ReceiverFreshnessProof.ownerMatches(
+                        ownerData,
+                        operatorAddress: operatorAddress
+                    )
             )
         }
 
@@ -192,7 +251,10 @@ public struct ReceiverFreshnessValidator: Sendable {
             ),
             block: block
         )
-        let reads = try await (receiverCode, balanceData)
+        async let whitelistData = rpc.call(to: vault, data: whitelistCallData, block: block)
+        async let isOperatorData = rpc.call(to: vault, data: isOperatorCallData, block: block)
+        async let ownerData = rpc.call(to: vault, data: ownerCallData, block: block)
+        let reads = try await (receiverCode, balanceData, whitelistData, isOperatorData, ownerData)
         let finalBlockHash = try await rpc.canonicalBlockHash(at: resolvedHead)
         guard finalBlockHash == initialBlockHash else {
             throw PaymentMonitorError.canonicalBlockChanged(blockNumber: resolvedHead)
@@ -201,13 +263,89 @@ public struct ReceiverFreshnessValidator: Sendable {
             blockNumber: resolvedHead,
             blockHash: finalBlockHash,
             receiverCode: reads.0,
-            tokenBalance: try ABI.decodeUInt256(reads.1)
+            tokenBalance: try ABI.decodeUInt256(reads.1),
+            tokenWhitelisted: try ABI.decodeBool(reads.2),
+            operatorAuthorized: (try ABI.decodeBool(reads.3))
+                || ReceiverFreshnessProof.ownerMatches(
+                    reads.4,
+                    operatorAddress: operatorAddress
+                )
         )
+    }
+}
+
+/// Bounded acceleration controller for payment polling. Acceleration is granted for a short
+/// window after a *change* in visible funds — a canonical balance increase, a new or increased
+/// advisory pending hint, or confirmation progress inside an unfinished window — and expires on
+/// its own. A static partial balance or a stuck pending transaction therefore cannot hold the
+/// fast cadence for an entire invoice lifetime, and the accelerated cadence never exceeds the
+/// configured default.
+public struct PaymentPollCadence: Sendable {
+    public static let accelerationWindow: TimeInterval = 30
+
+    private var acceleratedUntil: Date?
+    private var lastBalance: UInt256?
+    /// High-water mark of every nonzero hint ever seen. A flaky pending endpoint that
+    /// intermittently returns `nil` must not let the SAME stuck transaction count as new
+    /// progress each time it reappears, so this value never decreases.
+    private var highestHint: UInt256 = .zero
+    private var lastConfirmations: UInt64?
+
+    public init() {}
+
+    public mutating func interval(
+        after observation: PaymentObservation,
+        defaultInterval: UInt64,
+        acceleratedInterval: UInt64,
+        now: Date = Date()
+    ) -> UInt64 {
+        if hasProgressSignal(observation) {
+            acceleratedUntil = now.addingTimeInterval(Self.accelerationWindow)
+        }
+        lastBalance = observation.balance
+        if let hint = observation.pendingBalanceHint, hint > highestHint {
+            highestHint = hint
+        }
+        if case let .confirming(_, confirmations, _) = observation.status {
+            lastConfirmations = confirmations
+        } else {
+            lastConfirmations = nil
+        }
+        switch observation.status {
+        case .paid, .overpaid, .expired:
+            return defaultInterval
+        case .waiting, .partial, .confirming:
+            guard let acceleratedUntil, now < acceleratedUntil else {
+                return defaultInterval
+            }
+            return min(defaultInterval, acceleratedInterval)
+        }
+    }
+
+    private func hasProgressSignal(_ observation: PaymentObservation) -> Bool {
+        if observation.balance > (lastBalance ?? .zero) { return true }
+        if let hint = observation.pendingBalanceHint,
+           !hint.isZero,
+           hint > highestHint {
+            return true
+        }
+        if case let .confirming(_, confirmations, required) = observation.status,
+           confirmations < required,
+           confirmations != lastConfirmations {
+            return true
+        }
+        return false
     }
 }
 
 public struct PaymentMonitor: Sendable {
     public static let defaultPollIntervalNanoseconds: UInt64 = 5_000_000_000
+    /// Cadence used only inside a fresh acceleration window. Two seconds tracks the Base block
+    /// interval so an in-progress confirmation window is observed roughly once per new block.
+    public static let acceleratedPollIntervalNanoseconds: UInt64 = 2_000_000_000
+    /// Upper bound on how long the advisory pending read may delay a completed canonical
+    /// sample. The hint is dropped, never awaited further, once this budget elapses.
+    public static let advisoryPendingHintTimeout: Duration = .milliseconds(1_500)
 
     private let rpc: any EthereumReadRPC
     public let confirmationPolicy: ConfirmationPolicy
@@ -228,6 +366,7 @@ public struct PaymentMonitor: Sendable {
         previousThresholdCursor: PaymentConfirmationCursor? = nil,
         additionalCursors: [PaymentConfirmationCursor] = [],
         expectedChainID: UInt64? = nil,
+        includePendingBalanceHint: Bool = false,
         now: Date = Date()
     ) async throws -> PaymentObservation {
         let observations = try await sampleBatch(
@@ -237,6 +376,7 @@ public struct PaymentMonitor: Sendable {
                 additionalCursors: additionalCursors
             )],
             expectedChainID: expectedChainID,
+            includePendingBalanceHints: includePendingBalanceHint,
             now: now
         )
         guard let observation = observations.first else {
@@ -253,6 +393,7 @@ public struct PaymentMonitor: Sendable {
     public func sampleBatch(
         _ inputs: [PaymentSampleInput],
         expectedChainID: UInt64? = nil,
+        includePendingBalanceHints: Bool = false,
         now: Date = Date()
     ) async throws -> [PaymentObservation] {
         guard !inputs.isEmpty else { return [] }
@@ -289,6 +430,12 @@ public struct PaymentMonitor: Sendable {
         }
         block = number
         initialBlockHash = hash
+
+        // Advisory mempool hints run beside the fixed-head proof and tolerate every failure.
+        // An empty input list resolves immediately, so the child task is free when disabled.
+        async let advisoryHints = advisoryPendingBalances(
+            for: includePendingBalanceHints ? inputs : []
+        )
 
         var cursorSets = [[PaymentConfirmationCursor]]()
         cursorSets.reserveCapacity(inputs.count)
@@ -342,6 +489,12 @@ public struct PaymentMonitor: Sendable {
             historicalHashes[historicalBlock] = hash
         }
 
+        // The bounded advisory read must settle BEFORE the final canonical-identity check so a
+        // stalled hint cannot widen the window between proving the head and consuming the
+        // evidence. If the checked block is replaced while the hint is pending, the final wave
+        // below still observes the replacement and fails the sample closed.
+        let pendingHints = await advisoryHints
+
         let final = try await resolve([.canonicalBlockHash(block)])
         guard final.count == 1, case let .blockHash(finalBlockHash) = final[0] else {
             throw RPCDecodingError.invalidData("payment final head batch")
@@ -350,23 +503,74 @@ public struct PaymentMonitor: Sendable {
             throw PaymentMonitorError.canonicalBlockChanged(blockNumber: block)
         }
 
-        return zip(zip(inputs, cursorSets), balances).map { pair, balance in
-            let (input, cursors) = pair
-            let validatedCursors = cursors.filter { cursor in
+        var observations = [PaymentObservation]()
+        observations.reserveCapacity(inputs.count)
+        for (index, input) in inputs.enumerated() {
+            let validatedCursors = cursorSets[index].filter { cursor in
                 let canonicalHash = cursor.blockNumber == block
                     ? finalBlockHash
                     : historicalHashes[cursor.blockNumber]
                 return canonicalHash == cursor.blockHash
             }
-            return classify(
+            observations.append(classify(
                 input.request,
-                balance: balance,
+                balance: balances[index],
                 block: block,
                 blockHash: finalBlockHash,
                 previousThresholdCursor: input.previousThresholdCursor,
                 validatedCursors: validatedCursors,
+                pendingBalanceHint: index < pendingHints.count ? pendingHints[index] : nil,
                 now: now
+            ))
+        }
+        return observations
+    }
+
+    /// Advisory-only mempool balances used for cashier feedback while a QR is on screen. Any
+    /// transport, batching, endpoint-compatibility, or decoding failure degrades to `nil`
+    /// hints, and a stalled read is abandoned after `advisoryPendingHintTimeout` so it can
+    /// neither block the canonical sample nor hold the shared endpoint budget. Nothing read
+    /// here may influence the fixed-head evidence, status classification thresholds, or
+    /// persisted confirmation state.
+    private func advisoryPendingBalances(
+        for inputs: [PaymentSampleInput]
+    ) async -> [UInt256?] {
+        guard !inputs.isEmpty else { return [] }
+        let fallback = [UInt256?](repeating: nil, count: inputs.count)
+        return await withTaskGroup(
+            of: [UInt256?]?.self,
+            returning: [UInt256?].self
+        ) { group in
+            group.addTask { await self.readAdvisoryPendingBalances(for: inputs) }
+            group.addTask {
+                try? await Task.sleep(for: Self.advisoryPendingHintTimeout)
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first ?? fallback
+        }
+    }
+
+    private func readAdvisoryPendingBalances(
+        for inputs: [PaymentSampleInput]
+    ) async -> [UInt256?] {
+        let requests = inputs.map { input in
+            EthereumReadBatchRequest.call(
+                address: input.request.token.address,
+                data: ABI.encodeCall(
+                    selector: ABI.balanceOfSelector,
+                    words: [ABI.word(input.request.receiver)]
+                ),
+                block: .pending
             )
+        }
+        guard let results = try? await resolve(requests),
+              results.count == requests.count
+        else { return [UInt256?](repeating: nil, count: inputs.count) }
+        return results.map { result in
+            guard case let .data(data) = result else { return nil }
+            return try? ABI.decodeUInt256(data)
         }
     }
 
@@ -480,6 +684,7 @@ public struct PaymentMonitor: Sendable {
         blockHash: Bytes32,
         previousThresholdCursor: PaymentConfirmationCursor? = nil,
         validatedCursors: [PaymentConfirmationCursor] = [],
+        pendingBalanceHint: UInt256? = nil,
         now: Date = Date()
     ) -> PaymentObservation {
         let expected = request.expectedAmount
@@ -500,7 +705,8 @@ public struct PaymentMonitor: Sendable {
                 status: status,
                 thresholdBlock: nil,
                 thresholdBlockHash: nil,
-                validatedPreviousCursors: validatedCursors
+                validatedPreviousCursors: validatedCursors,
+                pendingBalanceHint: pendingBalanceHint
             )
         }
 
@@ -537,7 +743,8 @@ public struct PaymentMonitor: Sendable {
             status: status,
             thresholdBlock: thresholdCursor.blockNumber,
             thresholdBlockHash: thresholdCursor.blockHash,
-            validatedPreviousCursors: validatedCursors
+            validatedPreviousCursors: validatedCursors,
+            pendingBalanceHint: pendingBalanceHint
         )
     }
 

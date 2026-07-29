@@ -102,6 +102,25 @@ These controls reduce latency and public-endpoint throttling without turning mut
 balances, contract links, token metadata, simulation, nonce, fees, or canonical block identity into
 long-lived cache. Wall-clock time remains dependent on the public endpoint and network conditions.
 
+Because the amount never participates in invoice-ID or receiver derivation, the iOS app fixes the
+invoice identity synchronously while the cashier is still typing and warms only the IMMUTABLE
+configuration proof (contract code, linkage, token metadata) in the background. That immutable
+proof may then be reused for up to 60 seconds. Mutable facts are never prewarmed: token
+whitelist, operator authorization, and receiver freshness are re-proven live inside ONE fixed
+canonical-head bracket on every QR publication, the operator's gas reserve is re-read live from
+the pending fee view (fee-readiness semantics, deliberately not a canonical proof), and the sale
+must reproduce the identical invoice ID and receiver from the stored identity before publishing
+it. While a QR is displayed, the
+sampler additionally reads the receiver's pending-tag balance beside the fixed-head proof as an
+advisory "payment detected" hint from the endpoint's pending/txpool view where supported: it
+never joins classification, confirmation cursors, or persisted state; it settles or is abandoned
+within a bounded budget before the sample's final canonical-identity check; any failure degrades
+to no hint, and a hint is dropped when a refresh fails so a possibly abandoned transaction cannot
+keep announcing itself. Payment polling accelerates from five seconds to the two-second block
+cadence only inside a bounded window after funds visibly progress (a new or increased hint, a
+balance increase, or confirmation progress); a static partial balance or a stuck pending
+transaction falls back to the default cadence when its window expires.
+
 ## Payment flow
 
 1. Select one configured payment profile, then require the device operator wallet and freshly

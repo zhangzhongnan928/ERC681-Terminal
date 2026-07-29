@@ -379,6 +379,11 @@ public struct PaymentObservation: Hashable, Sendable, Codable {
     /// Saved cursors that the RPC sampler re-read and matched against the canonical chain during
     /// this observation. App-specific confirmation windows may only be preserved from this set.
     public let validatedPreviousCursors: [PaymentConfirmationCursor]
+    /// Advisory mempool balance sampled beside the canonical read, used only for "payment
+    /// detected" UI feedback. It is never payment evidence: classification, confirmation
+    /// cursors, and persisted invoice state are derived exclusively from the fixed-head
+    /// `balance` above, and a pending transaction can still be dropped before inclusion.
+    public let pendingBalanceHint: UInt256?
 
     public init(
         invoiceID: Bytes32,
@@ -388,7 +393,8 @@ public struct PaymentObservation: Hashable, Sendable, Codable {
         status: PaymentStatus,
         thresholdBlock: UInt64?,
         thresholdBlockHash: Bytes32?,
-        validatedPreviousCursors: [PaymentConfirmationCursor] = []
+        validatedPreviousCursors: [PaymentConfirmationCursor] = [],
+        pendingBalanceHint: UInt256? = nil
     ) {
         self.invoiceID = invoiceID
         self.blockNumber = blockNumber
@@ -398,6 +404,7 @@ public struct PaymentObservation: Hashable, Sendable, Codable {
         self.thresholdBlock = thresholdBlock
         self.thresholdBlockHash = thresholdBlockHash
         self.validatedPreviousCursors = validatedPreviousCursors
+        self.pendingBalanceHint = pendingBalanceHint
     }
 
     public var thresholdCursor: PaymentConfirmationCursor? {
@@ -405,6 +412,23 @@ public struct PaymentObservation: Hashable, Sendable, Codable {
         return PaymentConfirmationCursor(
             blockNumber: thresholdBlock,
             blockHash: thresholdBlockHash
+        )
+    }
+
+    /// The same canonical evidence with the advisory hint removed. Used when a retained
+    /// observation outlives failed refresh attempts: canonical facts stay displayed, but a
+    /// possibly dropped pending transaction must not keep announcing "payment detected".
+    public func withoutPendingBalanceHint() -> PaymentObservation {
+        PaymentObservation(
+            invoiceID: invoiceID,
+            blockNumber: blockNumber,
+            blockHash: blockHash,
+            balance: balance,
+            status: status,
+            thresholdBlock: thresholdBlock,
+            thresholdBlockHash: thresholdBlockHash,
+            validatedPreviousCursors: validatedPreviousCursors,
+            pendingBalanceHint: nil
         )
     }
 
