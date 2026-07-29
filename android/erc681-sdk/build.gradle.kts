@@ -36,6 +36,37 @@ publishing {
         create<MavenPublication>("maven") {
             artifactId = "opk-erc681-sdk"
             from(components["java"])
+
+            pom {
+                name.set("OPK ERC-681 SDK")
+                description.set(
+                    "Keyless, read-only Kotlin SDK for canonical ERC-681 ERC-20 payment requests, " +
+                        "CREATE2 receiver derivation, and payment observation."
+                )
+                url.set("https://github.com/zhangzhongnan928/ERC681-Terminal")
+                licenses {
+                    license {
+                        name.set("The Apache License, Version 2.0")
+                        url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+                        distribution.set("repo")
+                    }
+                }
+                developers {
+                    developer {
+                        name.set("Victor Zhang")
+                        email.set("v@openpasskey.com")
+                    }
+                }
+                scm {
+                    url.set("https://github.com/zhangzhongnan928/ERC681-Terminal")
+                    connection.set(
+                        "scm:git:https://github.com/zhangzhongnan928/ERC681-Terminal.git"
+                    )
+                    developerConnection.set(
+                        "scm:git:ssh://git@github.com/zhangzhongnan928/ERC681-Terminal.git"
+                    )
+                }
+            }
         }
     }
     repositories {

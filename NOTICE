@@ -1,0 +1,39 @@
+ERC-681 Terminal
+Copyright 2026 Victor Zhang
+
+This product is licensed under the Apache License, Version 2.0 (the
+"License"). You may obtain a copy of the License in the LICENSE file
+distributed with this work, or at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Scope of the license
+--------------------
+
+The Apache License covers the source code, documentation, build scripts,
+and conformance vectors in this repository.
+
+It does NOT cover the trademarks, logo, application icon, store icon, or
+feature graphic associated with this project. Those are the property of
+OpenPasskey Pty Ltd (ACN 688 670 420) and are reserved. See TRADEMARK.md
+for what is reserved and what forks must change.
+
+Third-party components
+----------------------
+
+This project depends on, but does not redistribute the source of, the
+following third-party components. Each remains under its own license.
+
+Android:
+  androidx.* (core, lifecycle, activity, biometric, compose, navigation,
+    room, camera)                        Apache License 2.0
+  org.jetbrains.kotlinx:kotlinx-coroutines-android
+                                         Apache License 2.0
+  com.google.code.gson:gson              Apache License 2.0
+  com.google.zxing:core                  Apache License 2.0
+  org.web3j:core                         Apache License 2.0
+  junit:junit                            Eclipse Public License 1.0
+                                           (test scope only)
+
+iOS:
+  21-DOT-DEV/swift-secp256k1             MIT License

@@ -16,7 +16,7 @@ Release target: OPK Terminal `0.1.12` build `14`.
 | Privacy Policy URL | https://www.openpasskey.com/privacy |
 | Support URL | https://www.openpasskey.com/support |
 | Marketing URL | Leave blank |
-| Copyright | 2026 OpenPasskey Pty Ltd — owner to confirm exact rights-holder text |
+| Copyright | 2026 OpenPasskey Pty Ltd |
 
 ## Promotional text (170 max)
 
@@ -87,7 +87,9 @@ placeholders or commit review credentials to this repository.
 - Complete the current age-rating questionnaire honestly; do not assume a rating from this draft.
 - Confirm organisation enrolment and the financial/cryptocurrency classification described in
   `../console-declarations.md`.
-- Confirm the copyright owner and distribution territories.
+- Confirm distribution territories. The rights holder for the store listing is OpenPasskey Pty Ltd
+  (ACN 688 670 420), which also owns the OPK Terminal name and icon; the open-source code copyright
+  is held separately by Victor Zhang under Apache-2.0. See `../../TRADEMARK.md`.
 - Leave the optional **Marketing URL** blank because the general homepage describes capabilities
   outside this Base Sepolia-only app. The required **Support URL** is the dedicated live
   `https://www.openpasskey.com/support` page.
