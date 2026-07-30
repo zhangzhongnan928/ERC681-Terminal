@@ -102,8 +102,8 @@ android {
         applicationId = "com.openpasskey.terminal"
         minSdk = 26
         targetSdk = 36
-        versionCode = 14
-        versionName = "0.1.12"
+        versionCode = 15
+        versionName = "0.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
