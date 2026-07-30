@@ -131,6 +131,9 @@ public actor OperatorRPCClient: EthereumOperatorRPC {
     }
 
     func tokenBalance(token: EthereumAddress, account: EthereumAddress) async throws -> UInt256 {
+        if NativeAsset.isNative(token) {
+            return try await latestBalance(of: account)
+        }
         let result = try await callData(
             from: nil,
             to: token,
@@ -148,7 +151,13 @@ public actor OperatorRPCClient: EthereumOperatorRPC {
     ) async throws -> [UInt256] {
         guard !accounts.isEmpty else { return [] }
         let calls = accounts.map { account in
-            OperatorBatchCall(
+            if NativeAsset.isNative(token) {
+                return OperatorBatchCall(
+                    method: "eth_getBalance",
+                    params: [.string(account.hex), .string("latest")]
+                )
+            }
+            return OperatorBatchCall(
                 method: "eth_call",
                 params: [
                     transactionObject(
@@ -197,7 +206,12 @@ public actor OperatorRPCClient: EthereumOperatorRPC {
             return resolved.map { $0! }
         }
         return try results.flatMap { chunk in
-            try chunk.map { try ABI.decodeUInt256(decodeBatchData($0)) }
+            try chunk.map { result in
+                if NativeAsset.isNative(token) {
+                    return try decodeUInt256(decodeBatchString(result))
+                }
+                return try ABI.decodeUInt256(decodeBatchData(result))
+            }
         }
     }
 

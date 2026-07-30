@@ -1,37 +1,46 @@
 # ERC-681 Terminal
 
-ERC-20 payment terminal apps and reusable SDKs for Android and iOS. The apps display canonical
-ERC-681 payment QR codes, can scan QR codes to import configuration addresses, and can settle
-confirmed payments through a tightly constrained device-local operator wallet.
+ERC-20 and chain-native payment terminal apps and reusable SDKs for Android and iOS. The apps
+display canonical ERC-681 payment QR codes, can scan QR codes to import configuration addresses,
+and can settle confirmed payments through a tightly constrained device-local operator wallet.
 
 A terminal can keep up to 32 payment profiles. Each profile binds one known EVM network, merchant
-vault, and ERC-20 token. The same cap is enforced by both native apps and both reusable SDK
-catalogs. The cashier chooses exactly one profile for a sale—for example AUDM on one vault, AUDD on
-another, or USDC on a third—and the resulting invoice requests only that token.
+vault, and payment asset: either an ERC-20 token or the chain's native asset under OPK Protocol 1.6.
+The same cap is enforced by both native apps and both reusable SDK catalogs. The cashier chooses
+exactly one profile for a sale—for example AUDM on one vault, USDC on another, or ETH on a
+native-enabled vault—and the resulting invoice requests only that asset.
 
 The terminal creates a unique invoice, derives its receiver locally with CREATE2, presents a
-canonical ERC-681 QR code, and observes the receiver's ERC-20 balance through read-only JSON-RPC.
-After confirmation, the native app may sign exactly one allowed contract method:
-`ClearingVault.sweepSessions`. The receiver contract then moves the payment into the merchant
-vault; the terminal never chooses a payout destination.
+canonical ERC-681 QR code, and observes the receiver's ERC-20 or native balance through read-only
+JSON-RPC. After confirmation, the native app may sign exactly one allowed contract method:
+`ClearingVault.sweepSessions`. The receiver contract then moves the payment into the merchant vault;
+the terminal never chooses a payout destination or uses receiver funds for gas.
 
 ## For wallet developers
 
-Terminals present payment requests as canonical ERC-681 ERC-20 transfer URIs:
+Terminals present one of two canonical ERC-681 forms. ERC-20 invoices use:
 
 ```text
 ethereum:{TOKEN}@{CHAIN_ID}/transfer?address={RECEIVER}&uint256={RAW_TOKEN_UNITS}
 ```
 
-Example (Base Sepolia, 12.34 units, 18-decimal token):
+Native invoices use the receiver as the target:
+
+```text
+ethereum:{RECEIVER}@{CHAIN_ID}?value={AMOUNT_WEI}
+```
+
+Examples (Base Sepolia, 12.34 units at 18 decimals):
 
 ```text
 ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c&uint256=12340000000000000000
+ethereum:0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c@84532?value=12340000000000000000
 ```
 
-A wallet is compatible if it scans this QR, prefills
-`token.transfer(receiver, amount)` on the specified chain, and lets the user send. Use raw integer
-token units only: no exponents, no percent-encoding, and no native value.
+A wallet is compatible if it scans the relevant QR, prefills either
+`token.transfer(receiver, amount)` or a plain native-value transfer on the specified chain, and lets
+the user send. Use raw integer token units or wei only: no exponents or percent-encoding. The
+EIP-7528 sentinel is an on-chain identifier and never appears in a payment QR.
 
 Machine-readable vectors, including CREATE2 receiver derivation, are in
 [`conformance/opk-erc681-v1.json`](./conformance/opk-erc681-v1.json). Base Sepolia test QR codes
@@ -41,9 +50,9 @@ developer resources.
 
 ## Safety boundary
 
-- ERC-20 `transfer` QR payments only
+- Canonical ERC-20 `transfer` and native `?value=` QR payments only
 - No NFC, contactless-card, customer payment-QR import, or camera-triggered payment action
-- Camera scanning remains available beside contract and token fields in Settings. Those scanners
+- Camera scanning remains available beside contract and payment-asset fields in Settings. Those scanners
   accept only one non-zero EVM address, including an address-only `ethereum:` QR, and reject payment
   URIs and all other payloads without changing the field. A separate setup scanner accepts only the
   strict `opk-terminal:provision` payload documented in [PROVISIONING.md](./PROVISIONING.md).
@@ -56,15 +65,16 @@ developer resources.
   Android rows migrated from the earlier schema keep an empty legacy operator snapshot and remain
   subject to the current-wallet and fresh on-chain authorization checks. The app does not reuse a
   legacy random identifier for new invoices or reinterpret one as a wallet key.
-- Signing is restricted to the invoice profile's chain and vault, zero native value, whitelisted token,
-  confirmed locally persisted invoices, and the `sweepSessions` selector. There is no arbitrary
+- Signing is restricted to the invoice profile's chain and vault, zero transaction value, a
+  whitelisted payment asset, confirmed locally persisted invoices, and the `sweepSessions`
+  selector. There is no arbitrary
   transaction, transfer, approval, payout, refund, deployment, private-key export, or seed import.
 - Vault authorization and native-token gas funding are also new-invoice readiness checks. The apps
   freshly validate configuration, owner/operator authorization, and the selected network profile's
   minimum native-gas reserve (`0.0001 ETH` on Base Sepolia) before creating each customer invoice.
   Failure blocks only new invoice/QR creation; history,
   existing payment monitoring, settlement recovery, and setup remain available. Customer ERC-20
-  payments still go only to one-time receiver addresses.
+  and native payments still go only to one-time receiver addresses.
 - Settings shows the full operator address with Copy and an address-only, chain-qualified funding
   QR. This is the same real EOA whose public address identifies new invoices and whose private key
   signs constrained settlement transactions.
@@ -79,7 +89,9 @@ developer resources.
   both latest and pending native balances as exactly zero twice; late deposits to the retired,
   previously shared address are still possible and unrecoverable.
 
-Native-asset `?value=` requests and non-transfer calls fail closed.
+The native asset is offered only after a successful vault `NATIVE_ASSET()` read returns the exact
+EIP-7528 sentinel and that sentinel is whitelisted. `isPaymentToken(sentinel)` alone is not a
+Protocol 1.6 capability probe. Non-canonical payment forms and all other contract calls fail closed.
 
 ## Public RPC performance policy
 
@@ -99,18 +111,18 @@ is capped at 60 seconds and checked again before key use. Payment polling runs e
 scheduled every 60 seconds. Once cashier work is requested, no new background unit starts; one
 already-started bounded unit may finish or briefly overlap under the global concurrency limit.
 These controls reduce latency and public-endpoint throttling without turning mutable authorization,
-balances, contract links, token metadata, simulation, nonce, fees, or canonical block identity into
+balances, contract links, payment-asset metadata, simulation, nonce, fees, or canonical block identity into
 long-lived cache. Wall-clock time remains dependent on the public endpoint and network conditions.
 
 ## Payment flow
 
 1. Select one configured payment profile, then require the device operator wallet and freshly
-   validate that profile's chain, contracts, vault, token whitelist, token metadata, operator
-   authorization, and native gas reserve.
+   validate that profile's chain, contracts, vault, payment-asset whitelist, asset metadata or
+   native capability, operator authorization, and native gas reserve.
 2. Use the operator public address as the invoice's terminal namespace,
    generate an invoice ID, and derive the counterfactual receiver locally.
-3. Refuse receiver reuse if code or an existing token balance is detected.
-4. Display the canonical ERC-681 ERC-20 transfer QR.
+3. Refuse receiver reuse if code or an existing ERC-20/native balance is detected.
+4. Display the canonical ERC-681 ERC-20 transfer or native-value QR.
 5. Observe partial payment, confirmations, exact payment, overpayment, or expiry. Persist the
    first-detected block hash with its height and restart confirmation depth when that saved cursor
    is missing or no longer canonical. Continue bounded reconciliation of closed and swept QR

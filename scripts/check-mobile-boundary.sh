@@ -193,8 +193,8 @@ if [[ -n "$SCANNER_USAGE_MATCHES" ]]; then
   done <<< "$SCANNER_USAGE_MATCHES"
 fi
 
-# The conformance executable contains a native-value URI as a must-reject fixture. Scan only
-# runtime SDK/app sources for generation, excluding that negative-test target.
+# Protocol 1.6 keeps native settlement on the same sweepSessions entry point. Reject any future
+# native-specific transaction surface; plain-value ERC-681 generation itself is now required.
 NATIVE_SCAN_ROOTS=()
 for candidate in \
   "$REPO_ROOT/android/app/src/main" \
@@ -207,8 +207,16 @@ for candidate in \
   fi
 done
 
-if rg -n -F '?value=' "${NATIVE_SCAN_ROOTS[@]}"; then
-  echo "Mobile boundary check failed: native-asset ERC-681 generation found." >&2
+NATIVE_ENTRYPOINT_PATTERN='sweepSessionsNative|sweepNativeSessions|nativeSweepSessions|settleNative|sweepNative'
+if rg -n "$NATIVE_ENTRYPOINT_PATTERN" "${NATIVE_SCAN_ROOTS[@]}"; then
+  echo "Mobile boundary check failed: native-specific protocol entry point found." >&2
+  exit 1
+fi
+
+if ! rg -q -F '?value=' \
+  "$REPO_ROOT/android/erc681-sdk/src/main" \
+  "$REPO_ROOT/ios/Sources/OPKTerminalCore"; then
+  echo "Mobile boundary check failed: Protocol 1.6 native ERC-681 support is missing." >&2
   exit 1
 fi
 

@@ -29,6 +29,7 @@ public struct ERC681TransferRequest: Hashable, Sendable, Codable {
         amount: UInt256
     ) throws {
         guard !token.isZero, !recipient.isZero else { throw FixedBytesError.zeroAddress }
+        guard recipient != NativeAsset.address else { throw ERC681Error.invalidTarget }
         guard chainID > 0 else { throw ERC681Error.invalidChainID }
         guard !amount.isZero else { throw ERC681Error.nonCanonicalAmount }
         self.token = token
@@ -38,7 +39,10 @@ public struct ERC681TransferRequest: Hashable, Sendable, Codable {
     }
 
     public var canonicalString: String {
-        "ethereum:\(token.hex)@\(chainID)/transfer?address=\(recipient.hex)&uint256=\(amount.decimalString)"
+        if NativeAsset.isNative(token) {
+            return "ethereum:\(recipient.hex)@\(chainID)?value=\(amount.decimalString)"
+        }
+        return "ethereum:\(token.hex)@\(chainID)/transfer?address=\(recipient.hex)&uint256=\(amount.decimalString)"
     }
 
     public static func parse(
@@ -47,23 +51,18 @@ public struct ERC681TransferRequest: Hashable, Sendable, Codable {
     ) throws -> ERC681TransferRequest {
         guard value.hasPrefix("ethereum:") else { throw ERC681Error.invalidScheme }
         let body = value.dropFirst("ethereum:".count)
-        guard !body.hasPrefix("pay-") else { throw ERC681Error.nativeValueNotSupported }
+        guard !body.hasPrefix("pay-") else { throw ERC681Error.invalidTarget }
+        if !body.contains("/") {
+            return try parseNative(body, expectedChainID: expectedChainID)
+        }
         guard let slash = body.firstIndex(of: "/") else { throw ERC681Error.wrongFunction }
         let targetAndChain = body[..<slash]
         let functionAndQuery = body[body.index(after: slash)...]
 
-        guard let at = targetAndChain.lastIndex(of: "@") else { throw ERC681Error.missingChainID }
-        let targetText = String(targetAndChain[..<at])
-        let chainText = String(targetAndChain[targetAndChain.index(after: at)...])
-        guard !chainText.isEmpty,
-              chainText.allSatisfy({ $0 >= "0" && $0 <= "9" }),
-              !chainText.hasPrefix("0") || chainText == "0",
-              let chainID = UInt64(chainText),
-              chainID > 0
-        else { throw ERC681Error.invalidChainID }
-        if let expectedChainID, chainID != expectedChainID {
-            throw ERC681Error.invalidChainID
-        }
+        let (targetText, chainID) = try parseTargetAndChain(
+            targetAndChain,
+            expectedChainID: expectedChainID
+        )
 
         let token: EthereumAddress
         do {
@@ -71,6 +70,7 @@ public struct ERC681TransferRequest: Hashable, Sendable, Codable {
         } catch {
             throw ERC681Error.invalidTarget
         }
+        guard !NativeAsset.isNative(token) else { throw ERC681Error.invalidTarget }
 
         guard let question = functionAndQuery.firstIndex(of: "?") else {
             throw ERC681Error.invalidQuery
@@ -110,22 +110,77 @@ public struct ERC681TransferRequest: Hashable, Sendable, Codable {
         } catch {
             throw ERC681Error.invalidTarget
         }
-        guard amountText.allSatisfy({ $0 >= "0" && $0 <= "9" }),
-              !amountText.isEmpty,
-              amountText != "0",
-              !amountText.hasPrefix("0")
-        else { throw ERC681Error.nonCanonicalAmount }
-        let amount: UInt256
-        do {
-            amount = try UInt256(decimalString: amountText)
-        } catch {
-            throw ERC681Error.nonCanonicalAmount
-        }
+        let amount = try parseAmount(amountText)
         return try ERC681TransferRequest(
             token: token,
             chainID: chainID,
             recipient: recipient,
             amount: amount
         )
+    }
+
+    private static func parseNative(
+        _ body: Substring,
+        expectedChainID: UInt64?
+    ) throws -> ERC681TransferRequest {
+        guard body.filter({ $0 == "?" }).count == 1,
+              let question = body.firstIndex(of: "?")
+        else { throw ERC681Error.invalidQuery }
+        let targetAndChain = body[..<question]
+        let query = body[body.index(after: question)...]
+        guard query.hasPrefix("value="),
+              !query.contains("&"),
+              query.dropFirst("value=".count).count > 0
+        else { throw ERC681Error.invalidQuery }
+        let (targetText, chainID) = try parseTargetAndChain(
+            targetAndChain,
+            expectedChainID: expectedChainID
+        )
+        let recipient: EthereumAddress
+        do {
+            recipient = try EthereumAddress(hex: targetText, allowZero: false)
+        } catch {
+            throw ERC681Error.invalidTarget
+        }
+        guard recipient != NativeAsset.address else { throw ERC681Error.invalidTarget }
+        let amount = try parseAmount(String(query.dropFirst("value=".count)))
+        return try ERC681TransferRequest(
+            token: NativeAsset.address,
+            chainID: chainID,
+            recipient: recipient,
+            amount: amount
+        )
+    }
+
+    private static func parseTargetAndChain(
+        _ value: Substring,
+        expectedChainID: UInt64?
+    ) throws -> (String, UInt64) {
+        guard let at = value.lastIndex(of: "@") else { throw ERC681Error.missingChainID }
+        let targetText = String(value[..<at])
+        let chainText = String(value[value.index(after: at)...])
+        guard !chainText.isEmpty,
+              chainText.allSatisfy({ $0 >= "0" && $0 <= "9" }),
+              !chainText.hasPrefix("0") || chainText == "0",
+              let chainID = UInt64(chainText),
+              chainID > 0
+        else { throw ERC681Error.invalidChainID }
+        if let expectedChainID, chainID != expectedChainID {
+            throw ERC681Error.invalidChainID
+        }
+        return (targetText, chainID)
+    }
+
+    private static func parseAmount(_ value: String) throws -> UInt256 {
+        guard value.allSatisfy({ $0 >= "0" && $0 <= "9" }),
+              !value.isEmpty,
+              value != "0",
+              !value.hasPrefix("0")
+        else { throw ERC681Error.nonCanonicalAmount }
+        do {
+            return try UInt256(decimalString: value)
+        } catch {
+            throw ERC681Error.nonCanonicalAmount
+        }
     }
 }

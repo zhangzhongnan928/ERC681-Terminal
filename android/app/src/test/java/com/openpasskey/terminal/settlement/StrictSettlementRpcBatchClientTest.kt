@@ -3,6 +3,7 @@ package com.openpasskey.terminal.settlement
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.openpasskey.erc681.NativeAsset
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -212,6 +213,81 @@ class StrictSettlementRpcBatchClientTest {
         assertEquals(20, snapshot.canonicalBlockHashes.size)
         assertEquals(snapshot.canonicalBlockHashes, snapshot.canonicalBlockHashesAfter)
         assertEquals(List(20) { BigInteger.valueOf(5) }, snapshot.receiverBalances)
+    }
+
+    @Test
+    fun `native settlement preflight reads each receiver with eth_getBalance`() {
+        val operator = "0x" + "11".repeat(20)
+        val vault = "0x" + "22".repeat(20)
+        val receiver = "0x" + "33".repeat(20)
+        val callData = "0xdeadbeef"
+        val requestsSeen = Collections.synchronizedList(mutableListOf<JsonObject>())
+        val client = StrictSettlementRpcBatchClient.forTest { body ->
+            val requests = JsonParser.parseString(body).asJsonArray.map { it.asJsonObject }
+            requestsSeen += requests
+            JsonArray().apply {
+                requests.reversed().forEach { request ->
+                    val result = when (request.get("method").asString) {
+                        "eth_chainId" -> JsonParser.parseString("\"0x14a34\"")
+                        "eth_getTransactionCount" -> JsonParser.parseString("\"0x1\"")
+                        "eth_gasPrice" -> JsonParser.parseString("\"0x2\"")
+                        "eth_getBalance" -> {
+                            val account = request.getAsJsonArray("params")[0].asString
+                            JsonParser.parseString(if (account == receiver) "\"0x5\"" else "\"0xa\"")
+                        }
+                        "eth_getBlockByNumber" -> {
+                            val tag = request.getAsJsonArray("params")[0].asString
+                            if (tag == "latest") {
+                                JsonObject().apply { addProperty("baseFeePerGas", "0x1") }
+                            } else {
+                                val number = BigInteger(tag.substring(2), 16).toLong()
+                                JsonObject().apply {
+                                    addProperty("number", tag)
+                                    addProperty("hash", blockHash(number))
+                                }
+                            }
+                        }
+                        "eth_call" -> {
+                            val data = request.getAsJsonArray("params")[0].asJsonObject
+                                .get("data").asString
+                            JsonParser.parseString(
+                                if (data == callData) "\"0x\"" else "\"${abiUint(BigInteger.ONE)}\"",
+                            )
+                        }
+                        else -> error("Unexpected method")
+                    }
+                    add(success(request, result))
+                }
+            }.toString()
+        }
+
+        val snapshot = executeSettlementPreflight(
+            batch = client,
+            request = SettlementPreflightRequest(
+                operator,
+                vault,
+                callData,
+                listOf(
+                    SettlementReceiverSafetyRead(
+                        NativeAsset.address.value,
+                        receiver,
+                        100,
+                    ),
+                ),
+            ),
+            includeGasEstimate = false,
+        )
+
+        assertEquals(listOf(BigInteger.valueOf(5)), snapshot.receiverBalances)
+        assertTrue(requestsSeen.any { request ->
+            request.get("method").asString == "eth_getBalance" &&
+                request.getAsJsonArray("params")[0].asString == receiver
+        })
+        assertFalse(requestsSeen.any { request ->
+            request.get("method").asString == "eth_call" &&
+                request.getAsJsonArray("params")[0].asJsonObject.get("to").asString
+                    .equals(NativeAsset.address.value, ignoreCase = true)
+        })
     }
 
     @Test

@@ -4,9 +4,9 @@ The merchant controls vault administration from the OPK Pay Merchant Portal on a
 The terminal never stores a merchant passkey or smart-account signing key. It stores only its own
 device-local settlement EOA and a local administrator PIN verifier.
 
-The setup channel trusts the merchant to select the intended portal account, vault, and token. The
-terminal's chain reads check protocol compatibility and operational readiness; they do not prove
-the merchant's business identity.
+The setup channel trusts the merchant to select the intended portal account, vault, and payment
+asset. The terminal's chain reads check protocol compatibility and operational readiness; they do
+not prove the merchant's business identity.
 
 ## Wire payloads
 
@@ -31,6 +31,11 @@ opk-terminal:provision?v=1&chainId=<chainId>&vault=<vault>&token=<token>&operato
 provisioning `operator` must equal the terminal's local EOA. The shared accepted and rejected vectors
 are in `conformance/opk-terminal-provisioning-v1.json`.
 
+`token` names the on-chain payment asset. It may be an ERC-20 contract or the exact EIP-7528
+sentinel `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` for the chain-native asset. The sentinel is
+used only for configuration and contract calls; it never appears in the native customer payment
+QR.
+
 Confirmation depth is deliberately not a v1 QR field. The first route on an EVM network starts at
 that network's compiled default (one block on Base Sepolia). After provisioning, a merchant
 administrator can choose a value from that network's compiled minimum through 64 in the terminal's
@@ -40,8 +45,8 @@ new invoices; changing it does not rewrite historical invoices or their settleme
 
 Each successful scan atomically adds or updates the profile identified by `(chainId, vault, token)`
 and selects it; it does not delete other configured profiles. The merchant can therefore scan the
-portal setup QR for each desired vault/token combination. A sale selects exactly one stored profile,
-and an invoice never requests multiple tokens. Re-scanning the same identity refreshes its
+portal setup QR for each desired vault/payment-asset combination. A sale selects exactly one stored profile,
+and an invoice never requests multiple payment assets. Re-scanning the same identity refreshes its
 chain-derived metadata without creating a duplicate. The iOS and Android apps and their reusable
 Swift and Kotlin catalogs all enforce a maximum of 32 profiles per terminal.
 
@@ -59,17 +64,29 @@ multisig-governed, implementation-pinned deployment. The checked-in enabled cros
 constants are in `conformance/opk-terminal-networks-v1.json`; the reusable SDK payment-profile
 catalogs remain EVM-generic.
 
-The terminal reads the scanned vault's factory, the pinned factory's implementation, token
-whitelist membership, decimals, and symbol. It performs the complete configuration and CREATE2
-validation before atomically upserting and selecting that payment profile. A failed or cancelled
-attempt does not alter the catalog or its current selection. A retained operational RPC override is checked only for the expected chain
-ID; vault runtime, factory/implementation, whitelist, token metadata, and full provenance validation
+The terminal reads the scanned vault's factory, the pinned factory's implementation, and
+payment-asset whitelist membership. For an ERC-20 it also reads contract code, decimals, and
+symbol. For the native sentinel it instead requires a successful `NATIVE_ASSET()` call returning
+that exact address and uses the immutable chain profile's `ETH`/18-decimal metadata. The whitelist
+mapping alone is not a capability probe: `isPaymentToken(NATIVE_ASSET) == false` is possible on a
+1.5 vault and must not cause native checkout to be offered. The terminal performs the complete
+configuration and CREATE2 validation before atomically upserting and selecting that payment
+profile. A failed or cancelled attempt does not alter the catalog or its current selection. A
+retained operational RPC override is checked only for the expected chain ID; vault runtime,
+factory/implementation, capability, whitelist, payment-asset metadata, and full provenance validation
 come exclusively from the immutable shipped RPC endpoint. The override is persisted only after both
 checks pass. Historical invoices and settlements retain their stored configuration
 snapshots. Before settling one after reprovisioning, the app re-derives its receiver and re-proves
-its network label, factory/implementation pins, vault runtime and factory link, whitelist, and token
-metadata through the immutable shipped RPC endpoint. The stored operational RPC is independently
+its network label, factory/implementation pins, vault runtime and factory link, capability,
+whitelist, and payment-asset metadata through the immutable shipped RPC endpoint. The stored
+operational RPC is independently
 chain-checked for current EOA authorization, exact balances, simulation, and broadcast.
+
+Receiver derivation uses the existing CREATE2 formula, but a receiver commits to the factory and
+receiver implementation. A fresh 1.6 stack must therefore publish new per-chain constants and a
+matching deployment test vector before it can be enabled, and its receiver addresses generally
+differ from the old stack. Address preservation applies only to a beacon upgrade of the existing
+stack.
 
 ## Readiness
 
@@ -83,7 +100,8 @@ Before every new invoice, the terminal fails closed unless all of these are fres
 the selected payment profile:
 
 - the device-local EOA is available;
-- the saved profile and its known-network deployment pins validate;
+- the saved profile, known-network deployment pins, payment-asset whitelist, metadata, and any
+  required native capability validate;
 - the EOA is that profile's vault owner or an authorized operator; and
 - its native balance on that profile's chain meets the compiled network reserve
   (`100000000000000` wei, or `0.0001 ETH`, on Base Sepolia); and

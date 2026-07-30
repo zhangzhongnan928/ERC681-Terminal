@@ -128,7 +128,11 @@ class PaymentObserver(private val chain: ReadOnlyChainClient) {
         val blockHashBefore = requireNotNull(chain.blockHash(block)) {
             "Canonical block $block is unavailable"
         }
-        val balance = chain.tokenBalance(request.token, request.receiver, block)
+        val balance = if (request.isNative) {
+            chain.nativeBalance(request.receiver, block)
+        } else {
+            chain.tokenBalance(request.token, request.receiver, block)
+        }
         val blockHash = requireNotNull(chain.blockHash(block)) {
             "Canonical block $block became unavailable while sampling payment balance"
         }

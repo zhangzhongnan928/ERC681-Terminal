@@ -5,6 +5,7 @@ import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.openpasskey.erc681.EvmAddress
+import com.openpasskey.erc681.NativeAsset
 import com.openpasskey.terminal.data.model.SettlementFeeMode
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -248,6 +249,9 @@ class Web3jSettlementChainClient(rpcUrl: String) : SettlementChainClient {
     }
 
     override fun tokenBalance(tokenAddress: String, accountAddress: String): BigInteger {
+        if (NativeAsset.isNative(EvmAddress.parse(tokenAddress))) {
+            return nativeBalance(accountAddress)
+        }
         val response = web3j.ethCall(
             Transaction.createEthCallTransaction(
                 null,
@@ -520,15 +524,7 @@ internal fun executeSettlementPreflight(
     val primaryCalls = buildList {
         add(SettlementRpcCall("eth_chainId", JsonArray()))
         add(settlementEthCall(vault, SettlementAbi.encodeIsOperator(operator), RPC_LATEST_BLOCK, operator))
-        request.receivers.forEach { receiver ->
-            add(
-                settlementEthCall(
-                    EvmAddress.parse(receiver.tokenAddress).value,
-                    SettlementAbi.encodeBalanceOf(receiver.receiverAddress),
-                    RPC_PENDING_BLOCK,
-                ),
-            )
-        }
+        request.receivers.forEach { receiver -> add(settlementBalanceCall(receiver)) }
         add(settlementEthCall(vault, request.callData, RPC_PENDING_BLOCK, operator))
         add(
             SettlementRpcCall(
@@ -564,8 +560,13 @@ internal fun executeSettlementPreflight(
     val chain = parseQuantity(resultString(primary[primaryIndex++]), "eth_chainId")
         .toLongExactCompat("chain ID")
     val listed = SettlementAbi.decodeIsOperator(resultString(primary[primaryIndex++]))
-    val balances = request.receivers.map {
-        SettlementAbi.decodeUint256Word(resultString(primary[primaryIndex++]))
+    val balances = request.receivers.map { receiver ->
+        val result = resultString(primary[primaryIndex++])
+        if (NativeAsset.isNative(EvmAddress.parse(receiver.tokenAddress))) {
+            parseQuantity(result, "eth_getBalance")
+        } else {
+            SettlementAbi.decodeUint256Word(result)
+        }
     }
     resultString(primary[primaryIndex++]) // A reverted simulation is represented as an RPC error.
     val nonce = parseQuantity(resultString(primary[primaryIndex++]), "eth_getTransactionCount")
@@ -655,6 +656,26 @@ private fun settlementEthCall(
         add(blockTag)
     },
 )
+
+private fun settlementBalanceCall(receiver: SettlementReceiverSafetyRead): SettlementRpcCall {
+    val asset = EvmAddress.parse(receiver.tokenAddress)
+    val holder = EvmAddress.parse(receiver.receiverAddress)
+    return if (NativeAsset.isNative(asset)) {
+        SettlementRpcCall(
+            "eth_getBalance",
+            JsonArray().apply {
+                add(holder.value)
+                add(RPC_PENDING_BLOCK)
+            },
+        )
+    } else {
+        settlementEthCall(
+            asset.value,
+            SettlementAbi.encodeBalanceOf(holder.value),
+            RPC_PENDING_BLOCK,
+        )
+    }
+}
 
 private const val RPC_LATEST_BLOCK = "latest"
 private const val RPC_PENDING_BLOCK = "pending"

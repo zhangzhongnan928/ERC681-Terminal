@@ -900,7 +900,7 @@ final class AppModel: ObservableObject {
                 let configuration = try TerminalConfiguration(
                     chainID: trustedProfile.chainID,
                     rpcEndpoints: [trustedProfile.rpcEndpoint],
-                    protocolVersion: trustedProfile.protocolVersion,
+                    protocolVersion: operational?.protocolVersion ?? trustedProfile.protocolVersion,
                     deployment: deployment,
                     tokens: operational?.tokens ?? [resetOnlyToken],
                     confirmationPolicy: operational?.confirmationPolicy

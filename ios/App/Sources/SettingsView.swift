@@ -312,7 +312,13 @@ struct SettingsView: View {
                     "Receiver implementation",
                     value: abbreviatedSetup(model.settings.receiverImplementation)
                 )
-                LabeledContent("Token", value: abbreviatedSetup(model.settings.tokenAddress))
+                LabeledContent(
+                    "Asset",
+                    value: settingsAssetLabel(
+                        model.settings.tokenAddress,
+                        nativeSymbol: model.settings.tokenSymbol
+                    )
+                )
                 LabeledContent("Symbol", value: model.settings.tokenSymbol)
                 LabeledContent("Decimals", value: model.settings.tokenDecimals)
                 LabeledContent("RPC", value: model.settings.rpcURL)
@@ -393,7 +399,7 @@ struct SettingsView: View {
         if let operatorAddress = model.operatorAddress, model.adminPINConfigured {
             Section {
                 DisclosureGroup("Advanced manual setup") {
-                    Text("Choose a trusted EVM network, then enter or scan only the vault and token. Factory, implementation, decimals, and symbol are derived and pinned on chain. A successful import adds or updates one payment profile.")
+                    Text("Choose a trusted EVM network, then enter or scan only the vault and payment-asset identifier. Factory, implementation, decimals, and symbol are derived and pinned on chain. A successful import adds or updates one payment profile.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     Picker("Network", selection: $manualChainID) {
@@ -414,7 +420,7 @@ struct SettingsView: View {
                         onSubmit: { focusedField = .token }
                     )
                     AddressField(
-                        "Token",
+                        "Payment asset",
                         text: $manualToken,
                         focus: $focusedField,
                         field: .token,
@@ -684,6 +690,13 @@ struct SettingsView: View {
             set: { if !$0 { profilePendingRemoval = nil } }
         )
     }
+}
+
+private func settingsAssetLabel(_ address: String, nativeSymbol: String) -> String {
+    guard let parsed = try? EthereumAddress(hex: address, allowZero: false) else {
+        return abbreviatedSetup(address)
+    }
+    return NativeAsset.isNative(parsed) ? nativeSymbol : abbreviatedSetup(address)
 }
 
 private struct ReadinessLabel: View {

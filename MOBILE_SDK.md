@@ -1,6 +1,15 @@
 # OPK ERC-681 mobile terminal and SDK
 
-This mobile build accepts one payment rail: an ERC-20 `transfer` requested by an ERC-681 QR code. A terminal may store up to 32 EVM payment profiles, where each profile binds one known network, vault, and token; the Android app, iOS app, Kotlin catalog, and Swift catalog enforce the same cap. A cashier selects exactly one profile per invoice. The Android and iOS apps create invoices, render the payment QR, and observe token balances. Their cameras can import individual contract and token addresses in Settings or scan the separate strict `opk-terminal:provision` setup payload; payment QR payloads are rejected and never imported or acted on. The reusable payment SDKs remain keyless and read-only. Each native app also has an isolated, device-local operator module that can submit only a constrained `ClearingVault.sweepSessions` transaction after payment confirmation.
+This mobile build accepts ERC-20 transfers and OPK Protocol 1.6 chain-native payments through
+canonical ERC-681 QR codes. A terminal may store up to 32 EVM payment profiles, where each profile
+binds one known network, vault, and payment asset; the Android app, iOS app, Kotlin catalog, and
+Swift catalog enforce the same cap. A cashier selects exactly one profile per invoice. The Android
+and iOS apps create invoices, render the asset-specific payment QR, and observe receiver balances.
+Their cameras can import individual contract and payment-asset identifiers in Settings or scan the
+separate strict `opk-terminal:provision` setup payload; payment QR payloads are rejected and never
+imported or acted on. The reusable Core/RPC payment SDKs remain keyless and read-only. Each native
+app also has an isolated, device-local operator module that can submit only a constrained
+`ClearingVault.sweepSessions` transaction after payment confirmation.
 
 ## Safety boundary
 
@@ -10,13 +19,24 @@ The payment SDK source is intentionally limited to:
 - canonical ERC-681 encoding and strict parsing;
 - payment QR display;
 - Settings-only camera scanning for strict address fields and the separate provisioning payload;
-- read-only JSON-RPC calls for chain/configuration checks and `balanceOf` observation;
+- read-only JSON-RPC calls for chain/configuration checks, ERC-20 `balanceOf`, and native
+  `eth_getBalance` observation;
 - local invoice persistence and recovery; and
 - a data-only handoff that a native app may pass into its isolated operator module.
 
 There is no NFC, contactless-card path, customer payment-QR import or action, unlocked-node signing, arbitrary transaction API, seed import, or private-key export. Camera access belongs only to the native app Settings UI. Address scan buttons fill only their selected address field, while the separate setup button accepts only the exact provisioning grammar; the reusable SDKs remain camera-free. The payment SDKs cannot call `sweepSessions`, payout, refund, deploy, approve, or transfer. Do not add a private key to an app configuration or RPC URL.
 
-The native operator implementation is a separate trust boundary. It generates one secp256k1 key on the device and restricts signing to an invoice snapshot's known chain and vault, native value zero, the `sweepSessions(bytes32[],uint256[],address)` selector, that profile's whitelisted token, and locally persisted paid or overpaid invoices or confirmed late value at a previously swept receiver. It cannot select a recipient or call payout, refund, rescue, approval, transfer, or deployment methods. The shipped apps require this wallet to exist before creating a payment request and use its public address as the terminal identity for every new invoice. The merchant separately authorizes that same address on each configured vault and pre-funds it with each used network's native token before the corresponding profile accepts a new invoice; the same checks run again before settlement.
+The native operator implementation is a separate trust boundary. It generates one secp256k1 key
+on the device and restricts signing to an invoice snapshot's known chain and vault, transaction
+value zero, the `sweepSessions(bytes32[],uint256[],address)` selector, that profile's whitelisted
+payment asset, and locally persisted paid or overpaid invoices or confirmed late value at a
+previously swept receiver. It cannot select a recipient or call payout, refund, rescue, approval,
+transfer, or deployment methods. The shipped apps require this wallet to exist before creating a
+payment request and use its public address as the terminal identity for every new invoice. The
+merchant separately authorizes that same address on each configured vault and pre-funds it with
+each used network's native token before the corresponding profile accepts a new invoice; the same
+checks run again before settlement. On a native invoice the receiver owns the payment while the
+operator EOA pays gas; the settlement transaction never draws gas from receiver funds.
 
 On Android, the secp256k1 scalar is encrypted with an AES-GCM wrapping key held by Android
 Keystore; only the device-bound ciphertext and IV are stored in private app preferences, and all
@@ -36,29 +56,48 @@ recipient, navigate to Payment, or invoke RPC. Camera frames are processed on-de
 ephemeral: the app does not log, persist, or transmit frames or rejected payloads. Imported values
 still pass the same local and on-chain validation as manually entered settings before any payment
 QR can be created. Denying camera access, cancelling, or using a camera-less device leaves manual
-entry available. The additive setup scanner has a different exact grammar and derives factory,
-receiver implementation, token decimals, and token symbol from read-only chain calls. It accepts
-only immutable, app-pinned deployment profiles and atomically upserts the complete payment profile
-after every pin, CREATE2, whitelist, metadata, and existing full-validation check succeeds. See
+entry available. The additive setup scanner has a different exact grammar and derives the factory
+and receiver implementation from read-only chain calls. For ERC-20 assets it also derives decimals
+and symbol from the token contract. For the native sentinel it accepts the immutable chain
+profile's 18-decimal native metadata only after a successful vault `NATIVE_ASSET()` read returns
+that sentinel. It accepts only immutable, app-pinned deployment profiles and atomically upserts the
+complete payment profile after every pin, CREATE2, capability, whitelist, metadata, and existing
+full-validation check succeeds. See
 [PROVISIONING.md](./PROVISIONING.md) for the pairing payloads and recovery model.
 
 ## Canonical payment request
 
-Only this exact ERC-20 function form is accepted:
+The SDKs emit and accept exactly one form for each payment-asset class.
+
+ERC-20 transfer:
 
 ```text
 ethereum:{TOKEN}@{CHAIN_ID}/transfer?address={RECEIVER}&uint256={RAW_TOKEN_UNITS}
 ```
 
-For the shared test vector:
+Native value transfer:
+
+```text
+ethereum:{RECEIVER}@{CHAIN_ID}?value={AMOUNT_WEI}
+```
+
+For the shared test vectors:
 
 ```text
 ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c&uint256=12340000000000000000
+ethereum:0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c@84532?value=12340000000000000000
 ```
 
-Addresses are emitted in lower-case hexadecimal. The chain ID and positive `uint256` amount use plain base-10 integers without signs, exponents, leading zeroes, extra parameters, or parameter reordering. Native-asset `?value=` and `approve` fail closed. Pass the configured chain ID to the parser so a request for another chain also fails closed.
+Addresses are emitted in lower-case hexadecimal. The chain ID and positive raw amount use plain
+base-10 integers without signs, exponents, leading zeroes, extra parameters, or parameter
+reordering. Native amounts are raw wei with 18 decimals. The EIP-7528 sentinel is an on-chain asset
+identifier and never appears in a customer payment QR; the native target is the receiver itself.
+Other function calls, including `approve`, fail closed. Pass the configured chain ID to the parser
+so a request for another chain also fails closed.
 
-The amount in an ERC-681 URI is a wallet suggestion. The observer measures the actual token balance, keeps partial payments open, waits for the configured block count, and reports overpayment separately.
+The amount in an ERC-681 URI is a wallet suggestion. The observer measures the receiver's actual
+ERC-20 or native balance, keeps partial payments open, waits for the configured block count, and
+reports overpayment separately.
 
 ### Public-RPC request scheduling
 
@@ -87,13 +126,14 @@ RPC cache.
 ## Invoice lifecycle
 
 1. Require the device operator wallet and freshly validate the RPC chain, deployed code,
-   factory/implementation link, vault/factory link, token whitelist and metadata, vault
+   factory/implementation link, vault/factory link, payment-asset whitelist, metadata and native
+   capability when applicable, vault
    owner/operator authorization, and the minimum native gas reserve.
 2. Use the operator public address as `terminalIdentifier`, and generate
    `invoiceId = keccak256(abi.encode(terminalIdentifier, timestamp, nonce))`.
 3. Derive the receiver locally with the protocol's 88-byte CREATE2 init code. Do not trust an RPC response for this address.
 4. Render `erc681Uri`/`erc681URI` as a customer-facing payment QR. The configuration scanner rejects this payload without importing or acting on it.
-5. Poll the token's `balanceOf(receiver)` at an explicit block.
+5. Poll the ERC-20's `balanceOf(receiver)` or the receiver's `eth_getBalance` at an explicit block.
 6. Persist waiting, partial, confirming, paid, overpaid, and expired state, including both the first-detected block number and its canonical block hash. A missing or non-canonical saved hash resets confirmation depth from a fresh canonical observation. While the app is active, recover only a small least-recently-attempted batch of open invoices and likewise reconcile a small durable batch of closed, partially settled, settled, and ambiguous-review receivers. Attempt timestamps are stored before RPC work so restart or cancellation cannot repeatedly starve the tail.
 7. After a paid or overpaid observation, place the invoice in the native settlement queue without destroying the confirmed payment evidence. Track newly observed post-sweep value separately, wait for confirmations, and then permit another idempotent sweep of that receiver.
 8. Verify the operator address, vault authorization, chain, gas balance, invoice snapshots, receiver balances, confirmation-cursor block hashes, simulation, and gas estimate before asking the user to approve signing. Revalidate each cursor and live balance again immediately before signing.
@@ -107,7 +147,12 @@ complete a partial settlement without counting an RPC replay twice. Once cumulat
 covers the original invoice, a repeat settlement still requires a new positive canonical event;
 historical proof must never turn a zero repeat event into proof of newly observed value.
 
-The reusable SDKs never sweep the receiver. A native app may pass their data-only handoff into its separate approved operator module. On the shipped v1.5 deployment, transaction receipt success alone is not proof of settlement: the app must decode a fully matching confirmed `Swept` event and record the actual amount. The token-scoped v1.5 settlement counters are supplementary state and do not replace canonical event proof.
+The reusable payment SDKs never sweep the receiver. A native app may pass their data-only handoff
+into its separate approved operator module. ERC-20 routes use OPK Protocol 1.5 and native routes use
+OPK Protocol 1.6, but transaction receipt success alone is never proof of settlement: the app must
+decode a fully matching confirmed `Swept` event and record a positive actual amount. The
+asset-scoped settlement counters, including `settled(invoiceId, NATIVE_ASSET)` for native invoices,
+are supplementary state and do not replace canonical event proof.
 
 `terminalIdentifier` remains the protocol and reusable-SDK name for a generic, non-secret 20-byte
 invoice namespace. The reusable SDK does not require that namespace to have a private key. The
@@ -129,6 +174,7 @@ The default development network is Base Sepolia, chain ID `84532`:
 | Deployed vault-proxy runtime hash | `0x2ceea713f7225b17e43487b8652d8582dadd5aabefc5b9f78d231777958655b9` |
 | CREATE2 example vault | `0x1111111111111111111111111111111111111111` |
 | AUD test token | `0x7ffba642bc902880a737cb1c18a4e9540879e211` (18 decimals) |
+| Native asset identifier | `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` (`ETH`, 18 decimals) |
 
 The runtime hash is over the exact on-chain proxy bytecode, including the Base Sepolia beacon
 immutable (`0x36540ec21ea454a11fbeb96bf7f8653d078da9cf`). Do not substitute the upstream browser
@@ -136,8 +182,11 @@ deployer's zero-immutable artifact hash when validating `eth_getCode`; it does n
 deployed vault.
 
 The example vault is an off-chain CREATE2 test input, not a deployed merchant vault. A production
-terminal remains unprovisioned until it validates a live v1.5 merchant vault and whitelisted token
-from a portal provisioning QR.
+terminal remains unprovisioned until it validates a compatible live merchant vault and whitelisted
+payment asset from a portal provisioning QR. An ERC-20 route may validate against OPK Protocol 1.5.
+A native route additionally requires a successful `NATIVE_ASSET()` read returning the exact
+sentinel and that sentinel's whitelist entry; `isPaymentToken(NATIVE_ASSET) == false` does not
+establish that a vault predates 1.6.
 
 Base Sepolia is the only network enabled in the production apps in this release. The Swift and
 Kotlin profile catalogs are EVM-generic and can model routes on other EVM chains, but an app rejects
@@ -149,6 +198,12 @@ native-currency metadata, and minimum gas reserve in both native registries. A Q
 these values.
 The enabled cross-platform pins and vectors are recorded in
 `conformance/opk-terminal-networks-v1.json`.
+
+A fresh OPK Protocol 1.6 deployment changes receiver addresses when its factory or receiver
+implementation changes. Native checkout must therefore remain disabled for that stack until its
+published per-chain deployment record supplies the reviewed factory, receiver implementation,
+runtime hashes, and matching CREATE2 test vector. Only an in-place beacon upgrade of the existing
+stack can preserve its receiver commitments.
 
 Base Sepolia's compiled confirmation minimum and fresh-network default are both `1`; the block that
 contains the payment counts as confirmation one. A merchant administrator may select a value from
@@ -213,7 +268,7 @@ Outputs:
 - unsigned, minified release APK: `android/app/build/outputs/apk/release/app-release-unsigned.apk`
 - SDK JAR and sources: `android/erc681-sdk/build/libs/`
 - Maven repository: `android/erc681-sdk/build/repository/`
-- Maven coordinate: `com.openpasskey:opk-erc681-sdk:0.1.0`
+- Maven coordinate: `com.openpasskey:opk-erc681-sdk:0.2.0`
 
 Point a terminal project at the local repository and add the dependency:
 
@@ -223,7 +278,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.openpasskey:opk-erc681-sdk:0.1.0")
+    implementation("com.openpasskey:opk-erc681-sdk:0.2.0")
 }
 ```
 
@@ -233,7 +288,7 @@ A minimal Kotlin integration looks like this. Run the RPC calls away from the UI
 import com.openpasskey.erc681.*
 
 val provisionedVault = EvmAddress.parse(requireNotNull(loadProvisionedMerchantVault()))
-val provisionedToken = EvmAddress.parse(requireNotNull(loadProvisionedPaymentToken()))
+val provisionedAsset = EvmAddress.parse(requireNotNull(loadProvisionedPaymentAsset()))
 val network = NetworkConfig(
     chainId = 84532,
     rpcUrl = "https://sepolia.base.org",
@@ -241,19 +296,27 @@ val network = NetworkConfig(
     receiverImplementation = EvmAddress.parse("0x8ba9739741ecc79b5d69fe5580d2966092e6f77f"),
     vault = provisionedVault,
 )
-val token = provisionedToken
+val paymentAsset = provisionedAsset
 val rpc = ReadOnlyRpcClient(network)
-val validated = rpc.validate(token, expectedDecimals = 18)
+val validated = if (NativeAsset.isNative(paymentAsset)) {
+    rpc.validate(
+        paymentAsset,
+        expectedDecimals = NativeAsset.DECIMALS,
+        expectedSymbol = "ETH",
+    )
+} else {
+    rpc.validate(paymentAsset)
+}
 val profile = PaymentProfile(
     network = network,
     token = PaymentTokenConfig(
-        address = token,
+        address = paymentAsset,
         symbol = validated.tokenSymbol,
         decimals = validated.tokenDecimals,
     ),
 )
 
-// Upsert other independently validated EVM network/vault/token profiles the same way.
+// Upsert other independently validated EVM network/vault/payment-asset profiles the same way.
 val catalog = PaymentProfileCatalog(listOf(profile), profile.id)
 val selected = requireNotNull(catalog.selected)
 
@@ -283,10 +346,11 @@ if (observation.status == PaymentStatus.PAID) {
 }
 ```
 
-This release intentionally accepts protocol v1.5 configurations only. Profiles and invoices from
-pre-release v1.4 builds are unsupported and must not be reinterpreted under the v1.5 deployment
-pins. Reset any development install carrying those obsolete local records before provisioning a
-live v1.5 merchant vault.
+ERC-20 routes remain compatible with OPK Protocol 1.5. A native-sentinel route requires OPK
+Protocol 1.6, a successful exact `NATIVE_ASSET()` capability read, and whitelist membership on that
+vault. Profiles and invoices from pre-release v1.4 builds are unsupported and must not be
+reinterpreted under current deployment pins. Reset any development install carrying those
+obsolete local records before provisioning a live merchant vault.
 
 ## Swift package and iOS app
 
@@ -309,8 +373,8 @@ let provisionedVault = try EthereumAddress(
     hex: loadProvisionedMerchantVault(),
     allowZero: false
 )
-let provisionedToken = try EthereumAddress(
-    hex: loadProvisionedPaymentToken(),
+let provisionedAsset = try EthereumAddress(
+    hex: loadProvisionedPaymentAsset(),
     allowZero: false
 )
 let deployment = try OPKDeployment(
@@ -318,16 +382,17 @@ let deployment = try OPKDeployment(
     receiverImplementation: EthereumAddress(hex: "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f", allowZero: false),
     vault: provisionedVault
 )
+let isNative = NativeAsset.isNative(provisionedAsset)
 let token = try PaymentToken(
-    address: provisionedToken,
-    symbol: "AUD",
-    decimals: 18
+    address: provisionedAsset,
+    symbol: isNative ? "ETH" : "AUD",
+    decimals: isNative ? NativeAsset.decimals : 18
 )
 let endpoint = URL(string: "https://sepolia.base.org")!
 let configuration = try TerminalConfiguration(
     chainID: 84_532,
     rpcEndpoints: [endpoint],
-    protocolVersion: .v1_5,
+    protocolVersion: isNative ? .v1_6 : .v1_5,
     deployment: deployment,
     tokens: [token],
     confirmationPolicy: .init(requiredBlocks: 1)
@@ -337,7 +402,7 @@ let rpc = try JSONRPCEthereumClient(endpoint: endpoint)
 _ = try await ConfigurationValidator(rpc: rpc).validate(configuration)
 let profile = try TerminalPaymentProfile(configuration: configuration, token: token)
 
-// Upsert other independently validated EVM network/vault/token profiles the same way.
+// Upsert other independently validated EVM network/vault/payment-asset profiles the same way.
 let catalog = try TerminalPaymentProfileCatalog(
     profiles: [profile],
     selectedProfileID: profile.id
@@ -419,7 +484,13 @@ release.
 
 `SettlementHandoff` is plain metadata: chain, vault, token, invoice IDs, expected amounts/observed amount, and receivers. It contains no private key, signature, calldata, gas settings, transaction value, or broadcast method.
 
-Only create or export a handoff after the terminal has a paid/overpaid observation with the required confirmations. The native app operator module must independently authenticate its user, rebuild and validate the intended calldata, simulate it, estimate fees, obtain explicit approval, sign through its constrained device-local key, persist before broadcast, and verify the on-chain result. Those capabilities remain outside both reusable payment SDKs.
+Only create or export a handoff after the terminal has a paid/overpaid observation with the
+required confirmations. The native app operator module must independently authenticate its user,
+rebuild and validate the intended calldata, simulate it, estimate fees, obtain explicit approval,
+sign through its constrained device-local key, persist before broadcast, and verify the on-chain
+result. These write capabilities remain outside `OPKTerminalCore`, `OPKTerminalRPC`, and the
+Android payment SDK; the separately isolated Swift `OPKTerminalOperator` product owns the iOS
+implementation.
 
 ### Operator setup and funding
 
@@ -427,9 +498,9 @@ Only create or export a handoff after the terminal has a paid/overpaid observati
    address becomes the terminal identity for every new invoice. The private scalar is not exported,
    backed up, synchronized, placed on the clipboard, or stored in ordinary app preferences.
 2. Scan the terminal's operator-pairing QR in the merchant portal. For each desired currency,
-   confirm `grantOperator(address)` on its vault and scan that vault/token's operator-bound
+   confirm `grantOperator(address)` on its vault and scan that vault/payment-asset's operator-bound
    provisioning QR back on the terminal. The terminal derives and validates every deployment and
-   token field before atomically adding or updating that profile.
+   payment-asset field before atomically adding or updating that profile.
 3. Send at least the selected network's compiled native-gas reserve to the operator address for gas
    only (`0.0001 ETH` on Base Sepolia). Do not send customer payment tokens to it. The Settings UI
    displays the exact address, chain, funding QR, balance, authorization state, and readiness
@@ -445,15 +516,17 @@ invoice namespace.
 ### Settlement transaction lifecycle
 
 - Group only paid or overpaid invoices, or previously swept invoices with separately confirmed
-  positive late value, with the same immutable chain, RPC, deployment, vault, token metadata, and
+  positive late value, with the same immutable chain, RPC, deployment, vault, payment-asset
+  metadata, and
   confirmation policy; batches are capped.
 - Encode `sweepSessions(bytes32[],uint256[],address)` locally using each invoice's original expected
   raw amount. Reject empty, duplicate, mixed, zero, or corrupted inputs.
-- Check the historical invoice profile's chain, contract links, token whitelist, operator authorization, confirmed
+- Check the historical invoice profile's chain, contract links, payment-asset whitelist and native
+  capability when applicable, operator authorization, confirmed
   receiver balances, simulation, gas estimate, current pending nonce, and conservative maximum fee.
 - Before sweeping an invoice from an earlier provisioning, re-derive its receiver and re-prove its
-  network label, known-chain factory/implementation pins, vault runtime/factory link, token
-  whitelist, and token metadata through the immutable shipped RPC. Separately chain-check the
+  network label, known-chain factory/implementation pins, vault runtime/factory link, payment-asset
+  whitelist, capability, and metadata through the immutable shipped RPC. Separately chain-check the
   stored operational RPC, recheck current EOA authorization/exact balances/simulation immediately
   before signing, then atomically activate that historical chain/vault target for the constrained signer.
 - Persist the exact signed raw transaction, hash, nonce, fees, calldata, and invoice set before

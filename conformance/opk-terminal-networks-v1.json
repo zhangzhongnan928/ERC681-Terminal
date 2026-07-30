@@ -7,7 +7,9 @@
     "The CREATE2 example vault is a deterministic test input, not a deployed merchant vault.",
     "The vault runtime code hash is the exact deployed Base Sepolia proxy runtime with beacon 0x36540ec21ea454a11fbeb96bf7f8653d078da9cf embedded; it intentionally does not use the zero-immutable artifact hash recorded by the upstream browser deployer.",
     "The CREATE2 vectors use the same example vault and invoice ID so implementations can prove that network-specific factory and receiver implementation constants produce the published receiver.",
-    "One payment profile selects exactly one network, vault, and ERC-20 token for an invoice.",
+    "One payment profile selects exactly one network, vault, and payment asset for an invoice.",
+    "These Base Sepolia factory and receiver implementation pins remain the published 1.5 deployment constants; do not substitute unpublished fresh-1.6 stack addresses.",
+    "A vault on this pinned stack offers the native asset only after NATIVE_ASSET() succeeds with the EIP-7528 sentinel and isPaymentToken(sentinel) is true.",
     "The compiled confirmation value is a floor and fresh-network default. A merchant administrator may choose a network policy at or above the floor; every profile on that chain shares it, and the provisioning QR cannot override it."
   ],
   "networks": [

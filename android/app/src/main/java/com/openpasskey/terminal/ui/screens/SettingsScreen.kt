@@ -53,6 +53,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
+import com.openpasskey.erc681.EvmAddress
+import com.openpasskey.erc681.NativeAsset
 import com.openpasskey.terminal.ui.components.DeviceAuthentication
 import com.openpasskey.terminal.ui.components.AddressScannerDialog
 import com.openpasskey.terminal.ui.components.ProvisioningScannerDialog
@@ -509,8 +511,8 @@ private fun ConfigurationSummary(
                 )
                 SummaryLine("Vault", profile.vaultAddress)
                 SummaryLine(
-                    "Token",
-                    "${profile.token.address} · ${profile.token.decimals} decimals",
+                    "Asset",
+                    "${paymentAssetSettingsLabel(profile)} · ${profile.token.decimals} decimals",
                 )
                 SummaryLine("Protocol", profile.protocolVersion)
                 SummaryLine("Factory", profile.factoryAddress)
@@ -687,7 +689,7 @@ private fun AdvancedManualSetupDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "Choose a verified EVM deployment, then enter or scan the vault and token. " +
+                    "Choose a verified EVM deployment, then enter or scan the vault and payment asset. " +
                         "Factory, receiver implementation, symbol, and decimals remain chain-derived and pinned.",
                 )
                 ExposedDropdownMenuBox(
@@ -722,7 +724,9 @@ private fun AdvancedManualSetupDialog(
                     }
                 }
                 ManualAddressField("Vault address", vault, { vault = it }) { scanTarget = "vault" }
-                ManualAddressField("Token contract", token, { token = it }) { scanTarget = "token" }
+                ManualAddressField("Payment asset identifier", token, { token = it }) {
+                    scanTarget = "token"
+                }
             }
         },
         confirmButton = {
@@ -836,7 +840,14 @@ internal fun paymentProfileRemovalConfirmationMessage(
         ""
     }
     return "Remove ${profile.token.symbol} on ${profile.networkName} for vault " +
-        "${profile.vaultAddress} and token ${profile.token.address} from future checkouts?" +
+        "${profile.vaultAddress} and asset ${paymentAssetSettingsLabel(profile)} from future checkouts?" +
         consequence + " Existing invoices, payment monitoring, and settlement history keep their " +
-        "immutable network, vault, and token snapshots."
+        "immutable network, vault, and payment-asset snapshots."
 }
+
+private fun paymentAssetSettingsLabel(profile: TerminalPaymentProfile): String =
+    if (NativeAsset.isNative(EvmAddress.parse(profile.token.address))) {
+        profile.token.symbol
+    } else {
+        profile.token.address
+    }

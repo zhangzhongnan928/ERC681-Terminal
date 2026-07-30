@@ -2,6 +2,7 @@ package com.openpasskey.terminal.settlement
 
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.openpasskey.erc681.NativeAsset
 import com.openpasskey.terminal.data.model.SettlementFeeMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -25,7 +26,7 @@ class SettlementConformanceTest {
     @Test
     fun `fixture versions and canonical authorization calldata match`() {
         assertEquals(2, root["schemaVersion"].asInt)
-        assertEquals("1.5", root["paymentVectorVersion"].asString)
+        assertEquals("1.6", root["paymentVectorVersion"].asString)
         assertEquals("1.5", root["deploymentProtocolVersion"].asString)
         assertEquals("1.5", abi["protocolVersion"].asString)
         assertEquals(abi["isOperatorCalldata"].asString, SettlementAbi.encodeIsOperator(abi["operator"].asString))
@@ -71,6 +72,27 @@ class SettlementConformanceTest {
                 token
             )
         }
+    }
+
+    @Test
+    fun `native asset uses the unchanged sweepSessions entry point`() {
+        val encoded = SettlementAbi.encodeSweepSessions(
+            listOf(
+                SettlementInvoiceIntent(
+                    invoiceId(),
+                    receiverAddress(),
+                    BigInteger.ONE,
+                ),
+            ),
+            NativeAsset.address.value,
+        )
+
+        assertTrue(encoded.startsWith(abi["sweepSessionsSelector"].asString))
+        val tokenWord = encoded.removePrefix("0x").drop(8).chunked(64)[2]
+        assertEquals(
+            NativeAsset.address.value.removePrefix("0x"),
+            tokenWord.takeLast(40),
+        )
     }
 
     @Test

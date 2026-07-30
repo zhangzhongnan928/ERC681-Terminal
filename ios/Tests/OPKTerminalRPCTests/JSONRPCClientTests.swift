@@ -34,6 +34,7 @@ final class JSONRPCClientTests: XCTestCase {
             #"{"jsonrpc":"2.0","id":3,"result":{"number":"0x10","hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
             #"{"jsonrpc":"2.0","id":4,"result":"0x6001"}"#,
             #"{"jsonrpc":"2.0","id":5,"result":"0x000000000000000000000000000000000000000000000000000000000000002a"}"#,
+            #"{"jsonrpc":"2.0","id":6,"result":"0x2a"}"#,
         ])
         let client = try JSONRPCEthereumClient(
             endpoint: URL(string: "https://rpc.example")!,
@@ -57,9 +58,11 @@ final class JSONRPCClientTests: XCTestCase {
             block: .number(16)
         )
         XCTAssertEqual(try ABI.decodeUInt256(result), UInt256(42))
+        let balance = try await client.balance(of: address, block: .number(16))
+        XCTAssertEqual(balance, UInt256(42))
 
         let bodies = await transport.requestBodies
-        XCTAssertEqual(bodies.count, 5)
+        XCTAssertEqual(bodies.count, 6)
         let blockBody = String(decoding: bodies[2], as: UTF8.self)
         XCTAssertTrue(blockBody.contains("eth_getBlockByNumber"))
         XCTAssertTrue(blockBody.contains("0x10"))
@@ -67,6 +70,10 @@ final class JSONRPCClientTests: XCTestCase {
         XCTAssertTrue(callBody.contains("eth_call"))
         XCTAssertTrue(callBody.contains("0x10"))
         XCTAssertTrue(callBody.contains(ABI.decimalsSelector.hexString))
+        let balanceBody = String(decoding: bodies[5], as: UTF8.self)
+        XCTAssertTrue(balanceBody.contains("eth_getBalance"))
+        XCTAssertTrue(balanceBody.contains(address.hex))
+        XCTAssertTrue(balanceBody.contains("0x10"))
     }
 
     func testServerErrorIsPreserved() async throws {
@@ -130,6 +137,13 @@ final class JSONRPCClientTests: XCTestCase {
         XCTAssertEqual(try JSONRPCEthereumClient.decodeQuantity("0xff"), 255)
         XCTAssertThrowsError(try JSONRPCEthereumClient.decodeQuantity("0x00"))
         XCTAssertThrowsError(try JSONRPCEthereumClient.decodeQuantity("255"))
+        XCTAssertEqual(try JSONRPCEthereumClient.decodeUInt256Quantity("0x0"), .zero)
+        XCTAssertEqual(try JSONRPCEthereumClient.decodeUInt256Quantity("0xff"), UInt256(255))
+        XCTAssertThrowsError(try JSONRPCEthereumClient.decodeUInt256Quantity("0x00"))
+        XCTAssertThrowsError(try JSONRPCEthereumClient.decodeUInt256Quantity("255"))
+        XCTAssertThrowsError(
+            try JSONRPCEthereumClient.decodeUInt256Quantity("0x1" + String(repeating: "0", count: 64))
+        )
     }
 
     func testCanonicalBlockHashRejectsMismatchedReturnedBlockNumber() async throws {

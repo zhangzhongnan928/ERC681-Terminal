@@ -24,6 +24,10 @@ interface ReadOnlyChainClient {
 
     fun tokenBalance(token: EvmAddress, holder: EvmAddress, blockNumber: Long? = null): BigInteger
 
+    /** Native balance at an optional fixed block. Alternate clients fail closed until implemented. */
+    fun nativeBalance(holder: EvmAddress, blockNumber: Long? = null): BigInteger =
+        throw RpcException("Native-asset balance reads are not supported by this client")
+
     fun blockNumber(): Long
 
     /** Canonical hash for an exact block height, or null when that height is unavailable. */

@@ -5,6 +5,7 @@ import Foundation
 
 public enum OPKProtocolVersion: String, Hashable, Sendable, Codable {
     case v1_5 = "1.5"
+    case v1_6 = "1.6"
 }
 
 public struct ConfirmationPolicy: Hashable, Sendable, Codable {

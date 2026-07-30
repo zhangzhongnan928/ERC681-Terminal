@@ -1,6 +1,7 @@
 package com.openpasskey.terminal.provisioning
 
 import com.openpasskey.erc681.EvmAddress
+import com.openpasskey.erc681.NativeAsset
 import com.openpasskey.erc681.NetworkConfig
 import com.openpasskey.erc681.NetworkValidation
 import com.openpasskey.erc681.ReadOnlyRpcClient
@@ -46,6 +47,11 @@ interface ProvisioningChainReader : Closeable {
             vaultRuntimeCode = vaultRuntimeCode(validation.vault),
         )
     }
+    fun validateWithEvidence(
+        token: EvmAddress,
+        expectedDecimals: Int,
+        expectedSymbol: String,
+    ): ProvisioningValidationEvidence
     fun validate(token: EvmAddress, expectedDecimals: Int, expectedSymbol: String): NetworkValidation
 }
 
@@ -80,6 +86,17 @@ private class RpcProvisioningChainReader(
     override fun validate(token: EvmAddress): NetworkValidation = client.validate(token)
     override fun validateWithEvidence(token: EvmAddress): ProvisioningValidationEvidence {
         val evidence = client.validateWithEvidence(token)
+        return ProvisioningValidationEvidence(
+            validation = evidence.validation,
+            vaultRuntimeCode = evidence.vaultRuntimeCode,
+        )
+    }
+    override fun validateWithEvidence(
+        token: EvmAddress,
+        expectedDecimals: Int,
+        expectedSymbol: String,
+    ): ProvisioningValidationEvidence {
+        val evidence = client.validateWithEvidence(token, expectedDecimals, expectedSymbol)
         return ProvisioningValidationEvidence(
             validation = evidence.validation,
             vaultRuntimeCode = evidence.vaultRuntimeCode,
@@ -166,7 +183,7 @@ class TerminalProvisioner(
             vaultAddress = payload.vault.value,
             confirmationBlocks = profile.defaultConfirmationBlocks,
             token = token,
-            protocolVersion = profile.protocolVersion,
+            protocolVersion = profile.protocolVersionFor(payload.token),
         )
         // A v1 portal QR still describes one complete profile. Repeated scans now upsert that
         // profile into the local catalog instead of replacing other vault/token/network choices.
@@ -200,7 +217,15 @@ class TerminalProvisioner(
         profile: KnownChainProfile,
         payload: TerminalProvisioningPayload,
     ): PaymentToken {
-        val evidence = client.validateWithEvidence(payload.token)
+        val evidence = if (NativeAsset.isNative(payload.token)) {
+            client.validateWithEvidence(
+                payload.token,
+                profile.nativeCurrencyDecimals,
+                profile.nativeCurrencySymbol,
+            )
+        } else {
+            client.validateWithEvidence(payload.token)
+        }
         val actualVaultRuntimeCodeHash = Numeric.toHexString(
             Hash.sha3(evidence.vaultRuntimeCode),
         )

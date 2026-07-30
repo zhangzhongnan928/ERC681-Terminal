@@ -76,7 +76,6 @@ final class StoredInvoice {
     func configurationSnapshot() throws -> TerminalConfiguration {
         guard let endpoint = URL(string: rpcURL),
               let version = OPKProtocolVersion(rawValue: protocolVersion),
-              version == .v1_5,
               let storedChainID = UInt64(exactly: chainID), storedChainID > 0,
               let decimals = UInt8(exactly: tokenDecimals),
               let blocks = UInt64(exactly: confirmationBlocks), blocks > 0
@@ -86,6 +85,15 @@ final class StoredInvoice {
             symbol: tokenSymbol,
             decimals: decimals
         )
+        guard let profile = TerminalKnownChainProfile.profile(for: storedChainID),
+              version == profile.protocolVersion(for: token.address),
+              !token.isNativeAsset
+                || (
+                    token.symbol == profile.nativeCurrencySymbol
+                        && token.decimals == profile.nativeCurrencyDecimals
+                        && token.decimals == NativeAsset.decimals
+                )
+        else { throw AppSettingsError.invalidValue }
         return try TerminalConfiguration(
             chainID: storedChainID,
             rpcEndpoints: [endpoint],

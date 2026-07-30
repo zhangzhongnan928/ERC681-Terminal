@@ -207,6 +207,8 @@ private actor BatchedValidationRPC: EthereumBatchReadRPC {
                     return .data(abiDynamicString("AUD"))
                 }
                 throw URLError(.badServerResponse)
+            case .balance:
+                throw URLError(.badServerResponse)
             }
         }
     }
@@ -281,6 +283,8 @@ private actor ConcurrentMultiTokenValidationRPC: EthereumBatchReadRPC {
                 default:
                     throw URLError(.badServerResponse)
                 }
+            case .balance:
+                throw URLError(.badServerResponse)
             }
         }
     }
@@ -351,6 +355,11 @@ private actor BatchedPaymentRPC: EthereumBatchReadRPC {
             case let .code(_, block):
                 guard block == .number(100) else { throw URLError(.badServerResponse) }
                 return .data(Data())
+            case let .balance(_, block):
+                guard token == NativeAsset.address, block == .number(100) else {
+                    throw URLError(.badServerResponse)
+                }
+                return .uint256(balance)
             }
         }
     }
@@ -435,6 +444,8 @@ private actor RetryingPaymentRPC: EthereumBatchReadRPC {
                 else { throw URLError(.badServerResponse) }
                 return .data(ABI.word(UInt256(1_000)))
             case .code:
+                throw URLError(.badServerResponse)
+            case .balance:
                 throw URLError(.badServerResponse)
             }
         }
@@ -694,6 +705,56 @@ final class ValidationAndMonitorTests: XCTestCase {
         XCTAssertEqual(batches[0], [.chainID, .latestBlockIdentity])
         let directBlockHashReads = await rpc.directBlockHashReads
         XCTAssertEqual(directBlockHashReads, 0)
+    }
+
+    func testNativeMonitorUsesReceiverEthGetBalanceAtTheAnchoredBlock() async throws {
+        let nativeToken = try PaymentToken(
+            address: NativeAsset.address,
+            symbol: "ETH",
+            decimals: NativeAsset.decimals
+        )
+        let configuration = try TerminalConfiguration(
+            chainID: 84_532,
+            rpcEndpoints: [URL(string: "https://sepolia.base.org")!],
+            protocolVersion: .v1_6,
+            deployment: try OPKDeployment(
+                factory: factory,
+                receiverImplementation: implementation,
+                vault: vault
+            ),
+            tokens: [nativeToken],
+            confirmationPolicy: .init(requiredBlocks: 1)
+        )
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: .init(address: vault),
+            amount: UInt256(1_000),
+            token: nativeToken,
+            configuration: configuration,
+            nonce: .zero
+        )
+        let rpc = BatchedPaymentRPC(
+            chainID: configuration.chainID,
+            token: NativeAsset.address,
+            balance: UInt256(1_000)
+        )
+
+        let observation = try await PaymentMonitor(
+            rpc: rpc,
+            confirmationPolicy: configuration.confirmationPolicy
+        ).sample(request)
+
+        XCTAssertEqual(observation.status, .paid(received: UInt256(1_000)))
+        XCTAssertEqual(
+            request.erc681URI,
+            "ethereum:\(request.receiver.hex)@84532?value=1000"
+        )
+        XCTAssertFalse(request.erc681URI.lowercased().contains(NativeAsset.address.hex))
+        let batches = await rpc.batches
+        guard case let .balance(holder, block) = try XCTUnwrap(batches[1].first) else {
+            return XCTFail("Expected a typed eth_getBalance request")
+        }
+        XCTAssertEqual(holder, request.receiver)
+        XCTAssertEqual(block, .number(100))
     }
 
     func testObservationStreamRetriesAvailabilityFailuresAndCanonicalReplacement() async throws {
