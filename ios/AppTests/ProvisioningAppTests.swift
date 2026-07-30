@@ -435,6 +435,65 @@ final class ProvisioningAppTests: XCTestCase {
         XCTAssertEqual(persisted.expectedAmount, "1234567")
     }
 
+    func testNativeProfilePersistsProtocol16AndReceiverTargetValueURI() throws {
+        let known = TerminalKnownChainProfile.baseSepolia
+        let operatorAddress = try address("0x7777777777777777777777777777777777777777")
+        let nativeToken = try PaymentToken(
+            address: NativeAsset.address,
+            symbol: known.nativeCurrencySymbol,
+            decimals: known.nativeCurrencyDecimals
+        )
+        let configuration = try TerminalConfiguration(
+            chainID: known.chainID,
+            rpcEndpoints: [known.rpcEndpoint],
+            protocolVersion: .v1_6,
+            deployment: OPKDeployment(
+                factory: known.factory,
+                receiverImplementation: known.receiverImplementation,
+                vault: try address("0x5555555555555555555555555555555555555555")
+            ),
+            tokens: [nativeToken],
+            confirmationPolicy: .init(requiredBlocks: known.defaultConfirmationBlocks),
+            create2TestVector: known.create2TestVector
+        )
+        let settings = try AppSettings().applying(
+            configuration,
+            boundTo: operatorAddress
+        )
+        let selected = try XCTUnwrap(settings.selectedPaymentProfile)
+        XCTAssertEqual(selected.protocolVersion, "1.6")
+        XCTAssertEqual(selected.tokenAddress, NativeAsset.address.hex)
+        XCTAssertTrue(selected.detail.contains(known.nativeCurrencySymbol))
+        XCTAssertFalse(
+            selected.detail.lowercased().contains(NativeAsset.address.hex.lowercased())
+        )
+
+        let profile = try TerminalPaymentProfile(configuration: configuration)
+        let request = try InvoiceFactory.create(
+            terminalIdentifier: TerminalIdentifier(address: operatorAddress),
+            amount: TokenAmount(rawValue: UInt256(123), decimals: NativeAsset.decimals),
+            profile: profile,
+            createdAt: Date(timeIntervalSince1970: 1_234),
+            nonce: Bytes32(
+                hex: "0xabababababababababababababababababababababababababababababababab"
+            )
+        )
+        let persisted = try StoredInvoice(request: request, configuration: configuration)
+        let restored = try persisted.paymentRequest()
+
+        XCTAssertEqual(persisted.protocolVersion, "1.6")
+        XCTAssertEqual(restored.token.address, NativeAsset.address)
+        XCTAssertEqual(restored.token.symbol, known.nativeCurrencySymbol)
+        XCTAssertEqual(
+            restored.erc681URI,
+            "ethereum:\(restored.receiver.hex)@\(known.chainID)?value=123"
+        )
+        XCTAssertFalse(
+            restored.erc681URI.lowercased().contains(NativeAsset.address.hex.lowercased())
+        )
+        XCTAssertEqual(try persisted.configurationSnapshot().protocolVersion, .v1_6)
+    }
+
     func testSettlementInvoiceOperatorSnapshotsMustMatchTheCurrentDeviceEOA() throws {
         let current = try address("0x1111111111111111111111111111111111111111")
         let other = try address("0x2222222222222222222222222222222222222222")
@@ -932,7 +991,7 @@ final class ProvisioningAppTests: XCTestCase {
         }
         let firstConfiguration = try configuration(
             vault: "0xffffffffffffffffffffffffffffffffffffffff",
-            token: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            token: "0xdddddddddddddddddddddddddddddddddddddddd",
             symbol: "AUDM"
         )
         let secondConfiguration = try configuration(

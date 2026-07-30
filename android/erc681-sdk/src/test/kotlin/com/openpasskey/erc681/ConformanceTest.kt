@@ -107,6 +107,28 @@ class ConformanceTest {
     }
 
     @Test
+    fun `canonical native ERC-681 targets the receiver and never the sentinel`() {
+        val configuration = vector.getAsJsonObject("configuration")
+        val native = vector.getAsJsonObject("nativeAsset")
+        val receiver = EvmAddress.parse(
+            vector.getAsJsonObject("receiverVector").get("receiver").asString,
+        )
+        val rawUnits = vector.getAsJsonObject("amountVector").get("rawUnits").asString
+        val request = Erc681PaymentRequest(
+            token = EvmAddress.parse(native.get("identifier").asString),
+            chainId = configuration.get("chainId").asLong,
+            receiver = receiver,
+            amount = TokenAmount.ofRaw(BigInteger(rawUnits), native.get("decimals").asInt),
+        )
+        val canonical = vector.get("nativeErc681").asString
+
+        assertEquals(canonical, Erc681Codec.encode(request))
+        assertFalse(canonical.contains(NativeAsset.address.value, ignoreCase = true))
+        assertEquals(request, Erc681Codec.parse(canonical, request.chainId))
+        assertTrue(request.isNative)
+    }
+
+    @Test
     fun `non-canonical and wrong-chain requests fail closed`() {
         val chainId = vector.getAsJsonObject("configuration").get("chainId").asLong
         vector.getAsJsonArray("mustReject").forEach { rejected ->

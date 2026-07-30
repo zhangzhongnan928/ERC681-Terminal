@@ -128,7 +128,7 @@ final class PaymentProfileTests: XCTestCase {
         let first = try makeProfile(
             chainID: 84_532,
             vault: "0xffffffffffffffffffffffffffffffffffffffff",
-            token: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            token: "0xdddddddddddddddddddddddddddddddddddddddd",
             symbol: "AUDM"
         )
         let second = try makeProfile(

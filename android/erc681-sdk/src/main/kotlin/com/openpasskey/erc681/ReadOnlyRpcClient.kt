@@ -133,26 +133,15 @@ class ReadOnlyRpcClient private constructor(
         val head = anchoredHead.number
 
         val cursorToRead = savedCursorBlock?.takeIf { it < head }
+        val isNative = NativeAsset.isNative(token)
         val sampleCalls = buildList {
-            add(
-                RpcCall(
-                    "eth_call",
-                    ethCallParams(
-                        token,
-                        abiFunction("balanceOf(address)", holder),
-                        quantityHex(head),
-                    ),
-                ),
-            )
+            add(assetBalanceCall(token, holder, quantityHex(head)))
             cursorToRead?.let { cursor ->
                 add(RpcCall("eth_getBlockByNumber", blockByNumberParams(cursor)))
             }
         }
         val sampled = rpcResults(sampleCalls)
-        val balance = BigInteger(
-            1,
-            decodeWord(resultString(sampled[0]), "balanceOf result"),
-        )
+        val balance = decodeAssetBalance(sampled[0], isNative)
         val cursorHash = if (cursorToRead != null) {
             decodeCanonicalBlockHash(sampled[1], cursorToRead)
         } else {
@@ -244,9 +233,10 @@ class ReadOnlyRpcClient private constructor(
             ?: throw RpcException("Latest canonical block is unavailable")
         val blockTag = quantityHex(anchoredHead.number)
 
-        // Wave 2: 15 independent reads. Strict physical batches remain <=10 and only the two
-        // chunks for this single logical proof may run concurrently.
+        // Wave 2: independent reads at one block. Native assets replace token metadata/code
+        // reads with the mandatory NATIVE_ASSET() capability probe.
         val validationCalls = networkValidationCalls(token, blockTag)
+        val isNative = NativeAsset.isNative(token)
         val stateCalls = buildList {
             addAll(validationCalls)
             add(
@@ -271,12 +261,7 @@ class ReadOnlyRpcClient private constructor(
                 add(PENDING_BLOCK)
             }))
             add(RpcCall("eth_getCode", codeAtParams(receiver, blockTag)))
-            add(
-                RpcCall(
-                    "eth_call",
-                    ethCallParams(token, abiFunction("balanceOf(address)", receiver), blockTag),
-                ),
-            )
+            add(assetBalanceCall(token, receiver, blockTag))
         }
         val ownerResultIndex = validationCalls.size + 1
         val state = rpcResultsChunked(
@@ -327,10 +312,7 @@ class ReadOnlyRpcClient private constructor(
         )
         val nativeBalance = minOf(latestNativeBalance, pendingNativeBalance)
         val receiverCode = decodeData(resultString(state[index++]), "eth_getCode result")
-        val receiverBalance = BigInteger(
-            1,
-            decodeWord(resultString(state[index]), "balanceOf result"),
-        )
+        val receiverBalance = decodeAssetBalance(state[index], isNative)
         return CheckoutValidationEvidence(
             validation = validation.validation,
             operatorReadiness = OperatorReadiness(listed, owner, nativeBalance),
@@ -378,6 +360,7 @@ class ReadOnlyRpcClient private constructor(
     }
 
     override fun tokenDecimals(token: EvmAddress): Int {
+        if (NativeAsset.isNative(token)) return NativeAsset.DECIMALS
         val value = BigInteger(
             1,
             decodeWord(ethCall(token, abiFunction("decimals()")), "decimals result"),
@@ -388,10 +371,14 @@ class ReadOnlyRpcClient private constructor(
 
     override fun tokenSymbol(token: EvmAddress): String {
         require(!token.isZero) { "Token address must not be zero" }
+        if (NativeAsset.isNative(token)) {
+            throw RpcException("Native asset symbol must come from the trusted chain profile")
+        }
         return decodeTokenSymbol(ethCall(token, abiFunction("symbol()")))
     }
 
     override fun tokenBalance(token: EvmAddress, holder: EvmAddress, blockNumber: Long?): BigInteger {
+        if (NativeAsset.isNative(token)) return nativeBalance(holder, blockNumber)
         require(blockNumber == null || blockNumber >= 0) { "Block number must not be negative" }
         val result = ethCall(
             to = token,
@@ -399,6 +386,18 @@ class ReadOnlyRpcClient private constructor(
             blockTag = blockNumber?.let(::quantityHex) ?: LATEST_BLOCK,
         )
         return BigInteger(1, decodeWord(result, "balanceOf result"))
+    }
+
+    override fun nativeBalance(holder: EvmAddress, blockNumber: Long?): BigInteger {
+        require(!holder.isZero) { "Holder address must not be zero" }
+        require(blockNumber == null || blockNumber >= 0) { "Block number must not be negative" }
+        return parseQuantity(
+            rpcString(
+                "eth_getBalance",
+                balanceParams(holder, blockNumber?.let(::quantityHex) ?: LATEST_BLOCK),
+            ),
+            "eth_getBalance",
+        )
     }
 
     /** Fixed, read-only readiness bundle used by terminals after a successful network validation. */
@@ -440,18 +439,12 @@ class ReadOnlyRpcClient private constructor(
         val results = rpcResults(
             listOf(
                 RpcCall("eth_getCode", codeAtParams(receiver)),
-                RpcCall(
-                    "eth_call",
-                    ethCallParams(token, abiFunction("balanceOf(address)", receiver)),
-                ),
+                assetBalanceCall(token, receiver, LATEST_BLOCK),
             ),
         )
         return ReceiverFreshness(
             deployedCode = decodeData(resultString(results[0]), "eth_getCode result"),
-            tokenBalance = BigInteger(
-                1,
-                decodeWord(resultString(results[1]), "balanceOf result"),
-            ),
+            tokenBalance = decodeAssetBalance(results[1], NativeAsset.isNative(token)),
         )
     }
 
@@ -495,8 +488,8 @@ class ReadOnlyRpcClient private constructor(
         val anchoredHead = decodeCanonicalBlockIdentity(anchor[1])
             ?: throw RpcException("Latest canonical block is unavailable")
 
-        // Wave 2: all nine validation reads use the exact anchored height. Vault runtime bytes
-        // retained in the evidence therefore come from this same strict batch and proof block.
+        // Wave 2: every validation read uses the exact anchored height. Native validation swaps
+        // token code/metadata reads for the mandatory NATIVE_ASSET() capability proof.
         val results = rpcResults(
             networkValidationCalls(token, quantityHex(anchoredHead.number)),
         )
@@ -527,27 +520,41 @@ class ReadOnlyRpcClient private constructor(
         return evidence
     }
 
-    private fun networkValidationCalls(token: EvmAddress, blockTag: String): List<RpcCall> = listOf(
-        RpcCall("eth_getCode", codeAtParams(config.factory, blockTag)),
-        RpcCall("eth_getCode", codeAtParams(config.receiverImplementation, blockTag)),
-        RpcCall("eth_getCode", codeAtParams(config.vault, blockTag)),
-        RpcCall("eth_getCode", codeAtParams(token, blockTag)),
-        RpcCall(
-            "eth_call",
-            ethCallParams(config.factory, abiFunction("implementation()"), blockTag),
-        ),
-        RpcCall("eth_call", ethCallParams(config.vault, abiFunction("factory()"), blockTag)),
-        RpcCall(
-            "eth_call",
-            ethCallParams(
-                config.vault,
-                abiFunction("isPaymentToken(address)", token),
-                blockTag,
+    private fun networkValidationCalls(token: EvmAddress, blockTag: String): List<RpcCall> {
+        val commonPrefix = listOf(
+            RpcCall("eth_getCode", codeAtParams(config.factory, blockTag)),
+            RpcCall("eth_getCode", codeAtParams(config.receiverImplementation, blockTag)),
+            RpcCall("eth_getCode", codeAtParams(config.vault, blockTag)),
+        )
+        val commonContractReads = listOf(
+            RpcCall(
+                "eth_call",
+                ethCallParams(config.factory, abiFunction("implementation()"), blockTag),
             ),
-        ),
-        RpcCall("eth_call", ethCallParams(token, abiFunction("decimals()"), blockTag)),
-        RpcCall("eth_call", ethCallParams(token, abiFunction("symbol()"), blockTag)),
-    )
+            RpcCall("eth_call", ethCallParams(config.vault, abiFunction("factory()"), blockTag)),
+            RpcCall(
+                "eth_call",
+                ethCallParams(
+                    config.vault,
+                    abiFunction("isPaymentToken(address)", token),
+                    blockTag,
+                ),
+            ),
+        )
+        return if (NativeAsset.isNative(token)) {
+            commonPrefix +
+                RpcCall("eth_call", ethCallParams(config.vault, abiFunction("NATIVE_ASSET()"), blockTag)) +
+                commonContractReads
+        } else {
+            commonPrefix +
+                RpcCall("eth_getCode", codeAtParams(token, blockTag)) +
+                commonContractReads +
+                listOf(
+                    RpcCall("eth_call", ethCallParams(token, abiFunction("decimals()"), blockTag)),
+                    RpcCall("eth_call", ethCallParams(token, abiFunction("symbol()"), blockTag)),
+                )
+        }
+    }
 
     private fun decodeNetworkValidation(
         token: EvmAddress,
@@ -556,16 +563,37 @@ class ReadOnlyRpcClient private constructor(
         remoteChainId: Long,
         results: List<JsonElement>,
     ): NetworkValidationEvidence {
-        require(results.size == NETWORK_VALIDATION_CALL_COUNT) {
+        val isNative = NativeAsset.isNative(token)
+        val expectedResultCount = if (isNative) {
+            NATIVE_NETWORK_VALIDATION_CALL_COUNT
+        } else {
+            ERC20_NETWORK_VALIDATION_CALL_COUNT
+        }
+        require(results.size == expectedResultCount) {
             "Network validation returned an incomplete result set"
         }
         requireContractResult(results[0], config.factory, "factory")
         requireContractResult(results[1], config.receiverImplementation, "receiver implementation")
         val vaultRuntimeCode = requireContractResult(results[2], config.vault, "vault")
-        requireContractResult(results[3], token, "token")
+        if (!isNative) requireContractResult(results[3], token, "token")
 
+        var index = 3
+        if (isNative) {
+            val advertisedNativeAsset = decodeAddress(
+                resultString(results[index++]),
+                "NATIVE_ASSET result",
+            )
+            if (advertisedNativeAsset != NativeAsset.address) {
+                throw NetworkConfigurationException(
+                    "Vault ${config.vault} advertises native asset $advertisedNativeAsset instead of " +
+                        NativeAsset.address,
+                )
+            }
+        } else {
+            index++
+        }
         val actualImplementation = decodeAddress(
-            resultString(results[4]),
+            resultString(results[index++]),
             "factory implementation",
         )
         if (actualImplementation != config.receiverImplementation) {
@@ -574,36 +602,49 @@ class ReadOnlyRpcClient private constructor(
                     config.receiverImplementation,
             )
         }
-        val actualFactory = decodeAddress(resultString(results[5]), "vault factory")
+        val actualFactory = decodeAddress(resultString(results[index++]), "vault factory")
         if (actualFactory != config.factory) {
             throw NetworkConfigurationException(
                 "Vault factory $actualFactory does not match configured factory ${config.factory}",
             )
         }
-        val whitelistedWord = decodeWord(resultString(results[6]), "isPaymentToken result")
+        val whitelistedWord = decodeWord(resultString(results[index++]), "isPaymentToken result")
         val whitelisted = when (BigInteger(1, whitelistedWord)) {
             BigInteger.ZERO -> false
             BigInteger.ONE -> true
             else -> throw RpcException("isPaymentToken returned a non-boolean ABI word")
         }
         if (!whitelisted) {
-            throw NetworkConfigurationException("Token $token is not whitelisted by vault ${config.vault}")
-        }
-        val decimalsValue = BigInteger(
-            1,
-            decodeWord(resultString(results[7]), "decimals result"),
-        )
-        if (decimalsValue > UINT8_MAX) throw RpcException("decimals returned a value outside uint8")
-        val actualDecimals = decimalsValue.toInt()
-        if (expectedDecimals != null && actualDecimals != expectedDecimals) {
             throw NetworkConfigurationException(
-                "Token decimals $actualDecimals do not match configured decimals $expectedDecimals",
+                "Payment asset $token is not whitelisted by vault ${config.vault}",
             )
         }
-        val actualSymbol = decodeTokenSymbol(resultString(results[8]))
+        val actualDecimals = if (isNative) {
+            NativeAsset.DECIMALS
+        } else {
+            val decimalsValue = BigInteger(
+                1,
+                decodeWord(resultString(results[index++]), "decimals result"),
+            )
+            if (decimalsValue > UINT8_MAX) throw RpcException("decimals returned a value outside uint8")
+            decimalsValue.toInt()
+        }
+        if (expectedDecimals != null && actualDecimals != expectedDecimals) {
+            throw NetworkConfigurationException(
+                "Payment asset decimals $actualDecimals do not match configured decimals $expectedDecimals",
+            )
+        }
+        val actualSymbol = if (isNative) {
+            expectedSymbol?.takeIf { it.isNotBlank() }
+                ?: throw NetworkConfigurationException(
+                    "Native asset symbol must come from the trusted chain profile",
+                )
+        } else {
+            decodeTokenSymbol(resultString(results[index]))
+        }
         if (expectedSymbol != null && actualSymbol != expectedSymbol) {
             throw NetworkConfigurationException(
-                "Token symbol $actualSymbol does not match configured symbol $expectedSymbol",
+                "Payment asset symbol $actualSymbol does not match configured symbol $expectedSymbol",
             )
         }
 
@@ -671,6 +712,34 @@ class ReadOnlyRpcClient private constructor(
         })
         add(blockTag)
     }
+
+    private fun balanceParams(
+        address: EvmAddress,
+        blockTag: String = LATEST_BLOCK,
+    ): JsonArray = JsonArray().apply {
+        add(address.value)
+        add(blockTag)
+    }
+
+    private fun assetBalanceCall(
+        asset: EvmAddress,
+        holder: EvmAddress,
+        blockTag: String,
+    ): RpcCall = if (NativeAsset.isNative(asset)) {
+        RpcCall("eth_getBalance", balanceParams(holder, blockTag))
+    } else {
+        RpcCall(
+            "eth_call",
+            ethCallParams(asset, abiFunction("balanceOf(address)", holder), blockTag),
+        )
+    }
+
+    private fun decodeAssetBalance(result: JsonElement, isNative: Boolean): BigInteger =
+        if (isNative) {
+            parseQuantity(resultString(result), "eth_getBalance")
+        } else {
+            BigInteger(1, decodeWord(resultString(result), "balanceOf result"))
+        }
 
     private fun rpcQuantity(method: String): BigInteger = parseQuantity(rpcString(method, JsonArray()), method)
 
@@ -984,7 +1053,8 @@ class ReadOnlyRpcClient private constructor(
         private val RPC_ERROR_CODE_PATTERN = Regex("^-?(0|[1-9][0-9]*)$")
         private const val MAX_SYMBOL_UTF8_BYTES = 32
         private const val MAX_BATCH_SIZE = 10
-        private const val NETWORK_VALIDATION_CALL_COUNT = 9
+        private const val ERC20_NETWORK_VALIDATION_CALL_COUNT = 9
+        private const val NATIVE_NETWORK_VALIDATION_CALL_COUNT = 7
         private const val MAX_CONCURRENT_CALL_SET_SIZE = 20
         private val CHECKOUT_BATCH_EXECUTOR = Executors.newFixedThreadPool(2) { runnable ->
             Thread(runnable, "opk-checkout-rpc").apply { isDaemon = true }

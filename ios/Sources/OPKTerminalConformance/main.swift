@@ -41,8 +41,10 @@ private struct ConformanceFixture: Decodable {
     let invoiceVector: InvoiceVector
     let receiverVector: ReceiverVector
     let amountVector: AmountVector
+    let nativeAsset: NativeAssetVector
     let readOnlyAbi: [String: String]
     let erc681: String
+    let nativeErc681: String
     let mustReject: [String]
 
     struct Configuration: Decodable {
@@ -78,6 +80,12 @@ private struct ConformanceFixture: Decodable {
     struct AmountVector: Decodable {
         let display: String
         let rawUnits: String
+    }
+
+    struct NativeAssetVector: Decodable {
+        let identifier: String
+        let symbol: String
+        let decimals: UInt8
     }
 }
 
@@ -239,7 +247,7 @@ private struct OPKTerminalConformanceMain {
 
     private static func coreVectors(_ fixture: ConformanceFixture) throws {
         try require(fixture.schemaVersion == 2, "fixture schema version")
-        try require(fixture.paymentVectorVersion == "1.5", "payment vector version")
+        try require(fixture.paymentVectorVersion == "1.6", "payment vector version")
         try require(
             fixture.deploymentProtocolVersion == "1.5",
             "deployment protocol version"
@@ -254,6 +262,7 @@ private struct OPKTerminalConformanceMain {
             ("implementation()", ABI.implementationSelector),
             ("factory()", ABI.factorySelector),
             ("isPaymentToken(address)", ABI.isPaymentTokenSelector),
+            ("NATIVE_ASSET()", ABI.nativeAssetSelector),
             ("decimals()", ABI.decimalsSelector),
             ("symbol()", ABI.symbolSelector),
             ("balanceOf(address)", ABI.balanceOfSelector),
@@ -327,6 +336,22 @@ private struct OPKTerminalConformanceMain {
         try require(uri == fixture.erc681, "shared canonical ERC-681 URI")
         let reparsed = try ERC681TransferRequest.parse(uri, expectedChainID: fixture.configuration.chainId)
         try require(reparsed.canonicalString == uri, "ERC-681 round trip")
+        let nativeIdentifier = try EthereumAddress(hex: fixture.nativeAsset.identifier)
+        try require(nativeIdentifier == NativeAsset.address, "native asset identifier")
+        try require(fixture.nativeAsset.decimals == NativeAsset.decimals, "native asset decimals")
+        let nativeURI = try ERC681TransferRequest(
+            token: nativeIdentifier,
+            chainID: fixture.configuration.chainId,
+            recipient: receiver,
+            amount: amount.rawValue
+        ).canonicalString
+        try require(nativeURI == fixture.nativeErc681, "shared native ERC-681 URI")
+        try require(!nativeURI.lowercased().contains(nativeIdentifier.hex), "sentinel absent from QR")
+        let reparsedNative = try ERC681TransferRequest.parse(
+            nativeURI,
+            expectedChainID: fixture.configuration.chainId
+        )
+        try require(reparsedNative.token == NativeAsset.address, "native ERC-681 round trip")
 
         let additionalRejected = [
             "ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?uint256=1&address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c",

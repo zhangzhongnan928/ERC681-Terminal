@@ -116,13 +116,17 @@ struct AppPaymentProfile: Codable, Equatable, Identifiable {
     var displayName: String { "\(tokenSymbol) · \(networkName)" }
 
     var detail: String {
-        "Vault \(Self.abbreviated(vault)) · Token \(Self.abbreviated(tokenAddress))"
+        let asset = (try? EthereumAddress(hex: tokenAddress, allowZero: false))
+            .map { NativeAsset.isNative($0) ? tokenSymbol : Self.abbreviated(tokenAddress) }
+            ?? Self.abbreviated(tokenAddress)
+        return "Vault \(Self.abbreviated(vault)) · Asset \(asset)"
     }
 
     func configuration() throws -> TerminalConfiguration {
         guard let chainID = UInt64(chainID), chainID > 0,
               chainID <= UInt64(Int64.max),
               let endpoint = URL(string: rpcURL),
+              let version = OPKProtocolVersion(rawValue: protocolVersion),
               let decimals = UInt8(tokenDecimals),
               let blocks = UInt64(confirmationBlocks), blocks > 0,
               blocks <= maximumStoredConfirmationBlocks
@@ -132,9 +136,6 @@ struct AppPaymentProfile: Codable, Equatable, Identifiable {
         }
         guard blocks >= profile.minimumConfirmationBlocks else {
             throw AppSettingsError.invalidValue
-        }
-        guard protocolVersion == profile.protocolVersion.rawValue else {
-            throw AppSettingsError.unsupportedProtocol
         }
         guard let configuredFactory = try? EthereumAddress(hex: factory, allowZero: false),
               configuredFactory == profile.factory,
@@ -153,10 +154,19 @@ struct AppPaymentProfile: Codable, Equatable, Identifiable {
             symbol: tokenSymbol,
             decimals: decimals
         )
+        guard version == profile.protocolVersion(for: token.address) else {
+            throw AppSettingsError.unsupportedProtocol
+        }
+        if token.isNativeAsset {
+            guard token.symbol == profile.nativeCurrencySymbol,
+                  token.decimals == profile.nativeCurrencyDecimals,
+                  token.decimals == NativeAsset.decimals
+            else { throw AppSettingsError.invalidValue }
+        }
         return try TerminalConfiguration(
             chainID: chainID,
             rpcEndpoints: [endpoint],
-            protocolVersion: profile.protocolVersion,
+            protocolVersion: version,
             deployment: OPKDeployment(
                 factory: profile.factory,
                 receiverImplementation: profile.receiverImplementation,
@@ -427,12 +437,18 @@ struct AppSettings: Codable, Equatable {
         boundTo operatorAddress: EthereumAddress
     ) throws -> AppSettings {
         guard let profile = TerminalKnownChainProfile.profile(for: configuration.chainID),
-              configuration.protocolVersion == profile.protocolVersion,
+              configuration.tokens.count == 1,
+              let token = configuration.tokens.first,
+              configuration.protocolVersion == profile.protocolVersion(for: token.address),
               configuration.deployment.factory == profile.factory,
               configuration.deployment.receiverImplementation == profile.receiverImplementation,
               configuration.create2TestVector == profile.create2TestVector,
-              configuration.tokens.count == 1,
-              let token = configuration.tokens.first,
+              (!token.isNativeAsset
+                  || (
+                      token.symbol == profile.nativeCurrencySymbol
+                          && token.decimals == profile.nativeCurrencyDecimals
+                          && token.decimals == NativeAsset.decimals
+                  )),
               configuration.confirmationPolicy.requiredBlocks == profile.defaultConfirmationBlocks,
               (paymentProfiles.allSatisfy {
                   $0.provisionedOperatorAddress?.lowercased() == operatorAddress.hex.lowercased()

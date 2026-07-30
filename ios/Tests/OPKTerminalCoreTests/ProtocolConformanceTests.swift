@@ -9,9 +9,10 @@ final class ProtocolConformanceTests: XCTestCase {
     private let vectorVault = try! EthereumAddress(hex: "0x1111111111111111111111111111111111111111")
     private let invoiceID = try! Bytes32(hex: "0x474614682f1d5e8e24396c2394a98425d4e8617fe699872c96182b89368e50d4")
 
-    func testProtocol14IsNotAcceptedByTheV15OnlyTerminal() {
+    func testSupportedProtocolVersions() {
         XCTAssertNil(OPKProtocolVersion(rawValue: "1.4.1"))
         XCTAssertEqual(OPKProtocolVersion(rawValue: "1.5"), .v1_5)
+        XCTAssertEqual(OPKProtocolVersion(rawValue: "1.6"), .v1_6)
     }
 
     func testCreate2ConformanceVector() throws {
@@ -90,10 +91,27 @@ final class ProtocolConformanceTests: XCTestCase {
         )
         XCTAssertEqual(try ERC681TransferRequest.parse(uri, expectedChainID: 84_532).canonicalString, uri)
         XCTAssertThrowsError(try ERC681TransferRequest.parse(uri, expectedChainID: 1))
+
+        let nativeURI = try ERC681TransferRequest(
+            token: NativeAsset.address,
+            chainID: 84_532,
+            recipient: receiver,
+            amount: rawAmount
+        ).canonicalString
+        XCTAssertEqual(
+            nativeURI,
+            "ethereum:0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c@84532?value=12340000000000000000"
+        )
+        XCTAssertFalse(nativeURI.lowercased().contains(NativeAsset.address.hex))
+        XCTAssertEqual(
+            try ERC681TransferRequest.parse(nativeURI, expectedChainID: 84_532).token,
+            NativeAsset.address
+        )
     }
 
     func testReadOnlyABISelectorsMatchFoundry() throws {
         XCTAssertEqual(ABI.balanceOfSelector.hexString, "0x70a08231")
+        XCTAssertEqual(ABI.nativeAssetSelector.hexString, "0xbf53253b")
         XCTAssertEqual(ABI.settledSelector.hexString, "0x7dfc6c28")
     }
 

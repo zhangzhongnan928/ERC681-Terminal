@@ -185,6 +185,77 @@ class ReadOnlyRpcClientTest {
     }
 
     @Test
+    fun `native validation requires NATIVE_ASSET capability and vault whitelist`() {
+        fun makeClient(
+            advertisedNativeAsset: EvmAddress,
+            whitelisted: Boolean,
+            requestBodies: MutableList<String> = mutableListOf(),
+        ): ReadOnlyRpcClient = ReadOnlyRpcClient.forTest(config) { body ->
+            requestBodies += body
+            val root = JsonParser.parseString(body)
+            val requests = if (root.isJsonArray) root.asJsonArray.toList() else listOf(root)
+            val responses = requests.map { element ->
+                val request = element.asJsonObject
+                val result: Any = when (request.get("method").asString) {
+                    "eth_chainId" -> "0x14a34"
+                    "eth_getBlockByNumber" -> blockResult(100, BLOCK_HASH)
+                    "eth_getCode" -> "0x60016000"
+                    "eth_call" -> when (
+                        request.getAsJsonArray("params")[0].asJsonObject
+                            .get("data").asString.take(10)
+                    ) {
+                        "0xbf53253b" -> abiAddress(advertisedNativeAsset)
+                        "0x5c60da1b" -> abiAddress(implementation)
+                        "0xc45a0155" -> abiAddress(factory)
+                        "0x930eaddc" -> abiUint(if (whitelisted) BigInteger.ONE else BigInteger.ZERO)
+                        else -> error("Unexpected native validation selector")
+                    }
+                    else -> error("Unexpected native validation method")
+                }
+                when (result) {
+                    is String -> JsonParser.parseString(success(request, result))
+                    is JsonObject -> JsonParser.parseString(success(request, result))
+                    else -> error("Unexpected native validation result")
+                }
+            }
+            if (root.isJsonArray) JsonArray().apply { responses.forEach(::add) }.toString()
+            else responses.single().toString()
+        }
+
+        val successBodies = mutableListOf<String>()
+        val validation = makeClient(NativeAsset.address, true, successBodies)
+            .validate(NativeAsset.address, NativeAsset.DECIMALS, "ETH")
+        assertEquals(NativeAsset.address, validation.token)
+        assertEquals(NativeAsset.DECIMALS, validation.tokenDecimals)
+        assertEquals("ETH", validation.tokenSymbol)
+        val proofRequests = JsonParser.parseString(successBodies[1]).asJsonArray
+        assertEquals(7, proofRequests.size())
+        assertTrue(proofRequests.none { element ->
+            val request = element.asJsonObject
+            request.get("method").asString == "eth_getCode" &&
+                request.getAsJsonArray("params")[0].asString.equals(
+                    NativeAsset.address.value,
+                    ignoreCase = true,
+                )
+        })
+
+        assertFailsWith<NetworkConfigurationException> {
+            makeClient(token, true).validate(
+                NativeAsset.address,
+                NativeAsset.DECIMALS,
+                "ETH",
+            )
+        }
+        assertFailsWith<NetworkConfigurationException> {
+            makeClient(NativeAsset.address, false).validate(
+                NativeAsset.address,
+                NativeAsset.DECIMALS,
+                "ETH",
+            )
+        }
+    }
+
+    @Test
     fun `validation fails closed when anchored head changes after state reads`() {
         var wave = 0
         val client = ReadOnlyRpcClient.forTest(config) { body ->
@@ -714,6 +785,50 @@ class ReadOnlyRpcClientTest {
         assertEquals(cursorHash, observation.fundedAtBlockHash)
         assertEquals(3, observation.confirmations)
         assertEquals(PaymentStatus.PAID, observation.status)
+    }
+
+    @Test
+    fun `native payment observation reads receiver ETH balance at the anchored block`() {
+        val requestBodies = mutableListOf<String>()
+        val client = ReadOnlyRpcClient.forTest(config) { body ->
+            requestBodies += body
+            val root = JsonParser.parseString(body)
+            val requests = if (root.isJsonArray) root.asJsonArray.toList() else listOf(root)
+            val responses = requests.map { element ->
+                val request = element.asJsonObject
+                val result: Any = when (request.get("method").asString) {
+                    "eth_chainId" -> "0x14a34"
+                    "eth_getBalance" -> "0x3e8"
+                    "eth_getBlockByNumber" -> {
+                        val requested = requestedBlockNumber(request, 100)
+                        blockResult(requested, blockHash(requested))
+                    }
+                    else -> error("Unexpected native payment RPC method")
+                }
+                when (result) {
+                    is String -> JsonParser.parseString(success(request, result))
+                    is JsonObject -> JsonParser.parseString(success(request, result))
+                    else -> error("Unexpected native payment result")
+                }
+            }
+            if (root.isJsonArray) JsonArray().apply { responses.forEach(::add) }.toString()
+            else responses.single().toString()
+        }
+        val payment = Erc681PaymentRequest(
+            token = NativeAsset.address,
+            chainId = config.chainId,
+            receiver = holder,
+            amount = TokenAmount.ofRaw(BigInteger("1000"), NativeAsset.DECIMALS),
+        )
+
+        val observation = PaymentObserver(client).observe(payment)
+
+        assertEquals(PaymentStatus.PAID, observation.status)
+        assertEquals(listOf("eth_getBalance"), requestMethods(requestBodies[1]))
+        val balanceParams = JsonParser.parseString(requestBodies[1])
+            .asJsonObject.getAsJsonArray("params")
+        assertEquals(holder.value, balanceParams[0].asString)
+        assertEquals("0x64", balanceParams[1].asString)
     }
 
     @Test

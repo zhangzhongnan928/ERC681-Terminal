@@ -28,6 +28,13 @@ public protocol EthereumReadRPC: Sendable {
     func canonicalBlockHash(at blockNumber: UInt64) async throws -> Bytes32
     func code(at address: EthereumAddress, block: RPCBlockTag) async throws -> Data
     func call(to address: EthereumAddress, data: Data, block: RPCBlockTag) async throws -> Data
+    func balance(of address: EthereumAddress, block: RPCBlockTag) async throws -> UInt256
+}
+
+public extension EthereumReadRPC {
+    func balance(of address: EthereumAddress, block: RPCBlockTag) async throws -> UInt256 {
+        throw RPCDecodingError.invalidData("eth_getBalance is unavailable")
+    }
 }
 
 public enum EthereumReadBatchRequest: Hashable, Sendable {
@@ -37,6 +44,7 @@ public enum EthereumReadBatchRequest: Hashable, Sendable {
     case canonicalBlockHash(UInt64)
     case code(address: EthereumAddress, block: RPCBlockTag)
     case call(address: EthereumAddress, data: Data, block: RPCBlockTag)
+    case balance(address: EthereumAddress, block: RPCBlockTag)
 }
 
 public enum EthereumReadBatchResult: Hashable, Sendable {
@@ -44,6 +52,7 @@ public enum EthereumReadBatchResult: Hashable, Sendable {
     case blockIdentity(number: UInt64, hash: Bytes32)
     case blockHash(Bytes32)
     case data(Data)
+    case uint256(UInt256)
 }
 
 public protocol EthereumBatchReadRPC: EthereumReadRPC {
@@ -103,6 +112,17 @@ public actor JSONRPCEthereumClient: EthereumBatchReadRPC {
         return try Self.decodeData(result)
     }
 
+    public func balance(
+        of address: EthereumAddress,
+        block: RPCBlockTag = .latest
+    ) async throws -> UInt256 {
+        let result: String = try await client.call(
+            "eth_getBalance",
+            params: [.string(address.hex), .string(block.parameter)]
+        )
+        return try Self.decodeUInt256Quantity(result)
+    }
+
     public func batch(
         _ requests: [EthereumReadBatchRequest]
     ) async throws -> [EthereumReadBatchResult] {
@@ -154,6 +174,11 @@ public actor JSONRPCEthereumClient: EthereumBatchReadRPC {
                     .string(block.parameter),
                 ]
             )
+        case let .balance(address, block):
+            JSONRPCBatchCall(
+                method: "eth_getBalance",
+                params: [.string(address.hex), .string(block.parameter)]
+            )
         }
     }
 
@@ -190,6 +215,11 @@ public actor JSONRPCEthereumClient: EthereumBatchReadRPC {
                 throw JSONRPCError.malformedResponse
             }
             return .data(try decodeData(data))
+        case .balance:
+            guard case let .string(quantity) = value else {
+                throw JSONRPCError.malformedResponse
+            }
+            return .uint256(try decodeUInt256Quantity(quantity))
         }
     }
 
@@ -210,6 +240,23 @@ public actor JSONRPCEthereumClient: EthereumBatchReadRPC {
             return try Data(hex: value)
         } catch {
             throw RPCDecodingError.invalidData(value)
+        }
+    }
+
+    public static func decodeUInt256Quantity(_ value: String) throws -> UInt256 {
+        guard value.hasPrefix("0x"), value.count > 2 else {
+            throw RPCDecodingError.invalidQuantity(value)
+        }
+        let digits = String(value.dropFirst(2))
+        guard digits == "0" || !digits.hasPrefix("0"),
+              digits.count <= 64,
+              digits.allSatisfy(\.isHexDigit)
+        else { throw RPCDecodingError.invalidQuantity(value) }
+        let padded = digits.count.isMultiple(of: 2) ? digits : "0" + digits
+        do {
+            return try UInt256(hex: "0x" + padded)
+        } catch {
+            throw RPCDecodingError.invalidQuantity(value)
         }
     }
 }

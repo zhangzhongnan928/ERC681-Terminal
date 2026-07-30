@@ -38,6 +38,9 @@ public enum ConfigurationValidationError: Error, Equatable, Sendable {
     case noCode(label: String, address: EthereumAddress)
     case factoryImplementationMismatch(expected: EthereumAddress, actual: EthereumAddress)
     case vaultFactoryMismatch(expected: EthereumAddress, actual: EthereumAddress)
+    case nativeAssetCapabilityMismatch(expected: EthereumAddress, actual: EthereumAddress)
+    case nativeAssetMetadataMismatch
+    case nativeAssetProtocolVersionMismatch
     case tokenNotWhitelisted(EthereumAddress)
     case tokenDecimalsMismatch(token: EthereumAddress, expected: UInt8, actual: UInt8)
     case invalidDecimals
@@ -58,6 +61,12 @@ extension ConfigurationValidationError: LocalizedError {
             "Factory implementation \(actual.hex) does not match \(expected.hex)."
         case let .vaultFactoryMismatch(expected, actual):
             "Vault factory \(actual.hex) does not match \(expected.hex)."
+        case let .nativeAssetCapabilityMismatch(expected, actual):
+            "Vault NATIVE_ASSET() returned \(actual.hex), not \(expected.hex)."
+        case .nativeAssetMetadataMismatch:
+            "Native asset metadata does not match the trusted chain profile."
+        case .nativeAssetProtocolVersionMismatch:
+            "Native payments require OPK Protocol 1.6."
         case let .tokenNotWhitelisted(token):
             "Token \(token.hex) is not whitelisted by this vault."
         case let .tokenDecimalsMismatch(token, expected, actual):
@@ -135,27 +144,45 @@ public struct ConfigurationValidator: Sendable {
             ),
         ]
         for token in configuration.tokens {
-            requests.append(contentsOf: [
-                .code(address: token.address, block: block),
-                .call(
-                    address: deployment.vault,
-                    data: ABI.encodeCall(
-                        selector: ABI.isPaymentTokenSelector,
-                        words: [ABI.word(token.address)]
+            if token.isNativeAsset {
+                requests.append(contentsOf: [
+                    .call(
+                        address: deployment.vault,
+                        data: ABI.encodeCall(selector: ABI.nativeAssetSelector),
+                        block: block
                     ),
-                    block: block
-                ),
-                .call(
-                    address: token.address,
-                    data: ABI.encodeCall(selector: ABI.decimalsSelector),
-                    block: block
-                ),
-                .call(
-                    address: token.address,
-                    data: ABI.encodeCall(selector: ABI.symbolSelector),
-                    block: block
-                ),
-            ])
+                    .call(
+                        address: deployment.vault,
+                        data: ABI.encodeCall(
+                            selector: ABI.isPaymentTokenSelector,
+                            words: [ABI.word(token.address)]
+                        ),
+                        block: block
+                    ),
+                ])
+            } else {
+                requests.append(contentsOf: [
+                    .code(address: token.address, block: block),
+                    .call(
+                        address: deployment.vault,
+                        data: ABI.encodeCall(
+                            selector: ABI.isPaymentTokenSelector,
+                            words: [ABI.word(token.address)]
+                        ),
+                        block: block
+                    ),
+                    .call(
+                        address: token.address,
+                        data: ABI.encodeCall(selector: ABI.decimalsSelector),
+                        block: block
+                    ),
+                    .call(
+                        address: token.address,
+                        data: ABI.encodeCall(selector: ABI.symbolSelector),
+                        block: block
+                    ),
+                ])
+            }
         }
         let results = try await resolveBatchedProofRequests(requests, rpc: rpc)
         guard results.count == requests.count else {
@@ -177,13 +204,25 @@ public struct ConfigurationValidator: Sendable {
         var tokens = [TokenValidationEvidence]()
         tokens.reserveCapacity(configuration.tokens.count)
         for token in configuration.tokens {
-            tokens.append(TokenValidationEvidence(
-                token: token,
-                code: try nextData(),
-                whitelistData: try nextData(),
-                decimalsData: try nextData(),
-                symbolData: try nextData()
-            ))
+            if token.isNativeAsset {
+                tokens.append(TokenValidationEvidence(
+                    token: token,
+                    code: nil,
+                    nativeAssetData: try nextData(),
+                    whitelistData: try nextData(),
+                    decimalsData: nil,
+                    symbolData: nil
+                ))
+            } else {
+                tokens.append(TokenValidationEvidence(
+                    token: token,
+                    code: try nextData(),
+                    nativeAssetData: nil,
+                    whitelistData: try nextData(),
+                    decimalsData: try nextData(),
+                    symbolData: try nextData()
+                ))
+            }
         }
         let final = try await rpc.batch([.canonicalBlockHash(blockNumber)])
         guard final.count == 1, case let .blockHash(finalBlockHash) = final[0] else {
@@ -289,7 +328,6 @@ public struct ConfigurationValidator: Sendable {
         var tokenEvidence = [TokenValidationEvidence]()
         tokenEvidence.reserveCapacity(configuration.tokens.count)
         for token in configuration.tokens {
-            async let code = rpc.code(at: token.address, block: block)
             async let whitelistData = rpc.call(
                 to: deployment.vault,
                 data: ABI.encodeCall(
@@ -298,23 +336,41 @@ public struct ConfigurationValidator: Sendable {
                 ),
                 block: block
             )
-            async let decimalsData = rpc.call(
-                to: token.address,
-                data: ABI.encodeCall(selector: ABI.decimalsSelector),
-                block: block
-            )
-            async let symbolData = rpc.call(
-                to: token.address,
-                data: ABI.encodeCall(selector: ABI.symbolSelector),
-                block: block
-            )
-            tokenEvidence.append(try await TokenValidationEvidence(
-                token: token,
-                code: code,
-                whitelistData: whitelistData,
-                decimalsData: decimalsData,
-                symbolData: symbolData
-            ))
+            if token.isNativeAsset {
+                async let nativeAssetData = rpc.call(
+                    to: deployment.vault,
+                    data: ABI.encodeCall(selector: ABI.nativeAssetSelector),
+                    block: block
+                )
+                tokenEvidence.append(try await TokenValidationEvidence(
+                    token: token,
+                    code: nil,
+                    nativeAssetData: nativeAssetData,
+                    whitelistData: whitelistData,
+                    decimalsData: nil,
+                    symbolData: nil
+                ))
+            } else {
+                async let code = rpc.code(at: token.address, block: block)
+                async let decimalsData = rpc.call(
+                    to: token.address,
+                    data: ABI.encodeCall(selector: ABI.decimalsSelector),
+                    block: block
+                )
+                async let symbolData = rpc.call(
+                    to: token.address,
+                    data: ABI.encodeCall(selector: ABI.symbolSelector),
+                    block: block
+                )
+                tokenEvidence.append(try await TokenValidationEvidence(
+                    token: token,
+                    code: code,
+                    nativeAssetData: nil,
+                    whitelistData: whitelistData,
+                    decimalsData: decimalsData,
+                    symbolData: symbolData
+                ))
+            }
         }
         let finalBlockHash = try await rpc.canonicalBlockHash(at: blockNumber)
         guard finalBlockHash == initialBlockHash else {
@@ -378,11 +434,46 @@ public struct ConfigurationValidator: Sendable {
 
         for tokenEvidence in evidence.tokens {
             let token = tokenEvidence.token
-            try requireCode(tokenEvidence.code, address: token.address, label: "token")
+            if token.isNativeAsset {
+                guard configuration.protocolVersion == .v1_6 else {
+                    throw ConfigurationValidationError.nativeAssetProtocolVersionMismatch
+                }
+                let advertised = try ABI.decodeAddress(
+                    requireData(tokenEvidence.nativeAssetData, label: "NATIVE_ASSET")
+                )
+                guard advertised == NativeAsset.address else {
+                    throw ConfigurationValidationError.nativeAssetCapabilityMismatch(
+                        expected: NativeAsset.address,
+                        actual: advertised
+                    )
+                }
+                guard let profile = TerminalKnownChainProfile.profile(for: configuration.chainID),
+                      token.decimals == NativeAsset.decimals,
+                      token.decimals == profile.nativeCurrencyDecimals,
+                      token.symbol == profile.nativeCurrencySymbol
+                else {
+                    throw ConfigurationValidationError.nativeAssetMetadataMismatch
+                }
+            } else {
+                try requireCode(
+                    requireData(tokenEvidence.code, label: "token code"),
+                    address: token.address,
+                    label: "token"
+                )
+            }
             guard try ABI.decodeBool(tokenEvidence.whitelistData) else {
                 throw ConfigurationValidationError.tokenNotWhitelisted(token.address)
             }
-            guard let decimals = try ABI.decodeUInt256(tokenEvidence.decimalsData).uint64Value,
+            if token.isNativeAsset {
+                checks.append(.init(
+                    name: "native asset \(token.symbol)",
+                    detail: "Protocol 1.6 capability and vault whitelist verified"
+                ))
+                continue
+            }
+            guard let decimals = try ABI.decodeUInt256(
+                requireData(tokenEvidence.decimalsData, label: "token decimals")
+            ).uint64Value,
                   let actualDecimals = UInt8(exactly: decimals)
             else { throw ConfigurationValidationError.invalidDecimals }
             guard actualDecimals == token.decimals else {
@@ -394,7 +485,9 @@ public struct ConfigurationValidator: Sendable {
             }
             let actualSymbol: String
             do {
-                actualSymbol = try ABI.decodeDynamicString(tokenEvidence.symbolData)
+                actualSymbol = try ABI.decodeDynamicString(
+                    requireData(tokenEvidence.symbolData, label: "token symbol")
+                )
             } catch {
                 throw ConfigurationValidationError.invalidTokenSymbol(token.address)
             }
@@ -419,6 +512,11 @@ public struct ConfigurationValidator: Sendable {
             throw ConfigurationValidationError.noCode(label: label, address: address)
         }
     }
+
+    private func requireData(_ data: Data?, label: String) throws -> Data {
+        guard let data else { throw RPCDecodingError.invalidData(label) }
+        return data
+    }
 }
 
 private struct ValidationEvidence: Sendable {
@@ -433,8 +531,9 @@ private struct ValidationEvidence: Sendable {
 
 private struct TokenValidationEvidence: Sendable {
     let token: PaymentToken
-    let code: Data
+    let code: Data?
+    let nativeAssetData: Data?
     let whitelistData: Data
-    let decimalsData: Data
-    let symbolData: Data
+    let decimalsData: Data?
+    let symbolData: Data?
 }

@@ -37,11 +37,18 @@ final class AmountAndERC681Tests: XCTestCase {
         XCTAssertEqual(try ERC681TransferRequest.parse(request.canonicalString), request)
     }
 
-    func testERC681RejectsNativeValueWrongFunctionAndExtras() {
+    func testERC681AcceptsCanonicalNativeAndRejectsWrongFunctionAndExtras() throws {
         let token = "0x1111111111111111111111111111111111111111"
         let receiver = "0x2222222222222222222222222222222222222222"
+        let native = try ERC681TransferRequest.parse("ethereum:\(receiver)@1?value=1")
+        XCTAssertEqual(native.token, NativeAsset.address)
+        XCTAssertEqual(native.recipient.hex, receiver)
+        XCTAssertEqual(native.canonicalString, "ethereum:\(receiver)@1?value=1")
         XCTAssertThrowsError(try ERC681TransferRequest.parse(
-            "ethereum:\(receiver)@1?value=1"
+            "ethereum:\(receiver)@1?value=01"
+        ))
+        XCTAssertThrowsError(try ERC681TransferRequest.parse(
+            "ethereum:\(receiver)@1?value=1&foo=2"
         ))
         XCTAssertThrowsError(try ERC681TransferRequest.parse(
             "ethereum:\(token)@1/approve?address=\(receiver)&uint256=1"

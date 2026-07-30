@@ -3,7 +3,7 @@
 
 package com.openpasskey.erc681
 
-/** ERC-20 metadata verified against the configured EVM network. */
+/** Payment-asset metadata verified against the configured EVM network or trusted chain profile. */
 data class PaymentTokenConfig(
     val address: EvmAddress,
     val symbol: String,

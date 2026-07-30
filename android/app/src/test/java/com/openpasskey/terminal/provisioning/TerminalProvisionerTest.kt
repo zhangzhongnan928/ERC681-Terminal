@@ -1,6 +1,7 @@
 package com.openpasskey.terminal.provisioning
 
 import com.openpasskey.erc681.EvmAddress
+import com.openpasskey.erc681.NativeAsset
 import com.openpasskey.erc681.NetworkValidation
 import com.openpasskey.terminal.chain.PaymentToken
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
@@ -41,6 +42,27 @@ class TerminalProvisionerTest {
         provisioner.provision(CANONICAL, wallet()) { commit -> commit() }
 
         assertEquals(0, reader.chainIdCalls)
+        assertEquals(1, reader.validationEvidenceCalls)
+        assertEquals(0, reader.vaultRuntimeCalls)
+    }
+
+    @Test
+    fun nativeProvisioningUsesProtocol16TrustedMetadataAndOneEvidenceProof() = runBlocking {
+        val reader = FakeReader()
+        val provisioner = TerminalProvisioner(
+            snapshot = { previous() },
+            compareAndCommit = { _, _ -> true },
+            currentWalletSnapshot = ::wallet,
+            lifecycleGate = TerminalLifecycleGate(),
+            clientFactory = ProvisioningChainReaderFactory { reader },
+        )
+
+        val result = provisioner.provision(CANONICAL_NATIVE, wallet()) { commit -> commit() }
+
+        assertEquals(NativeAsset.address.value, result.token.address)
+        assertEquals("ETH", result.token.symbol)
+        assertEquals(NativeAsset.DECIMALS, result.token.decimals)
+        assertEquals(NativeAsset.PROTOCOL_VERSION, result.profile.protocolVersion)
         assertEquals(1, reader.validationEvidenceCalls)
         assertEquals(0, reader.vaultRuntimeCalls)
     }
@@ -508,6 +530,29 @@ class TerminalProvisionerTest {
                 vaultRuntimeCode = vaultRuntime,
             )
         }
+        override fun validateWithEvidence(
+            token: EvmAddress,
+            expectedDecimals: Int,
+            expectedSymbol: String,
+        ): ProvisioningValidationEvidence {
+            provenanceCall()
+            validationEvidenceCalls += 1
+            validationFailure?.let { throw it }
+            validationHook?.invoke()
+            return ProvisioningValidationEvidence(
+                validation = NetworkValidation(
+                    chainId = remoteChainId,
+                    factory = factory,
+                    receiverImplementation = implementation,
+                    vault = VAULT,
+                    token = token,
+                    tokenWhitelisted = whitelisted,
+                    tokenDecimals = expectedDecimals,
+                    tokenSymbol = expectedSymbol,
+                ),
+                vaultRuntimeCode = vaultRuntime,
+            )
+        }
         override fun validate(
             token: EvmAddress,
             expectedDecimals: Int,
@@ -596,6 +641,9 @@ class TerminalProvisionerTest {
         const val CANONICAL = "opk-terminal:provision?v=1&chainId=84532&vault=" +
             "0x3333333333333333333333333333333333333333&token=" +
             "0x7ffba642bc902880a737cb1c18a4e9540879e211&operator=$OPERATOR"
+        const val CANONICAL_NATIVE = "opk-terminal:provision?v=1&chainId=84532&vault=" +
+            "0x3333333333333333333333333333333333333333&token=" +
+            "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE&operator=$OPERATOR"
         const val KNOWN_VAULT_RUNTIME_HASH =
             "0x2ceea713f7225b17e43487b8652d8582dadd5aabefc5b9f78d231777958655b9"
         val CANONICAL_VAULT_RUNTIME: ByteArray = Numeric.hexStringToByteArray(

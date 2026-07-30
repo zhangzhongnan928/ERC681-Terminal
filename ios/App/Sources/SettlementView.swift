@@ -205,7 +205,15 @@ private struct SettlementConfirmationView: View {
                 Section("Zero-value sweep") {
                     LabeledContent("Sessions", value: String(prepared.intent.sessions.count))
                     LabeledContent("Vault", value: abbreviateSettlement(prepared.intent.vault.hex))
-                    LabeledContent("Token", value: abbreviateSettlement(prepared.intent.token.hex))
+                    LabeledContent(
+                        "Asset",
+                        value: NativeAsset.isNative(prepared.intent.token)
+                            ? (
+                                TerminalKnownChainProfile.profile(for: prepared.intent.chainID)?
+                                    .nativeCurrencySymbol ?? "Native asset"
+                            )
+                            : abbreviateSettlement(prepared.intent.token.hex)
+                    )
                     LabeledContent("Gas limit", value: String(prepared.gasLimit))
                     LabeledContent(
                         "Maximum gas reserve",
@@ -241,7 +249,7 @@ private struct SettlementConfirmationView: View {
                 } header: {
                     Text("Live receiver evidence")
                 } footer: {
-                    Text("Balances were read directly from the token contract and will be checked again before signing. A confirmed positive sweep below the immutable expected amount remains Needs review and can be completed by a later sweep.")
+                    Text("Balances were read directly from each receiver on chain and will be checked again before signing. A confirmed positive sweep below the immutable expected amount remains Needs review and can be completed by a later sweep.")
                 }
 
                 Section {

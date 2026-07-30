@@ -3,6 +3,7 @@ package com.openpasskey.terminal.provisioning
 import com.openpasskey.erc681.Create2ReceiverResolver
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.erc681.InvoiceId
+import com.openpasskey.erc681.NativeAsset
 import java.math.BigInteger
 
 data class KnownChainProfile(
@@ -25,6 +26,9 @@ data class KnownChainProfile(
     val fixtureInitCodeHash: String,
     val fixtureReceiver: EvmAddress,
 ) {
+    fun protocolVersionFor(paymentAsset: EvmAddress): String =
+        if (NativeAsset.isNative(paymentAsset)) NativeAsset.PROTOCOL_VERSION else protocolVersion
+
     /** Runtime guard against accidentally shipping pins that disagree with the local CREATE2 rail. */
     fun requireValidCreate2Fixture() {
         val actual = Create2ReceiverResolver(factory, receiverImplementation)

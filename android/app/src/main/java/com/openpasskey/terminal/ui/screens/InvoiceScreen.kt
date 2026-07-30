@@ -58,6 +58,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.openpasskey.erc681.EvmAddress
+import com.openpasskey.erc681.NativeAsset
 import androidx.compose.ui.unit.sp
 import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
@@ -587,7 +589,7 @@ private fun ProfileSelector(
         OutlinedTextField(
             value = selected?.let {
                 "${it.token.symbol} · ${it.networkName} · " +
-                    "${short(it.vaultAddress)} · ${short(it.token.address)}"
+                    "${short(it.vaultAddress)} · ${paymentAssetLabel(it)}"
             } ?: "",
             onValueChange = {},
             readOnly = true,
@@ -606,7 +608,7 @@ private fun ProfileSelector(
                     text = {
                         Text(
                             "${profile.token.symbol} · ${profile.networkName}\n" +
-                                "Vault ${short(profile.vaultAddress)} · Token ${short(profile.token.address)}",
+                                "Vault ${short(profile.vaultAddress)} · Asset ${paymentAssetLabel(profile)}",
                         )
                     },
                     onClick = { onSelected(profile); expanded = false },
@@ -618,3 +620,10 @@ private fun ProfileSelector(
 
 private fun short(address: String): String =
     if (address.length <= 12) address else "${address.take(6)}…${address.takeLast(4)}"
+
+private fun paymentAssetLabel(profile: TerminalPaymentProfile): String =
+    if (NativeAsset.isNative(EvmAddress.parse(profile.token.address))) {
+        profile.token.symbol
+    } else {
+        short(profile.token.address)
+    }

@@ -35,6 +35,8 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.openpasskey.erc681.EvmAddress
+import com.openpasskey.erc681.NativeAsset
 import com.openpasskey.terminal.data.model.Invoice
 import com.openpasskey.terminal.data.model.InvoiceStatus
 import com.openpasskey.terminal.ui.components.QRCodeView
@@ -190,7 +192,14 @@ private fun DetailCard(invoice: Invoice) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Detail("Network", "${invoice.networkName} (${invoice.chainId})")
-            Detail("Token", "${invoice.tokenSymbol} · ${invoice.token}")
+            Detail(
+                "Asset",
+                if (NativeAsset.isNative(EvmAddress.parse(invoice.token))) {
+                    invoice.tokenSymbol
+                } else {
+                    "${invoice.tokenSymbol} · ${invoice.token}"
+                },
+            )
             Detail("Receiver", invoice.receiver)
             Detail("Invoice", invoice.invoiceId)
             Text("ERC-681 URI", style = MaterialTheme.typography.labelMedium)

@@ -63,7 +63,7 @@ Reports touching these are especially welcome:
 
 - escaping the constrained signer — anything that produces a signature
   outside the `sweepSessions(bytes32[],uint256[],address)` selector, a
-  pinned chain and vault, zero native value, or a whitelisted token;
+  pinned chain and vault, zero transaction value, or a whitelisted payment asset;
 - key extraction from Android Keystore or iOS Keychain storage, or
   bypassing the per-signing authentication prompt;
 - CREATE2 receiver derivation mismatches, or receiver reuse that the

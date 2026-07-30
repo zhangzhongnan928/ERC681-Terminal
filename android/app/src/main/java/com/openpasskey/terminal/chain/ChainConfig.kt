@@ -7,6 +7,7 @@ import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.erc681.NetworkConfig
+import com.openpasskey.erc681.NativeAsset
 import com.openpasskey.erc681.PaymentProfile
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
 
@@ -580,7 +581,13 @@ private fun TerminalPaymentProfile.requireComplete() {
     require(networkName == known.networkName)
     require(factoryAddress.equals(known.factory.value, true))
     require(receiverImplementationAddress.equals(known.receiverImplementation.value, true))
-    require(protocolVersion == known.protocolVersion)
+    val paymentAsset = EvmAddress.parse(token.address)
+    require(protocolVersion == known.protocolVersionFor(paymentAsset))
+    if (NativeAsset.isNative(paymentAsset)) {
+        require(token.symbol == known.nativeCurrencySymbol)
+        require(token.decimals == known.nativeCurrencyDecimals)
+        require(token.decimals == NativeAsset.DECIMALS)
+    }
     NetworkConfig(
         chainId = chainId,
         rpcUrl = rpcUrl,

@@ -193,6 +193,10 @@ public struct TerminalKnownChainProfile: Hashable, Sendable {
         all.first { $0.chainID == chainID }
     }
 
+    public func protocolVersion(for paymentAsset: EthereumAddress) -> OPKProtocolVersion {
+        NativeAsset.isNative(paymentAsset) ? .v1_6 : protocolVersion
+    }
+
     /// EVM networks whose deployment trust anchors are enabled in the production app. Adding a
     /// network is an explicit release action: a provisioning QR can select only an entry in this
     /// registry. The reusable payment-profile catalog remains EVM-generic.

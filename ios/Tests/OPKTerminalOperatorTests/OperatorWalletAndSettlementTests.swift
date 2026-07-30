@@ -200,6 +200,39 @@ final class OperatorWalletAndSettlementTests: XCTestCase {
         XCTAssertEqual(maximumInFlight, 2)
     }
 
+    func testProductionNativeSettlementBalancesUseReceiverEthGetBalance() async throws {
+        let transport = OperatorQueueTransport([
+            #"[{"jsonrpc":"2.0","id":2,"result":"0x2"},{"jsonrpc":"2.0","id":1,"result":"0x1"}]"#,
+        ])
+        let client = try OperatorRPCClient(
+            endpoint: URL(string: "https://rpc.example")!,
+            transport: transport
+        )
+        let accounts = try [1, 2].map { index in
+            try EthereumAddress(hex: "0x" + String(format: "%040llx", index))
+        }
+
+        let balances = try await client.tokenBalances(
+            token: NativeAsset.address,
+            accounts: accounts
+        )
+
+        XCTAssertEqual(balances, [UInt256(1), UInt256(2)])
+        let bodies = await transport.requestBodies
+        let batch = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: bodies[0]) as? [[String: Any]]
+        )
+        XCTAssertEqual(batch.map { $0["method"] as? String }, [
+            "eth_getBalance",
+            "eth_getBalance",
+        ])
+        for (request, account) in zip(batch, accounts) {
+            let params = try XCTUnwrap(request["params"] as? [String])
+            XCTAssertEqual(params, [account.hex, "latest"])
+            XCTAssertFalse(params.joined().lowercased().contains(NativeAsset.address.hex))
+        }
+    }
+
     func testOperatorEndpointPoolReusesClientIdentity() throws {
         let pool = OperatorRPCClientPool(transport: OperatorQueueTransport([]))
         let endpoint = URL(string: "https://rpc.example")!
@@ -317,7 +350,7 @@ final class OperatorWalletAndSettlementTests: XCTestCase {
     func testSettlementABIExactlyMatchesSharedFixtures() throws {
         let root = try loadFixture()
         XCTAssertEqual(root.schemaVersion, 2)
-        XCTAssertEqual(root.paymentVectorVersion, "1.5")
+        XCTAssertEqual(root.paymentVectorVersion, "1.6")
         XCTAssertEqual(root.deploymentProtocolVersion, "1.5")
         let fixture = root.settlementAbi
         let intent = try makeIntent()

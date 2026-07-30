@@ -6,7 +6,7 @@ package com.openpasskey.erc681
 import java.math.BigDecimal
 import java.math.BigInteger
 
-/** An exact, positive ERC-20 amount represented in raw on-chain units. */
+/** An exact, positive payment amount represented in raw ERC-20 units or native wei. */
 data class TokenAmount(
     val rawUnits: BigInteger,
     val decimals: Int,

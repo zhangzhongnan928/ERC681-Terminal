@@ -15,6 +15,7 @@ private actor ProvisioningRPC: EthereumReadRPC {
     let fixedHeadReportedFactory: EthereumAddress?
     let symbolResult: Data
     let whitelisted: Bool
+    let nativeAssetResult: EthereumAddress?
     let replaceFinalHeadHash: Bool
     private(set) var getterCallCount = 0
     private var canonicalHashReadCount = 0
@@ -30,6 +31,7 @@ private actor ProvisioningRPC: EthereumReadRPC {
         fixedHeadReportedFactory: EthereumAddress? = nil,
         symbolResult: Data = TerminalProvisionerTests.abiString("AUD"),
         whitelisted: Bool = true,
+        nativeAssetResult: EthereumAddress? = NativeAsset.address,
         replaceFinalHeadHash: Bool = false
     ) {
         self.chain = chain
@@ -42,6 +44,7 @@ private actor ProvisioningRPC: EthereumReadRPC {
         self.fixedHeadReportedFactory = fixedHeadReportedFactory
         self.symbolResult = symbolResult
         self.whitelisted = whitelisted
+        self.nativeAssetResult = nativeAssetResult
         self.replaceFinalHeadHash = replaceFinalHeadHash
     }
 
@@ -78,6 +81,10 @@ private actor ProvisioningRPC: EthereumReadRPC {
         }
         if address == vault && selector == ABI.isPaymentTokenSelector {
             return ABI.word(UInt64(whitelisted ? 1 : 0))
+        }
+        if address == vault && selector == ABI.nativeAssetSelector {
+            guard let nativeAssetResult else { throw URLError(.badServerResponse) }
+            return ABI.word(nativeAssetResult)
         }
         if address == token && selector == ABI.decimalsSelector {
             return ABI.word(UInt64(18))
@@ -142,6 +149,8 @@ private actor HistoricalBatchedRPC: EthereumBatchReadRPC {
                 if address == token && selector == ABI.symbolSelector {
                     return .data(TerminalProvisionerTests.abiString("AUD"))
                 }
+                throw URLError(.badServerResponse)
+            case .balance:
                 throw URLError(.badServerResponse)
             }
         }
@@ -214,6 +223,54 @@ final class TerminalProvisionerTests: XCTestCase {
         XCTAssertEqual(result.configuration.confirmationPolicy.requiredBlocks, 7)
         XCTAssertNotNil(result.configuration.create2TestVector)
         XCTAssertTrue(result.validationReport.checks.contains { $0.name == "CREATE2 vector" })
+    }
+
+    func testNativeProvisioningRequiresCapabilityAndWhitelistAndUsesTrustedMetadata() async throws {
+        let profile = TerminalKnownChainProfile.baseSepolia
+        let rpc = ProvisioningRPC(vault: vault, token: NativeAsset.address)
+        let result = try await TerminalProvisioner(rpcFactory: { _ in rpc }).deriveAndValidate(
+            payload(token: NativeAsset.address),
+            expectedOperator: operatorAddress,
+            confirmationPolicy: .init(requiredBlocks: 2)
+        )
+
+        XCTAssertEqual(result.configuration.protocolVersion, .v1_6)
+        XCTAssertEqual(result.configuration.tokens.count, 1)
+        XCTAssertEqual(result.configuration.tokens.first?.address, NativeAsset.address)
+        XCTAssertEqual(result.configuration.tokens.first?.symbol, profile.nativeCurrencySymbol)
+        XCTAssertEqual(result.configuration.tokens.first?.decimals, NativeAsset.decimals)
+        XCTAssertTrue(result.validationReport.checks.contains {
+            $0.name == "native asset \(profile.nativeCurrencySymbol)"
+        })
+
+        let wrongCapability = try EthereumAddress(
+            hex: "0x2222222222222222222222222222222222222222"
+        )
+        let pre16RPC = ProvisioningRPC(
+            vault: vault,
+            token: NativeAsset.address,
+            nativeAssetResult: wrongCapability
+        )
+        await XCTAssertThrowsErrorAsync(
+            try await TerminalProvisioner(rpcFactory: { _ in pre16RPC }).deriveAndValidate(
+                payload(token: NativeAsset.address),
+                expectedOperator: operatorAddress,
+                confirmationPolicy: .init(requiredBlocks: 2)
+            )
+        )
+
+        let unlistedRPC = ProvisioningRPC(
+            vault: vault,
+            token: NativeAsset.address,
+            whitelisted: false
+        )
+        await XCTAssertThrowsErrorAsync(
+            try await TerminalProvisioner(rpcFactory: { _ in unlistedRPC }).deriveAndValidate(
+                payload(token: NativeAsset.address),
+                expectedOperator: operatorAddress,
+                confirmationPolicy: .init(requiredBlocks: 2)
+            )
+        )
     }
 
     func testZeroConfirmationPolicyNormalizesToKnownNetworkMinimum() async throws {
@@ -609,11 +666,11 @@ final class TerminalProvisionerTests: XCTestCase {
         XCTAssertTrue(probe.calls.isEmpty)
     }
 
-    private func payload() throws -> TerminalProvisioningPayload {
+    private func payload(token: EthereumAddress? = nil) throws -> TerminalProvisioningPayload {
         try TerminalProvisioningPayload(
             chainID: 84_532,
             vault: vault,
-            token: token,
+            token: token ?? self.token,
             operatorAddress: operatorAddress
         )
     }

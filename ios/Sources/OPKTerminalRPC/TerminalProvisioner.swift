@@ -176,6 +176,46 @@ public struct TerminalProvisioner:
             )
         }
 
+        let tokenDecimals: UInt8
+        let tokenSymbol: String
+        if NativeAsset.isNative(payload.token) {
+            let nativeAssetData = try await trustedRPC.call(
+                to: payload.vault,
+                data: ABI.encodeCall(selector: ABI.nativeAssetSelector),
+                block: .latest
+            )
+            let advertisedNativeAsset = try ABI.decodeAddress(nativeAssetData)
+            guard advertisedNativeAsset == NativeAsset.address else {
+                throw ConfigurationValidationError.nativeAssetCapabilityMismatch(
+                    expected: NativeAsset.address,
+                    actual: advertisedNativeAsset
+                )
+            }
+            tokenDecimals = profile.nativeCurrencyDecimals
+            tokenSymbol = profile.nativeCurrencySymbol
+        } else {
+            let decimalsData = try await trustedRPC.call(
+                to: payload.token,
+                data: ABI.encodeCall(selector: ABI.decimalsSelector),
+                block: .latest
+            )
+            guard let decimals = try ABI.decodeUInt256(decimalsData).uint64Value,
+                  let decodedDecimals = UInt8(exactly: decimals)
+            else { throw ConfigurationValidationError.invalidDecimals }
+            tokenDecimals = decodedDecimals
+
+            let symbolData = try await trustedRPC.call(
+                to: payload.token,
+                data: ABI.encodeCall(selector: ABI.symbolSelector),
+                block: .latest
+            )
+            do {
+                tokenSymbol = try ABI.decodeDynamicString(symbolData)
+            } catch {
+                throw ConfigurationValidationError.invalidTokenSymbol(payload.token)
+            }
+        }
+
         let whitelistData = try await trustedRPC.call(
             to: payload.vault,
             data: ABI.encodeCall(
@@ -188,31 +228,10 @@ public struct TerminalProvisioner:
             throw ConfigurationValidationError.tokenNotWhitelisted(payload.token)
         }
 
-        let decimalsData = try await trustedRPC.call(
-            to: payload.token,
-            data: ABI.encodeCall(selector: ABI.decimalsSelector),
-            block: .latest
-        )
-        guard let decimals = try ABI.decodeUInt256(decimalsData).uint64Value,
-              let tokenDecimals = UInt8(exactly: decimals)
-        else { throw ConfigurationValidationError.invalidDecimals }
-
-        let symbolData = try await trustedRPC.call(
-            to: payload.token,
-            data: ABI.encodeCall(selector: ABI.symbolSelector),
-            block: .latest
-        )
-        let tokenSymbol: String
-        do {
-            tokenSymbol = try ABI.decodeDynamicString(symbolData)
-        } catch {
-            throw ConfigurationValidationError.invalidTokenSymbol(payload.token)
-        }
-
         let configuration = try TerminalConfiguration(
             chainID: profile.chainID,
             rpcEndpoints: [operationalEndpoint],
-            protocolVersion: profile.protocolVersion,
+            protocolVersion: profile.protocolVersion(for: payload.token),
             deployment: OPKDeployment(
                 factory: derivedFactory,
                 receiverImplementation: derivedImplementation,
@@ -254,12 +273,19 @@ public struct TerminalProvisioner:
         guard let profile = TerminalKnownChainProfile.profile(for: configuration.chainID) else {
             throw TerminalProvisioningValidationError.unknownChain(configuration.chainID)
         }
-        guard configuration.protocolVersion == profile.protocolVersion,
+        guard configuration.tokens.count == 1,
+              let paymentAsset = configuration.tokens.first,
+              configuration.protocolVersion == profile.protocolVersion(for: paymentAsset.address),
               configuration.deployment.factory == profile.factory,
               configuration.deployment.receiverImplementation == profile.receiverImplementation,
               configuration.create2TestVector == nil
                 || configuration.create2TestVector == profile.create2TestVector,
-              configuration.tokens.count == 1
+              !paymentAsset.isNativeAsset
+                || (
+                    paymentAsset.symbol == profile.nativeCurrencySymbol
+                        && paymentAsset.decimals == profile.nativeCurrencyDecimals
+                        && paymentAsset.decimals == NativeAsset.decimals
+                )
         else { throw TerminalProvisioningValidationError.historicalDeploymentPinMismatch }
 
         // The saved endpoint remains the operational endpoint for balances and broadcasts, but

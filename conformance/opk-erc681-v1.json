@@ -1,12 +1,14 @@
 {
   "schemaVersion": 2,
-  "rail": "OPK ERC-20 ERC-681 QR",
-  "paymentVectorVersion": "1.5",
+  "rail": "OPK ERC-681 QR payment assets",
+  "paymentVectorVersion": "1.6",
   "deploymentProtocolVersion": "1.5",
   "notes": [
-    "Amounts are raw integer token units.",
+    "Amounts are raw integer payment-asset units; native amounts are raw wei with 18 decimals.",
     "Receiver derivation is local and uses Keccak-256, not NIST SHA3-256.",
-    "Only the ERC-20 transfer function form is accepted. Native-asset value requests are out of scope.",
+    "ERC-20 uses transfer(address,uint256); the native asset uses the plain value-transfer form targeting the receiver.",
+    "The EIP-7528 sentinel is an on-chain identifier and never an ERC-681 target.",
+    "Native capability requires a successful vault NATIVE_ASSET() read plus isPaymentToken(sentinel) == true.",
     "The example vault and token are deterministic conformance inputs, not a live merchant configuration.",
     "The settlement ABI vectors target ClearingVault v1.5 and require canonical Swept event verification."
   ],
@@ -39,10 +41,16 @@
     "display": "12.34",
     "rawUnits": "12340000000000000000"
   },
+  "nativeAsset": {
+    "identifier": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+    "symbol": "ETH",
+    "decimals": 18
+  },
   "readOnlyAbi": {
     "implementation()": "0x5c60da1b",
     "factory()": "0xc45a0155",
     "isPaymentToken(address)": "0x930eaddc",
+    "NATIVE_ASSET()": "0xbf53253b",
     "decimals()": "0x313ce567",
     "symbol()": "0x95d89b41",
     "balanceOf(address)": "0x70a08231",
@@ -92,8 +100,9 @@
     "transactionHash": "0x8c04e98af9e2ed1c4c993a1d5ed15b4bfcc8fcf53d7679a1c3a901f5fe9935e8"
   },
   "erc681": "ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c&uint256=12340000000000000000",
+  "nativeErc681": "ethereum:0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c@84532?value=12340000000000000000",
   "mustReject": [
-    "ethereum:0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c@84532?value=12340000000000000000",
+    "ethereum:0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee@84532?value=12340000000000000000",
     "ethereum:0x7fFbA642bc902880a737cb1c18a4E9540879e211@84532/approve?address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c&uint256=12340000000000000000",
     "ethereum:0x7fFbA642bc902880a737cb1c18a4E9540879e211@84532/transfer?address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c&uint256=0",
     "ethereum:0x7fFbA642bc902880a737cb1c18a4E9540879e211@1/transfer?address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c&uint256=12340000000000000000"

@@ -18,6 +18,7 @@ public enum ABI {
     public static let implementationSelector = selector("implementation()")
     public static let isOperatorSelector = selector("isOperator(address)")
     public static let isPaymentTokenSelector = selector("isPaymentToken(address)")
+    public static let nativeAssetSelector = selector("NATIVE_ASSET()")
     public static let computeReceiverSelector = selector("computeReceiver(address,bytes32)")
     public static let settledSelector = selector("settled(bytes32,address)")
 

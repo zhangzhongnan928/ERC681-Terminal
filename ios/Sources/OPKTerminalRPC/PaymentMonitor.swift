@@ -144,18 +144,10 @@ public struct ReceiverFreshnessValidator: Sendable {
             let block = RPCBlockTag.number(head)
             let proof = try await batchRPC.batch([
                 .code(address: receiver, block: block),
-                .call(
-                    address: token,
-                    data: ABI.encodeCall(
-                        selector: ABI.balanceOfSelector,
-                        words: [ABI.word(receiver)]
-                    ),
-                    block: block
-                ),
+                assetBalanceRequest(asset: token, holder: receiver, block: block),
             ])
             guard proof.count == 2,
-                  case let .data(receiverCode) = proof[0],
-                  case let .data(balanceData) = proof[1]
+                  case let .data(receiverCode) = proof[0]
             else { throw RPCDecodingError.invalidData("receiver freshness proof") }
             let final = try await batchRPC.batch([.canonicalBlockHash(head)])
             guard final.count == 1, case let .blockHash(finalBlockHash) = final[0] else {
@@ -168,7 +160,7 @@ public struct ReceiverFreshnessValidator: Sendable {
                 blockNumber: head,
                 blockHash: finalBlockHash,
                 receiverCode: receiverCode,
-                tokenBalance: try ABI.decodeUInt256(balanceData)
+                tokenBalance: try decodeAssetBalance(proof[1], asset: token)
             )
         }
 
@@ -184,15 +176,13 @@ public struct ReceiverFreshnessValidator: Sendable {
         let block = RPCBlockTag.number(resolvedHead)
         let initialBlockHash = try await rpc.canonicalBlockHash(at: resolvedHead)
         async let receiverCode = rpc.code(at: receiver, block: block)
-        async let balanceData = rpc.call(
-            to: token,
-            data: ABI.encodeCall(
-                selector: ABI.balanceOfSelector,
-                words: [ABI.word(receiver)]
-            ),
+        async let balance = readAssetBalance(
+            rpc: rpc,
+            asset: token,
+            holder: receiver,
             block: block
         )
-        let reads = try await (receiverCode, balanceData)
+        let reads = try await (receiverCode, balance)
         let finalBlockHash = try await rpc.canonicalBlockHash(at: resolvedHead)
         guard finalBlockHash == initialBlockHash else {
             throw PaymentMonitorError.canonicalBlockChanged(blockNumber: resolvedHead)
@@ -201,7 +191,7 @@ public struct ReceiverFreshnessValidator: Sendable {
             blockNumber: resolvedHead,
             blockHash: finalBlockHash,
             receiverCode: reads.0,
-            tokenBalance: try ABI.decodeUInt256(reads.1)
+            tokenBalance: reads.1
         )
     }
 }
@@ -308,12 +298,9 @@ public struct PaymentMonitor: Sendable {
         var proofRequests = [EthereumReadBatchRequest]()
         proofRequests.reserveCapacity(inputs.count + orderedHistoricalBlocks.count)
         proofRequests.append(contentsOf: inputs.map { input in
-            .call(
-                address: input.request.token.address,
-                data: ABI.encodeCall(
-                    selector: ABI.balanceOfSelector,
-                    words: [ABI.word(input.request.receiver)]
-                ),
+            assetBalanceRequest(
+                asset: input.request.token.address,
+                holder: input.request.receiver,
                 block: .number(block)
             )
         })
@@ -328,10 +315,10 @@ public struct PaymentMonitor: Sendable {
         var balances = [UInt256]()
         balances.reserveCapacity(inputs.count)
         for index in inputs.indices {
-            guard case let .data(data) = proof[index] else {
-                throw RPCDecodingError.invalidData("payment balance batch")
-            }
-            balances.append(try ABI.decodeUInt256(data))
+            balances.append(try decodeAssetBalance(
+                proof[index],
+                asset: inputs[index].request.token.address
+            ))
         }
         var historicalHashes = [UInt64: Bytes32]()
         let hashOffset = inputs.count
@@ -470,6 +457,8 @@ public struct PaymentMonitor: Sendable {
             .data(try await rpc.code(at: address, block: block))
         case let .call(address, data, block):
             .data(try await rpc.call(to: address, data: data, block: block))
+        case let .balance(address, block):
+            .uint256(try await rpc.balance(of: address, block: block))
         }
     }
 
@@ -594,4 +583,58 @@ public struct PaymentMonitor: Sendable {
             continuation.onTermination = { @Sendable _ in task.cancel() }
         }
     }
+}
+
+private func assetBalanceRequest(
+    asset: EthereumAddress,
+    holder: EthereumAddress,
+    block: RPCBlockTag
+) -> EthereumReadBatchRequest {
+    if NativeAsset.isNative(asset) {
+        return .balance(address: holder, block: block)
+    }
+    return .call(
+        address: asset,
+        data: ABI.encodeCall(
+            selector: ABI.balanceOfSelector,
+            words: [ABI.word(holder)]
+        ),
+        block: block
+    )
+}
+
+private func decodeAssetBalance(
+    _ result: EthereumReadBatchResult,
+    asset: EthereumAddress
+) throws -> UInt256 {
+    if NativeAsset.isNative(asset) {
+        guard case let .uint256(value) = result else {
+            throw RPCDecodingError.invalidData("native payment balance")
+        }
+        return value
+    }
+    guard case let .data(data) = result else {
+        throw RPCDecodingError.invalidData("ERC-20 payment balance")
+    }
+    return try ABI.decodeUInt256(data)
+}
+
+private func readAssetBalance(
+    rpc: any EthereumReadRPC,
+    asset: EthereumAddress,
+    holder: EthereumAddress,
+    block: RPCBlockTag
+) async throws -> UInt256 {
+    if NativeAsset.isNative(asset) {
+        return try await rpc.balance(of: holder, block: block)
+    }
+    let data = try await rpc.call(
+        to: asset,
+        data: ABI.encodeCall(
+            selector: ABI.balanceOfSelector,
+            words: [ABI.word(holder)]
+        ),
+        block: block
+    )
+    return try ABI.decodeUInt256(data)
 }

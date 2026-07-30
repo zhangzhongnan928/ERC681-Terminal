@@ -1,12 +1,13 @@
 # OPK ERC-681 Terminal for iOS
 
 This directory contains a keyless, read-only Swift payment SDK and a SwiftUI terminal app for
-ERC-20 payments presented as canonical ERC-681 QR codes. The app stores a catalog of EVM payment
-profiles and chooses one network/vault/token profile per invoice. Its separately isolated operator
+ERC-20 and OPK Protocol 1.6 chain-native payments presented as canonical ERC-681 QR codes. The app
+stores a catalog of EVM payment profiles and chooses one network/vault/payment-asset profile per
+invoice. Its separately isolated operator
 module manages one device-local settlement key and can sign only constrained `sweepSessions`
 transactions; the payment Core and RPC products do not handle keys or submit transactions. There
 is no customer payment-QR importing, NFC, or CoreNFC capability. Camera access is limited to
-importing contract and token addresses in the Settings UI; payment/function URIs and other
+importing contract and payment-asset addresses in the Settings UI; payment/function URIs and other
 non-address payloads fail closed. The Swift package libraries remain camera-free.
 
 ## Components
@@ -14,8 +15,8 @@ non-address payloads fail closed. The Swift package libraries remain camera-free
 - `OPKTerminalCore`: validated EVM values, exact raw-unit amounts, Ethereum Keccak-256, read-only
   ABI helpers, invoice IDs, local CREATE2 receiver derivation, strict ERC-681, cross-network
   payment-profile catalogs, payment models, and metadata-only settlement handoff.
-- `OPKTerminalRPC`: read-only JSON-RPC methods, chain/contract/token configuration validation, and
-  block-confirmed balance observation.
+- `OPKTerminalRPC`: read-only JSON-RPC methods, chain/contract/payment-asset configuration
+  validation, and block-confirmed ERC-20 or native balance observation.
 - `OPKTerminalOperator`: device-local secp256k1 key storage, constrained settlement transaction
   construction and submission, and confirmed `Swept`-event verification.
 - `OPKTerminalConformance`: dependency-free executable checks for the shared Android/iOS golden
@@ -61,7 +62,8 @@ physical-device test before release; manual entry remains available when camera 
 
 ## Configuration and safety
 
-The sample defaults to the Base Sepolia v1.5 deployment trust anchors:
+The sample defaults to the Base Sepolia deployment trust anchors and OPK Protocol 1.5 ERC-20
+baseline:
 
 - Chain ID: `84532`
 - Factory: `0xb69f725999266c6757284ca4169275c3ebde491a`
@@ -69,29 +71,35 @@ The sample defaults to the Base Sepolia v1.5 deployment trust anchors:
 - Deployed vault-proxy runtime hash: `0x2ceea713f7225b17e43487b8652d8582dadd5aabefc5b9f78d231777958655b9`
 - CREATE2 example vault: `0x1111111111111111111111111111111111111111`
 - AUD token: `0x7ffba642bc902880a737cb1c18a4e9540879e211`, 18 decimals
+- Native asset identifier: `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` (`ETH`, 18 decimals)
 
 The proxy hash is over exact on-chain bytecode with the Base Sepolia beacon immutable embedded;
 the zero-immutable artifact hash emitted by the upstream browser deployer is not valid for raw
 `eth_getCode` verification.
 
 The example vault is a deterministic off-chain vector, not a deployed merchant vault. The app
-remains unprovisioned until a portal QR identifies a live v1.5 vault and whitelisted token that pass
-the complete on-chain validation flow.
+remains unprovisioned until a portal QR identifies a compatible live vault and whitelisted payment
+asset that pass the complete on-chain validation flow. A native route is assigned protocol version
+1.6 only after the vault successfully answers `NATIVE_ASSET()` with the exact sentinel and
+whitelists it. `isPaymentToken(NATIVE_ASSET) == false` alone does not prove that a vault lacks 1.6
+support.
 
 Base Sepolia is the only network enabled in the production app in this release. The Swift
 payment-profile catalog remains EVM-generic, but Base Mainnet (`8453`) and other chains are rejected
 before RPC use. Mainnet v1.5 is deployed but remains disabled pending explicit product enablement,
 a reviewed operational RPC policy, and addition of its deployment pins, CREATE2 vector, finality
-policy, native-currency metadata, and operator gas reserve to the immutable app registry. Multiple vault/token profiles
+policy, native-currency metadata, and operator gas reserve to the immutable app registry. Multiple
+vault/payment-asset profiles
 can coexist, while one selected profile supplies the exact configuration snapshot saved with each
 invoice and validated before presenting a QR. RPC
 URLs must use HTTPS, except loopback HTTP for local development, and embedded URL credentials and
 fragments are rejected.
 
-One payment profile binds exactly one EVM chain, vault, and ERC-20 token. Up to 32 canonical
+One payment profile binds exactly one EVM chain, vault, and ERC-20 or native payment asset. Up to 32
+canonical
 profiles can be added or updated by scanning existing provisioning-v1 QRs; scanning never replaces
-unrelated profiles. Checkout selects one profile for one invoice, so a payment never mixes tokens
-or networks. Profile identity is `eip155:<chain>:<vault>:<token>`, not the token symbol. Admin can
+unrelated profiles. Checkout selects one profile for one invoice, so a payment never mixes assets
+or networks. Profile identity is `eip155:<chain>:<vault>:<token>`, not the displayed symbol. Admin can
 remove a local profile with confirmation without rewriting immutable invoice or settlement
 history. The SDK's `TerminalPaymentProfileCatalog` provides matching select/upsert/remove behavior.
 
@@ -100,9 +108,18 @@ a raw non-zero EVM address or an address-only `ethereum:` URI; it rejects custom
 without importing or acting on them. A denied camera permission, cancellation, or camera-less device leaves manual entry
 available. Imported addresses remain subject to the same local and on-chain configuration checks.
 
-The app refuses a newly derived receiver if it already has code or a token balance at the sampled
-block. Paid, overpaid, expired, and locally closed invoices never render a payable QR, including in
-History. Expiry closes zero-balance and partially funded requests alike.
+The app refuses a newly derived receiver if it already has code or a payment-asset balance at the
+sampled block. It reads ERC-20 balances with `balanceOf` and native balances with
+`eth_getBalance`, which also works before the counterfactual receiver is deployed. Paid, overpaid,
+expired, and locally closed invoices never render a payable QR, including in History. Expiry
+closes zero-balance and partially funded requests alike.
+
+ERC-20 invoices use the canonical `transfer(address,uint256)` ERC-681 form. Native invoices use
+the plain value-transfer form `ethereum:{receiver}@{chainId}?value={amountWei}`. The sentinel is an
+on-chain identifier and never appears in the customer QR. A fresh 1.6 stack must publish and pin
+its own factory, receiver implementation, runtime hashes, and CREATE2 vector: changing the factory
+or receiver implementation changes every derived receiver address. Only an in-place beacon
+upgrade of the existing stack can preserve those commitments.
 
 The operator wallet must exist before the app can present a new payment QR. Its public EOA address
 is the terminal identity supplied as `terminalIdentifier` for every new invoice. Vault
