@@ -8,7 +8,7 @@ final class StoredInvoice {
     var terminalIdentifier: String
     var rpcURL: String = ""
     var chainID: Int64
-    var protocolVersion: String = OPKProtocolVersion.v1_5.rawValue
+    var protocolVersion: String = OPKProtocolVersion.v1_6.rawValue
     var factory: String = ""
     var receiverImplementation: String = ""
     var vault: String

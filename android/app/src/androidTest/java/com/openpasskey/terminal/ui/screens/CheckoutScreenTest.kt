@@ -181,7 +181,7 @@ class CheckoutScreenTest {
             vaultAddress = "0x4444444444444444444444444444444444444444",
             confirmationBlocks = 2,
             token = TOKEN,
-            protocolVersion = "1.5",
+            protocolVersion = "1.6",
         )
     }
 }

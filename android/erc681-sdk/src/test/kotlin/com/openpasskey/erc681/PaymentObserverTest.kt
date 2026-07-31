@@ -13,7 +13,7 @@ import kotlin.test.assertTrue
 
 class PaymentObserverTest {
     private val token = EvmAddress.parse("0x7fFbA642bc902880a737cb1c18a4E9540879e211")
-    private val receiver = EvmAddress.parse("0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c")
+    private val receiver = EvmAddress.parse("0xbbd352de4428d535ac79849abefa8d69bb51c671")
     private val request = Erc681PaymentRequest(token, 84532, receiver, TokenAmount.parse("12.34", 6))
 
     @Test

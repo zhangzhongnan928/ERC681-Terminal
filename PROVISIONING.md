@@ -59,20 +59,22 @@ minimum/default confirmation policy, and gas-reserve policy. Persisted settings 
 of those trust anchors or minimums. Base Sepolia's compiled confirmation minimum and fresh-network
 default are both one block. The PIN-protected merchant control can select any allowed value but may
 never reduce a network below the compiled floor. Base Mainnet (`8453`) and all other chains are
-rejected before contacting an RPC endpoint. Mainnet remains disabled pending a frozen or
-multisig-governed, implementation-pinned deployment. The checked-in enabled cross-platform
-constants are in `conformance/opk-terminal-networks-v1.json`; the reusable SDK payment-profile
-catalogs remain EVM-generic.
+rejected before contacting an RPC endpoint. A published Base Mainnet OPK Protocol 1.6 Route A
+deployment exists, but Mainnet remains disabled until an explicit product decision ships its
+reviewed operational RPC, finality, native-currency, gas-reserve, deployment-pin, and CREATE2
+policy. The checked-in enabled cross-platform constants are in
+`conformance/opk-terminal-networks-v1.json`; the reusable SDK payment-profile catalogs remain
+EVM-generic.
 
 The terminal reads the scanned vault's factory, the pinned factory's implementation, and
 payment-asset whitelist membership. For an ERC-20 it also reads contract code, decimals, and
 symbol. For the native sentinel it instead requires a successful `NATIVE_ASSET()` call returning
 that exact address and uses the immutable chain profile's `ETH`/18-decimal metadata. The whitelist
-mapping alone is not a capability probe: `isPaymentToken(NATIVE_ASSET) == false` is possible on a
-1.5 vault and must not cause native checkout to be offered. The terminal performs the complete
-configuration and CREATE2 validation before atomically upserting and selecting that payment
-profile. A failed or cancelled attempt does not alter the catalog or its current selection. A
-retained operational RPC override is checked only for the expected chain ID; vault runtime,
+mapping alone is not a capability probe: the terminal must successfully read the exact sentinel
+before interpreting its whitelist result or offering native checkout. The terminal performs the
+complete configuration and CREATE2 validation before atomically upserting and selecting that
+payment profile. A failed or cancelled attempt does not alter the catalog or its current selection.
+A retained operational RPC override is checked only for the expected chain ID; vault runtime,
 factory/implementation, capability, whitelist, payment-asset metadata, and full provenance validation
 come exclusively from the immutable shipped RPC endpoint. The override is persisted only after both
 checks pass. Historical invoices and settlements retain their stored configuration
@@ -83,10 +85,10 @@ operational RPC is independently
 chain-checked for current EOA authorization, exact balances, simulation, and broadcast.
 
 Receiver derivation uses the existing CREATE2 formula, but a receiver commits to the factory and
-receiver implementation. A fresh 1.6 stack must therefore publish new per-chain constants and a
-matching deployment test vector before it can be enabled, and its receiver addresses generally
-differ from the old stack. Address preservation applies only to a beacon upgrade of the existing
-stack.
+receiver implementation. This release consumes the published Base Sepolia Route A constants and
+matching 1.6 CREATE2 vector, so its receiver addresses differ from the previous stack. Any future
+fresh stack must likewise publish and ship new per-chain constants and a matching vector before it
+can be enabled. Address preservation applies only to a beacon upgrade of the same stack.
 
 ## Readiness
 

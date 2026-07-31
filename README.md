@@ -33,8 +33,8 @@ ethereum:{RECEIVER}@{CHAIN_ID}?value={AMOUNT_WEI}
 Examples (Base Sepolia, 12.34 units at 18 decimals):
 
 ```text
-ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c&uint256=12340000000000000000
-ethereum:0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c@84532?value=12340000000000000000
+ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0xbbd352de4428d535ac79849abefa8d69bb51c671&uint256=12340000000000000000
+ethereum:0xbbd352de4428d535ac79849abefa8d69bb51c671@84532?value=12340000000000000000
 ```
 
 A wallet is compatible if it scans the relevant QR, prefills either
@@ -153,7 +153,8 @@ MOBILE_SDK.md  Integration and deployment guide
 
 ## Known EVM networks
 
-Base Sepolia (`84532`) is the only network enabled in the production apps in this release. A
+Base Sepolia (`84532`) is the only network enabled in the production apps in this release, and its
+immutable pins target the published OPK Protocol 1.6 Route A deployment. A
 provisioning QR chooses an enabled chain but cannot supply or override its RPC trust root, factory,
 receiver implementation, vault runtime hash, protocol version, CREATE2 vector, finality floor,
 native-currency metadata, or minimum operator gas reserve. The shared pins are recorded in
@@ -164,9 +165,10 @@ administrator can choose the confirmation requirement for each enabled EVM netwo
 allowed range. Every profile on the same chain shares that network policy, and a new profile inherits
 the existing choice. The value is snapshotted into new invoices and settlement batches, while
 existing invoices retain their original requirement. The strict v1 provisioning QR does not carry
-or override this local policy. Base Mainnet (`8453`) and any additional network remain app-disabled
-until a frozen or multisig-governed, implementation-pinned OPK deployment and its CREATE2 vector
-are reviewed and shipped; arbitrary QR-provided network infrastructure remains unsupported.
+or override this local policy. Base Mainnet (`8453`) has a published OPK Protocol 1.6 Route A
+deployment but remains app-disabled until an explicit product decision ships its reviewed RPC,
+finality, native-currency, gas-reserve, deployment-pin, and CREATE2 policy. Any additional network
+has the same release gate; arbitrary QR-provided network infrastructure remains unsupported.
 
 The current implementation still lacks cross-operator `Swept`-log discovery and same-nonce fee
 replacement/cancellation; see the recovery limits in [MOBILE_SDK.md](./MOBILE_SDK.md) before
