@@ -4,10 +4,10 @@ import XCTest
 @testable import OPKTerminalCore
 
 final class ProtocolConformanceTests: XCTestCase {
-    private let factory = try! EthereumAddress(hex: "0xb69f725999266c6757284ca4169275c3ebde491a")
-    private let implementation = try! EthereumAddress(hex: "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f")
+    private let factory = try! EthereumAddress(hex: "0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f")
+    private let implementation = try! EthereumAddress(hex: "0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18")
     private let vectorVault = try! EthereumAddress(hex: "0x1111111111111111111111111111111111111111")
-    private let invoiceID = try! Bytes32(hex: "0x474614682f1d5e8e24396c2394a98425d4e8617fe699872c96182b89368e50d4")
+    private let invoiceID = try! Bytes32(hex: "0xd5ab0fb2beaa1c3d789ae8a50b9429257b7f830830c8c4e23177a0fb2e116c77")
 
     func testSupportedProtocolVersions() {
         XCTAssertNil(OPKProtocolVersion(rawValue: "1.4.1"))
@@ -28,12 +28,12 @@ final class ProtocolConformanceTests: XCTestCase {
             invoiceID: invoiceID
         )
         XCTAssertEqual(initCode.count, 88)
-        XCTAssertEqual(salt.hex, "0x6ebed91ff26055c5762437f3fe8f834dde34b0dae39fd3df75dcfc1d1e064e1d")
+        XCTAssertEqual(salt.hex, "0x8b43abe81bab80f024d08540d6ffed9dab76ebd2f0096a53671e7c9aa94462ab")
         XCTAssertEqual(
             Keccak256.hash(initCode).hex,
-            "0xad563722da414e51edc3d8195e2f225d872f79ea5b511cb2c3a62d6fa1a66b02"
+            "0xd237f12377830073f2b667364b744f01cc0f00724e949159e2665134248ca4ad"
         )
-        XCTAssertEqual(receiver.hex, "0x8128e3a86962519877186c5f4f0920ba7240f5b1")
+        XCTAssertEqual(receiver.hex, "0xd7bb9c5f5a337b9d9ebcd65e1f840f782985291d")
 
         try ReceiverDerivation.validate(
             Create2TestVector(
@@ -74,7 +74,7 @@ final class ProtocolConformanceTests: XCTestCase {
             vault: baseVault,
             invoiceID: actualInvoice
         )
-        XCTAssertEqual(receiver.hex, "0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c")
+        XCTAssertEqual(receiver.hex, "0xbbd352de4428d535ac79849abefa8d69bb51c671")
 
         let rawAmount = try TokenAmount(display: "12.34", decimals: 18).rawValue
         XCTAssertEqual(rawAmount.decimalString, "12340000000000000000")
@@ -87,7 +87,7 @@ final class ProtocolConformanceTests: XCTestCase {
         ).canonicalString
         XCTAssertEqual(
             uri,
-            "ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c&uint256=12340000000000000000"
+            "ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0xbbd352de4428d535ac79849abefa8d69bb51c671&uint256=12340000000000000000"
         )
         XCTAssertEqual(try ERC681TransferRequest.parse(uri, expectedChainID: 84_532).canonicalString, uri)
         XCTAssertThrowsError(try ERC681TransferRequest.parse(uri, expectedChainID: 1))
@@ -100,7 +100,7 @@ final class ProtocolConformanceTests: XCTestCase {
         ).canonicalString
         XCTAssertEqual(
             nativeURI,
-            "ethereum:0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c@84532?value=12340000000000000000"
+            "ethereum:0xbbd352de4428d535ac79849abefa8d69bb51c671@84532?value=12340000000000000000"
         )
         XCTAssertFalse(nativeURI.lowercased().contains(NativeAsset.address.hex))
         XCTAssertEqual(
@@ -125,7 +125,7 @@ final class ProtocolConformanceTests: XCTestCase {
         let config = try TerminalConfiguration(
             chainID: 84_532,
             rpcEndpoints: [URL(string: "https://sepolia.base.org")!],
-            protocolVersion: .v1_5,
+            protocolVersion: .v1_6,
             deployment: deployment,
             tokens: [token]
         )

@@ -4,7 +4,7 @@
   "notes": [
     "Payloads are validated as exact raw ASCII and are never URL-decoded or trimmed.",
     "Provisioning v1 supports only immutable chain profiles shipped by the terminal app.",
-    "The example vault and token exercise payload parsing only and are not a live v1.5 merchant configuration.",
+    "The example vault and token exercise payload parsing only and are not a live v1.6 merchant configuration.",
     "The operator in the provisioning payload must equal the terminal's device-local EOA."
   ],
   "operatorPairing": {

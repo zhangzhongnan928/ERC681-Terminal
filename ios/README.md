@@ -62,13 +62,13 @@ physical-device test before release; manual entry remains available when camera 
 
 ## Configuration and safety
 
-The sample defaults to the Base Sepolia deployment trust anchors and OPK Protocol 1.5 ERC-20
-baseline:
+The sample defaults to the published Base Sepolia OPK Protocol 1.6 Route A deployment trust
+anchors:
 
 - Chain ID: `84532`
-- Factory: `0xb69f725999266c6757284ca4169275c3ebde491a`
-- Receiver implementation: `0x8ba9739741ecc79b5d69fe5580d2966092e6f77f`
-- Deployed vault-proxy runtime hash: `0x2ceea713f7225b17e43487b8652d8582dadd5aabefc5b9f78d231777958655b9`
+- Factory: `0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f`
+- Receiver implementation: `0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18`
+- Deployed vault-proxy runtime hash: `0x32ad6b6076f449fbc39e115afc2645c65071280af2d461dc315544ac0a1d7e58`
 - CREATE2 example vault: `0x1111111111111111111111111111111111111111`
 - AUD token: `0x7ffba642bc902880a737cb1c18a4e9540879e211`, 18 decimals
 - Native asset identifier: `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` (`ETH`, 18 decimals)
@@ -79,16 +79,17 @@ the zero-immutable artifact hash emitted by the upstream browser deployer is not
 
 The example vault is a deterministic off-chain vector, not a deployed merchant vault. The app
 remains unprovisioned until a portal QR identifies a compatible live vault and whitelisted payment
-asset that pass the complete on-chain validation flow. A native route is assigned protocol version
-1.6 only after the vault successfully answers `NATIVE_ASSET()` with the exact sentinel and
-whitelists it. `isPaymentToken(NATIVE_ASSET) == false` alone does not prove that a vault lacks 1.6
-support.
+asset that pass the complete on-chain validation flow. The shipped profile uses protocol version
+1.6 for every route. A native route is enabled only after the vault successfully answers
+`NATIVE_ASSET()` with the exact sentinel and whitelists it; the whitelist read alone is not the
+capability proof.
 
 Base Sepolia is the only network enabled in the production app in this release. The Swift
 payment-profile catalog remains EVM-generic, but Base Mainnet (`8453`) and other chains are rejected
-before RPC use. Mainnet v1.5 is deployed but remains disabled pending explicit product enablement,
-a reviewed operational RPC policy, and addition of its deployment pins, CREATE2 vector, finality
-policy, native-currency metadata, and operator gas reserve to the immutable app registry. Multiple
+before RPC use. Mainnet has a published OPK Protocol 1.6 Route A deployment but remains disabled
+pending explicit product enablement, a reviewed operational RPC policy, and addition of its
+deployment pins, CREATE2 vector, finality policy, native-currency metadata, and operator gas reserve
+to the immutable app registry. Multiple
 vault/payment-asset profiles
 can coexist, while one selected profile supplies the exact configuration snapshot saved with each
 invoice and validated before presenting a QR. RPC

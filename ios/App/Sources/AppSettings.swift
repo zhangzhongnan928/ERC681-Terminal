@@ -22,9 +22,9 @@ struct AppPaymentProfile: Codable, Equatable, Identifiable {
     init(
         rpcURL: String = "https://sepolia.base.org",
         chainID: String = "84532",
-        protocolVersion: String = OPKProtocolVersion.v1_5.rawValue,
-        factory: String = "0xb69f725999266c6757284ca4169275c3ebde491a",
-        receiverImplementation: String = "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f",
+        protocolVersion: String = OPKProtocolVersion.v1_6.rawValue,
+        factory: String = "0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f",
+        receiverImplementation: String = "0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18",
         vault: String = "0x1111111111111111111111111111111111111111",
         tokenAddress: String = "0x7ffba642bc902880a737cb1c18a4e9540879e211",
         tokenSymbol: String = "AUD",

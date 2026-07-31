@@ -249,7 +249,7 @@ private struct OPKTerminalConformanceMain {
         try require(fixture.schemaVersion == 2, "fixture schema version")
         try require(fixture.paymentVectorVersion == "1.6", "payment vector version")
         try require(
-            fixture.deploymentProtocolVersion == "1.5",
+            fixture.deploymentProtocolVersion == "1.6",
             "deployment protocol version"
         )
         try require(
@@ -354,9 +354,9 @@ private struct OPKTerminalConformanceMain {
         try require(reparsedNative.token == NativeAsset.address, "native ERC-681 round trip")
 
         let additionalRejected = [
-            "ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?uint256=1&address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c",
-            "ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c&foo=1&uint256=1",
-            "ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c&uint256=%31",
+            "ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?uint256=1&address=0xbbd352de4428d535ac79849abefa8d69bb51c671",
+            "ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0xbbd352de4428d535ac79849abefa8d69bb51c671&foo=1&uint256=1",
+            "ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0xbbd352de4428d535ac79849abefa8d69bb51c671&uint256=%31",
         ]
         for invalid in fixture.mustReject + additionalRejected {
             try requireThrows("must reject \(invalid)") {
@@ -411,7 +411,7 @@ private struct OPKTerminalConformanceMain {
         let configuration = try TerminalConfiguration(
             chainID: configurationVector.chainId,
             rpcEndpoints: [URL(string: "https://rpc.example")!],
-            protocolVersion: .v1_5,
+            protocolVersion: .v1_6,
             deployment: OPKDeployment(
                 factory: factory,
                 receiverImplementation: implementation,

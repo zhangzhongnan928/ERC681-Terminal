@@ -75,15 +75,15 @@ class ConformanceTest {
     @Test
     fun `CREATE2 derivation matches supplied aaaa invoice golden receiver`() {
         val resolver = Create2ReceiverResolver(
-            factory = EvmAddress.parse("0xb69f725999266c6757284ca4169275c3ebde491a"),
-            receiverImplementation = EvmAddress.parse("0x8ba9739741ecc79b5d69fe5580d2966092e6f77f"),
+            factory = EvmAddress.parse("0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f"),
+            receiverImplementation = EvmAddress.parse("0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18"),
         )
         val actual = resolver.resolve(
             vault = EvmAddress.parse("0x1111111111111111111111111111111111111111"),
             invoiceId = InvoiceId.parse("0x" + "aa".repeat(32)),
         )
 
-        assertEquals(EvmAddress.parse("0xf853af169073DbeADE257510CFC9511280bC8927"), actual)
+        assertEquals(EvmAddress.parse("0x4dBfF29054A2de62bD82015F8B4724Ee54d49d1a"), actual)
     }
 
     @Test

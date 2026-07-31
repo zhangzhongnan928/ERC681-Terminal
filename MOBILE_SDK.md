@@ -84,8 +84,8 @@ ethereum:{RECEIVER}@{CHAIN_ID}?value={AMOUNT_WEI}
 For the shared test vectors:
 
 ```text
-ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c&uint256=12340000000000000000
-ethereum:0x8ad9a4b36c67eafc6ebd08e329e410c932cbfa1c@84532?value=12340000000000000000
+ethereum:0x7ffba642bc902880a737cb1c18a4e9540879e211@84532/transfer?address=0xbbd352de4428d535ac79849abefa8d69bb51c671&uint256=12340000000000000000
+ethereum:0xbbd352de4428d535ac79849abefa8d69bb51c671@84532?value=12340000000000000000
 ```
 
 Addresses are emitted in lower-case hexadecimal. The chain ID and positive raw amount use plain
@@ -148,8 +148,9 @@ covers the original invoice, a repeat settlement still requires a new positive c
 historical proof must never turn a zero repeat event into proof of newly observed value.
 
 The reusable payment SDKs never sweep the receiver. A native app may pass their data-only handoff
-into its separate approved operator module. ERC-20 routes use OPK Protocol 1.5 and native routes use
-OPK Protocol 1.6, but transaction receipt success alone is never proof of settlement: the app must
+into its separate approved operator module. The shipped Base Sepolia profile uses the deployed OPK
+Protocol 1.6 stack for both ERC-20 and native routes, but transaction receipt success alone is never
+proof of settlement: the app must
 decode a fully matching confirmed `Swept` event and record a positive actual amount. The
 asset-scoped settlement counters, including `settled(invoiceId, NATIVE_ASSET)` for native invoices,
 are supplementary state and do not replace canonical event proof.
@@ -169,41 +170,43 @@ The default development network is Base Sepolia, chain ID `84532`:
 
 | Item | Value |
 |---|---|
-| Factory | `0xb69f725999266c6757284ca4169275c3ebde491a` |
-| Receiver implementation | `0x8ba9739741ecc79b5d69fe5580d2966092e6f77f` |
-| Deployed vault-proxy runtime hash | `0x2ceea713f7225b17e43487b8652d8582dadd5aabefc5b9f78d231777958655b9` |
+| Protocol version | `1.6` |
+| Factory | `0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f` |
+| Receiver implementation | `0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18` |
+| Vault beacon embedded in the proxy runtime | `0xc9c24c87f55c46d42419bc181d427acd1755e46c` |
+| Deployed vault-proxy runtime hash | `0x32ad6b6076f449fbc39e115afc2645c65071280af2d461dc315544ac0a1d7e58` |
 | CREATE2 example vault | `0x1111111111111111111111111111111111111111` |
 | AUD test token | `0x7ffba642bc902880a737cb1c18a4e9540879e211` (18 decimals) |
 | Native asset identifier | `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` (`ETH`, 18 decimals) |
 
 The runtime hash is over the exact on-chain proxy bytecode, including the Base Sepolia beacon
-immutable (`0x36540ec21ea454a11fbeb96bf7f8653d078da9cf`). Do not substitute the upstream browser
+immutable (`0xc9c24c87f55c46d42419bc181d427acd1755e46c`). Do not substitute the upstream browser
 deployer's zero-immutable artifact hash when validating `eth_getCode`; it does not match a
 deployed vault.
 
 The example vault is an off-chain CREATE2 test input, not a deployed merchant vault. A production
 terminal remains unprovisioned until it validates a compatible live merchant vault and whitelisted
-payment asset from a portal provisioning QR. An ERC-20 route may validate against OPK Protocol 1.5.
-A native route additionally requires a successful `NATIVE_ASSET()` read returning the exact
+payment asset from a portal provisioning QR. The shipped profile requires OPK Protocol 1.6. A
+native route additionally requires a successful `NATIVE_ASSET()` read returning the exact
 sentinel and that sentinel's whitelist entry; `isPaymentToken(NATIVE_ASSET) == false` does not
-establish that a vault predates 1.6.
+prove native capability.
 
 Base Sepolia is the only network enabled in the production apps in this release. The Swift and
 Kotlin profile catalogs are EVM-generic and can model routes on other EVM chains, but an app rejects
 any chain absent from its immutable enabled-network registry before RPC use. Base Mainnet (`8453`)
-has a v1.5 deployment but remains disabled pending explicit product enablement and a reviewed
-operational RPC policy. Enabling it or another network requires reviewed OPK deployment constants,
-vault runtime hash, trusted HTTPS RPC, matching CREATE2 vector, finality floor/default,
-native-currency metadata, and minimum gas reserve in both native registries. A QR cannot introduce
-these values.
+has a published OPK Protocol 1.6 Route A deployment but remains disabled pending explicit product
+enablement and a reviewed operational RPC policy. Enabling it or another network requires reviewed
+OPK deployment constants, vault runtime hash, trusted HTTPS RPC, matching CREATE2 vector, finality
+floor/default, native-currency metadata, and minimum gas reserve in both native registries. A QR
+cannot introduce these values.
 The enabled cross-platform pins and vectors are recorded in
 `conformance/opk-terminal-networks-v1.json`.
 
-A fresh OPK Protocol 1.6 deployment changes receiver addresses when its factory or receiver
-implementation changes. Native checkout must therefore remain disabled for that stack until its
-published per-chain deployment record supplies the reviewed factory, receiver implementation,
-runtime hashes, and matching CREATE2 test vector. Only an in-place beacon upgrade of the existing
-stack can preserve its receiver commitments.
+The published OPK Protocol 1.6 Route A deployment changed receiver addresses because its factory
+and receiver implementation changed. This release repoints the shipped Base Sepolia profile to its
+reviewed factory, receiver implementation, runtime hash, and CREATE2 test vector. Any future fresh
+stack has the same release gate. Only an in-place beacon upgrade of the same stack can preserve its
+receiver commitments.
 
 Base Sepolia's compiled confirmation minimum and fresh-network default are both `1`; the block that
 contains the payment counts as confirmation one. A merchant administrator may select a value from
@@ -268,7 +271,7 @@ Outputs:
 - unsigned, minified release APK: `android/app/build/outputs/apk/release/app-release-unsigned.apk`
 - SDK JAR and sources: `android/erc681-sdk/build/libs/`
 - Maven repository: `android/erc681-sdk/build/repository/`
-- Maven coordinate: `com.openpasskey:opk-erc681-sdk:0.2.0`
+- Maven coordinate: `com.openpasskey:opk-erc681-sdk:0.2.1`
 
 Point a terminal project at the local repository and add the dependency:
 
@@ -278,7 +281,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.openpasskey:opk-erc681-sdk:0.2.0")
+    implementation("com.openpasskey:opk-erc681-sdk:0.2.1")
 }
 ```
 
@@ -292,8 +295,8 @@ val provisionedAsset = EvmAddress.parse(requireNotNull(loadProvisionedPaymentAss
 val network = NetworkConfig(
     chainId = 84532,
     rpcUrl = "https://sepolia.base.org",
-    factory = EvmAddress.parse("0xb69f725999266c6757284ca4169275c3ebde491a"),
-    receiverImplementation = EvmAddress.parse("0x8ba9739741ecc79b5d69fe5580d2966092e6f77f"),
+    factory = EvmAddress.parse("0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f"),
+    receiverImplementation = EvmAddress.parse("0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18"),
     vault = provisionedVault,
 )
 val paymentAsset = provisionedAsset
@@ -346,9 +349,10 @@ if (observation.status == PaymentStatus.PAID) {
 }
 ```
 
-ERC-20 routes remain compatible with OPK Protocol 1.5. A native-sentinel route requires OPK
-Protocol 1.6, a successful exact `NATIVE_ASSET()` capability read, and whitelist membership on that
-vault. Profiles and invoices from pre-release v1.4 builds are unsupported and must not be
+The shipped Base Sepolia profile targets OPK Protocol 1.6 for every payment asset. A
+native-sentinel route additionally requires a successful exact `NATIVE_ASSET()` capability read
+and whitelist membership on that vault. Profiles and invoices from pre-release v1.4 builds are
+unsupported and must not be
 reinterpreted under current deployment pins. Reset any development install carrying those
 obsolete local records before provisioning a live merchant vault.
 
@@ -378,8 +382,8 @@ let provisionedAsset = try EthereumAddress(
     allowZero: false
 )
 let deployment = try OPKDeployment(
-    factory: EthereumAddress(hex: "0xb69f725999266c6757284ca4169275c3ebde491a", allowZero: false),
-    receiverImplementation: EthereumAddress(hex: "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f", allowZero: false),
+    factory: EthereumAddress(hex: "0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f", allowZero: false),
+    receiverImplementation: EthereumAddress(hex: "0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18", allowZero: false),
     vault: provisionedVault
 )
 let isNative = NativeAsset.isNative(provisionedAsset)
@@ -392,7 +396,7 @@ let endpoint = URL(string: "https://sepolia.base.org")!
 let configuration = try TerminalConfiguration(
     chainID: 84_532,
     rpcEndpoints: [endpoint],
-    protocolVersion: isNative ? .v1_6 : .v1_5,
+    protocolVersion: .v1_6,
     deployment: deployment,
     tokens: [token],
     confirmationPolicy: .init(requiredBlocks: 1)

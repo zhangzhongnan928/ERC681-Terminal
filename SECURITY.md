@@ -8,9 +8,10 @@ reporting an issue, and before running the code with real value.
 
 - **This code has not been independently audited.**
 - **Base Sepolia (`84532`) is the only network enabled in shipped builds.**
-  Base Mainnet (`8453`) and every other network are disabled in code and
-  remain disabled until a frozen or multisig-governed, implementation-pinned
-  deployment and its CREATE2 vector are reviewed and shipped.
+  Base Mainnet (`8453`) has a published OPK Protocol 1.6 deployment but remains
+  disabled in code pending explicit product enablement and a reviewed
+  operational RPC, finality, gas-reserve, deployment-pin, and CREATE2 policy.
+  Every other network remains disabled behind the same release gate.
 - The safety boundary described in `README.md` and `MOBILE_SDK.md`
   describes the behaviour of *this* source tree, built as published,
   against the pinned deployments in `conformance/`. Those properties are

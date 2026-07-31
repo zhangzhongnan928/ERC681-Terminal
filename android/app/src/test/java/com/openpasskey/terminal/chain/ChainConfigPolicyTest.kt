@@ -19,7 +19,7 @@ class ChainConfigPolicyTest {
     }
 
     @Test
-    fun protocol14SnapshotIsNotAcceptedByTheV15OnlyTerminal() {
+    fun protocol14SnapshotIsNotAcceptedByTheV16Terminal() {
         assertFalse(config().copy(protocolVersion = "1.4.1").hasCompleteProvisioning())
     }
 
@@ -236,14 +236,14 @@ class ChainConfigPolicyTest {
         networkName = "Base Sepolia",
         rpcUrl = "https://sepolia.base.org",
         chainId = 84532,
-        factoryAddress = "0xb69f725999266c6757284ca4169275c3ebde491a",
-        receiverImplementationAddress = "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f",
+        factoryAddress = "0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f",
+        receiverImplementationAddress = "0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18",
         vaultAddress = "0x1111111111111111111111111111111111111111",
         confirmationBlocks = 1,
         paymentTokens = listOf(
             PaymentToken("0x7ffba642bc902880a737cb1c18a4e9540879e211", "AUD", 18),
         ),
-        protocolVersion = "1.5",
+        protocolVersion = "1.6",
         provisionedOperatorAddress = "0x1111111111111111111111111111111111111111",
         provisioned = true,
     )

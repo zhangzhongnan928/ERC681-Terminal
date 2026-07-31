@@ -482,8 +482,8 @@ private func abiDynamicString(_ value: String) -> Data {
 }
 
 final class ValidationAndMonitorTests: XCTestCase {
-    private let factory = try! EthereumAddress(hex: "0xb69f725999266c6757284ca4169275c3ebde491a")
-    private let implementation = try! EthereumAddress(hex: "0x8ba9739741ecc79b5d69fe5580d2966092e6f77f")
+    private let factory = try! EthereumAddress(hex: "0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f")
+    private let implementation = try! EthereumAddress(hex: "0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18")
     private let vault = try! EthereumAddress(hex: "0x1111111111111111111111111111111111111111")
     private let tokenAddress = try! EthereumAddress(hex: "0x7fFbA642bc902880a737cb1c18a4E9540879e211")
 
