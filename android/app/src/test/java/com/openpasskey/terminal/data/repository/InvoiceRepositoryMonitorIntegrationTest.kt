@@ -10,6 +10,8 @@ import com.openpasskey.terminal.data.db.SettlementEventDao
 import com.openpasskey.terminal.data.model.Invoice
 import com.openpasskey.terminal.data.model.InvoiceStatus
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
+import com.openpasskey.terminal.payment.PaymentTransactionEvidence
+import com.openpasskey.terminal.payment.PaymentTransactionResolver
 import com.openpasskey.terminal.rpc.RpcWorkCoordinator
 import com.openpasskey.terminal.wallet.OperatorWalletStore
 import kotlinx.coroutines.flow.drop
@@ -32,6 +34,43 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 class InvoiceRepositoryMonitorIntegrationTest {
+    @Test
+    fun `funding observation persists incoming payment evidence with its confirmation cursor`() =
+        runBlocking {
+            rpcServer { requestBody ->
+                successfulObservationResponse(requestBody, remoteChainId = CHAIN_ID)
+            }.use { server ->
+                val paymentHash = "0x${"44".repeat(32)}"
+                val fixture = repositoryFixture(
+                    initial = invoice(server.url).copy(
+                        publishedAtBlock = BLOCK_NUMBER - 1,
+                        publishedAtBlockHash = "0x${"33".repeat(32)}",
+                        receiptNumber = 1,
+                        receiptAutoPrintEligible = true,
+                    ),
+                    paymentResolver = PaymentTransactionResolver {
+                        PaymentTransactionEvidence(
+                            txHash = paymentHash,
+                            payerAddress = "0x${"55".repeat(20)}",
+                            blockNumber = BLOCK_NUMBER,
+                            blockHash = BLOCK_HASH,
+                            blockTimestamp = 1_704_067_200,
+                        )
+                    },
+                )
+
+                val persisted = fixture.repository.observePayment(INVOICE_ID)
+                    .drop(1)
+                    .first { it.status == InvoiceStatus.CONFIRMING }
+
+                assertEquals(paymentHash, persisted.paymentTxHash)
+                assertEquals(BLOCK_NUMBER, persisted.paymentBlockNumber)
+                assertEquals(BLOCK_HASH, persisted.paymentBlockHash)
+                assertEquals(1_704_067_200L, persisted.paidAt)
+                assertEquals(persisted, fixture.invoice.get())
+            }
+        }
+
     @Test
     fun `malformed RPC quantity is retried and next observation is persisted`() = runBlocking {
         val requestCount = AtomicInteger()
@@ -84,7 +123,10 @@ class InvoiceRepositoryMonitorIntegrationTest {
         }
     }
 
-    private fun repositoryFixture(initial: Invoice): RepositoryFixture {
+    private fun repositoryFixture(
+        initial: Invoice,
+        paymentResolver: PaymentTransactionResolver = PaymentTransactionResolver { null },
+    ): RepositoryFixture {
         val invoice = AtomicReference(initial)
         val observationWrites = AtomicInteger()
         val invoiceDao = proxy<InvoiceDao> { method, args ->
@@ -102,6 +144,11 @@ class InvoiceRepositoryMonitorIntegrationTest {
                             firstDetectedBlockHash = args[4] as String?,
                             lastObservedBlock = args[5] as Long?,
                             confirmedAtBlock = args[6] as Long?,
+                            paymentTxHash = args[7] as String?,
+                            paymentPayerAddress = args[8] as String?,
+                            paymentBlockNumber = args[9] as Long?,
+                            paymentBlockHash = args[10] as String?,
+                            paidAt = args[11] as Long?,
                         )
                         invoice.set(updated)
                         observationWrites.incrementAndGet()
@@ -122,6 +169,7 @@ class InvoiceRepositoryMonitorIntegrationTest {
                 operatorWalletStore = mock(OperatorWalletStore::class.java),
                 lifecycleGate = TerminalLifecycleGate(),
                 rpcWorkCoordinator = RpcWorkCoordinator(),
+                paymentTransactionResolver = paymentResolver,
             ),
             invoice = invoice,
             observationWrites = observationWrites,

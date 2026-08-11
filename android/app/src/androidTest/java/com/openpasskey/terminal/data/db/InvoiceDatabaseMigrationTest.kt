@@ -72,8 +72,124 @@ class InvoiceDatabaseMigrationTest {
         migrated.close()
     }
 
+    @Test
+    fun v7ToV8PreservesThePreviouslyPrintedMerchantHeaderDefaults() {
+        helper.createDatabase(TEST_DATABASE_V7_V8, 7).apply {
+            execSQL(
+                """
+                INSERT INTO invoices (
+                    invoiceId,
+                    receiver,
+                    token,
+                    tokenSymbol,
+                    expectedAmount,
+                    status,
+                    createdAt
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf<Any?>(
+                    INVOICE_ID,
+                    RECEIVER,
+                    TOKEN,
+                    "AUD",
+                    "1250000000000000000",
+                    "PAID",
+                    1_721_000_000L,
+                ),
+            )
+            close()
+        }
+
+        val migrated = helper.runMigrationsAndValidate(
+            TEST_DATABASE_V7_V8,
+            8,
+            true,
+            *InvoiceDatabase.ALL_MIGRATIONS,
+        )
+
+        migrated.query(
+            "SELECT invoiceId, receiver, token, tokenSymbol, expectedAmount, status, createdAt, " +
+                "receiptMerchantName, receiptMerchantAbn FROM invoices WHERE invoiceId = ?",
+            arrayOf(INVOICE_ID),
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(INVOICE_ID, cursor.getString(0))
+            assertEquals(RECEIVER, cursor.getString(1))
+            assertEquals(TOKEN, cursor.getString(2))
+            assertEquals("AUD", cursor.getString(3))
+            assertEquals("1250000000000000000", cursor.getString(4))
+            assertEquals("PAID", cursor.getString(5))
+            assertEquals(1_721_000_000L, cursor.getLong(6))
+            assertEquals("OPK Terminal", cursor.getString(7))
+            assertEquals("", cursor.getString(8))
+        }
+        migrated.close()
+    }
+
+    @Test
+    fun v6ToV8KeepsLegacyInvoiceReceiptIneligibleAndAddsStableHeaderDefaults() {
+        helper.createDatabase(TEST_DATABASE_V6_V8, 6).apply {
+            execSQL(
+                """
+                INSERT INTO invoices (
+                    invoiceId,
+                    receiver,
+                    token,
+                    tokenSymbol,
+                    expectedAmount,
+                    status,
+                    createdAt
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf<Any?>(
+                    INVOICE_ID,
+                    RECEIVER,
+                    TOKEN,
+                    "AUD",
+                    "1250000000000000000",
+                    "PAID",
+                    1_721_000_000L,
+                ),
+            )
+            close()
+        }
+
+        val migrated = helper.runMigrationsAndValidate(
+            TEST_DATABASE_V6_V8,
+            8,
+            true,
+            *InvoiceDatabase.ALL_MIGRATIONS,
+        )
+
+        migrated.query(
+            "SELECT invoiceId, receiver, token, expectedAmount, status, createdAt, " +
+                "publishedAtBlock, paymentTxHash, receiptNumber, receiptAutoPrintEligible, " +
+                "receiptPrintedAt, receiptMerchantName, receiptMerchantAbn " +
+                "FROM invoices WHERE invoiceId = ?",
+            arrayOf(INVOICE_ID),
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(INVOICE_ID, cursor.getString(0))
+            assertEquals(RECEIVER, cursor.getString(1))
+            assertEquals(TOKEN, cursor.getString(2))
+            assertEquals("1250000000000000000", cursor.getString(3))
+            assertEquals("PAID", cursor.getString(4))
+            assertEquals(1_721_000_000L, cursor.getLong(5))
+            assertTrue(cursor.isNull(6))
+            assertTrue(cursor.isNull(7))
+            assertEquals(0L, cursor.getLong(8))
+            assertEquals(0L, cursor.getLong(9))
+            assertTrue(cursor.isNull(10))
+            assertEquals("OPK Terminal", cursor.getString(11))
+            assertEquals("", cursor.getString(12))
+        }
+        migrated.close()
+    }
+
     private companion object {
         const val TEST_DATABASE = "invoice-v5-v6-migration-test"
+        const val TEST_DATABASE_V7_V8 = "invoice-v7-v8-merchant-receipt-migration-test"
+        const val TEST_DATABASE_V6_V8 = "invoice-v6-v8-receipt-migration-test"
         val INVOICE_ID = "0x${"11".repeat(32)}"
         const val RECEIVER = "0x2222222222222222222222222222222222222222"
         const val TOKEN = "0x3333333333333333333333333333333333333333"

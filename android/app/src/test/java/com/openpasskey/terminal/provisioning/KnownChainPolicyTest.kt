@@ -2,18 +2,30 @@ package com.openpasskey.terminal.provisioning
 
 import com.google.gson.JsonParser
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
 class KnownChainPolicyTest {
     @Test
-    fun baseSepoliaDefaultsToOneConfirmationAndAllowsMerchantIncreases() {
-        val profile = KnownChainPolicy.requireProfile(84532)
+    fun baseMainnetIsProductionDefaultAndSepoliaRemainsAnEnabledTestnet() {
+        val mainnet = KnownChainPolicy.requireProfile(8453)
+        val sepolia = KnownChainPolicy.requireProfile(84532)
 
-        assertEquals(1, profile.minimumConfirmationBlocks)
-        assertEquals(1, profile.defaultConfirmationBlocks)
+        assertEquals(mainnet, KnownChainPolicy.defaultProfile())
+        assertEquals("Base Mainnet", mainnet.networkName)
+        assertFalse(mainnet.isTestnet)
+        assertEquals("https://mainnet.base.org", mainnet.rpcUrl)
+        assertEquals(1, mainnet.minimumConfirmationBlocks)
+        assertEquals(1, mainnet.defaultConfirmationBlocks)
+        assertEquals("Base Sepolia", sepolia.networkName)
+        assertTrue(sepolia.isTestnet)
+        assertEquals(1, sepolia.minimumConfirmationBlocks)
+        assertEquals(1, sepolia.defaultConfirmationBlocks)
+        assertEquals(listOf(8453L, 84532L), KnownChainPolicy.enabledProfiles().map { it.chainId })
     }
 
     @Test
@@ -63,7 +75,7 @@ class KnownChainPolicyTest {
             actual.requireValidCreate2Fixture()
         }
         assertThrows(IllegalArgumentException::class.java) {
-            KnownChainPolicy.requireProfile(8453L)
+            KnownChainPolicy.requireProfile(1L)
         }
     }
 

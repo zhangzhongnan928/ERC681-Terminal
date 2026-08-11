@@ -312,7 +312,7 @@ final class TerminalProvisionerTests: XCTestCase {
             throw URLError(.unsupportedURL)
         })
         let unknown = try TerminalProvisioningPayload(
-            chainID: 8_453,
+            chainID: 1,
             vault: vault,
             token: token,
             operatorAddress: operatorAddress

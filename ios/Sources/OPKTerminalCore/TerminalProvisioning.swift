@@ -199,10 +199,59 @@ public struct TerminalKnownChainProfile: Hashable, Sendable {
 
     /// EVM networks whose deployment trust anchors are enabled in the production app. Adding a
     /// network is an explicit release action: a provisioning QR can select only an entry in this
-    /// registry. The reusable payment-profile catalog remains EVM-generic.
-    public static var all: [TerminalKnownChainProfile] { [baseSepolia] }
+    /// registry. The reusable payment-profile catalog remains EVM-generic. Ordering is for stable
+    /// presentation only; an application must still choose its default explicitly.
+    public static var all: [TerminalKnownChainProfile] { [baseMainnet, baseSepolia] }
 
     public static var supportedChainIDs: Set<UInt64> { Set(all.map(\.chainID)) }
+
+    public static let baseMainnet: TerminalKnownChainProfile = {
+        let factory = try! EthereumAddress(
+            hex: "0x5418ab1790eaf96a20e26146c5b7765cb99328da",
+            allowZero: false
+        )
+        let implementation = try! EthereumAddress(
+            hex: "0xe6393f6176865cc62cd08d8b8f0c38d35af55254",
+            allowZero: false
+        )
+        let vector = Create2TestVector(
+            vault: try! EthereumAddress(
+                hex: "0x1111111111111111111111111111111111111111",
+                allowZero: false
+            ),
+            invoiceID: try! Bytes32(
+                hex: "0xd5ab0fb2beaa1c3d789ae8a50b9429257b7f830830c8c4e23177a0fb2e116c77"
+            ),
+            salt: try! Bytes32(
+                hex: "0x8b43abe81bab80f024d08540d6ffed9dab76ebd2f0096a53671e7c9aa94462ab"
+            ),
+            initCodeHash: try! Bytes32(
+                hex: "0x3b2db354080b627c0b567ce3b408da0bd1ad3c63d0cbe675ee0bfd1a34817f1a"
+            ),
+            expectedReceiver: try! EthereumAddress(
+                hex: "0x3da3df1635ef2334e5b26bee7b87e34d01454d8b",
+                allowZero: false
+            )
+        )
+        return TerminalKnownChainProfile(
+            chainID: 8_453,
+            networkName: "Base Mainnet",
+            isTestnet: false,
+            nativeCurrencySymbol: "ETH",
+            nativeCurrencyDecimals: 18,
+            minimumConfirmationBlocks: 1,
+            defaultConfirmationBlocks: 1,
+            minimumOperatorNativeReserve: UInt256(100_000_000_000_000),
+            rpcEndpoint: URL(string: "https://mainnet.base.org")!,
+            protocolVersion: .v1_6,
+            factory: factory,
+            receiverImplementation: implementation,
+            vaultRuntimeCodeHash: try! Bytes32(
+                hex: "0x8c3a56b5606e44613d50c898acf67a3689afc478b47e9a38326699b0df111cbd"
+            ),
+            create2TestVector: vector
+        )
+    }()
 
     public static let baseSepolia: TerminalKnownChainProfile = {
         let factory = try! EthereumAddress(

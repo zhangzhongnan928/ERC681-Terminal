@@ -52,7 +52,7 @@ final class KeyboardDismissalUITests: XCTestCase {
         XCTAssertTrue(element(identifier: "reviewerDemoRoot").waitForExistence(timeout: 5))
         XCTAssertEqual(
             element(identifier: "reviewerDemoSafetyLabel").label,
-            "OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS"
+            "OFFLINE DEMO · BASE MAINNET FORMAT · SIMULATED · NO NETWORK · NO REAL FUNDS"
         )
         XCTAssertTrue(element(identifier: "reviewerDemoQRCode").exists)
         XCTAssertEqual(
@@ -117,7 +117,7 @@ final class KeyboardDismissalUITests: XCTestCase {
 
         let networkStatus = element(identifier: "checkoutNetworkStatus")
         XCTAssertTrue(networkStatus.exists)
-        XCTAssertEqual(networkStatus.label, "Base Sepolia testnet")
+        XCTAssertEqual(networkStatus.label, "Base Mainnet, chain 8453")
 
         let qrButton = app.buttons["showPaymentQRButton"]
         XCTAssertTrue(qrButton.exists)
@@ -162,22 +162,25 @@ final class KeyboardDismissalUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Checkout"].waitForExistence(timeout: 5))
         let picker = app.buttons["checkoutPaymentProfilePicker"]
         XCTAssertTrue(picker.waitForExistence(timeout: 5))
-        XCTAssertTrue((picker.value as? String)?.contains("AUDM · Base Sepolia") == true)
-        XCTAssertTrue((picker.value as? String)?.contains("Token 0x7ffba6…e211") == true)
-        XCTAssertEqual(element(identifier: "checkoutNetworkStatus").label, "Base Sepolia testnet")
+        XCTAssertTrue((picker.value as? String)?.contains("AUDM · Base Mainnet") == true)
+        XCTAssertTrue((picker.value as? String)?.contains("0x777777…7777") == true)
+        XCTAssertEqual(
+            element(identifier: "checkoutNetworkStatus").label,
+            "Base Mainnet, chain 8453"
+        )
 
         picker.tap()
         let usdc = app.buttons.matching(
-            NSPredicate(format: "label CONTAINS %@", "USDC · Base Sepolia")
+            NSPredicate(format: "label CONTAINS %@", "USDC · Base Mainnet")
         ).firstMatch
         XCTAssertTrue(usdc.waitForExistence(timeout: 3))
         usdc.tap()
 
-        XCTAssertTrue((picker.value as? String)?.contains("USDC · Base Sepolia") == true)
-        XCTAssertTrue((picker.value as? String)?.contains("Token 0x888888…8888") == true)
+        XCTAssertTrue((picker.value as? String)?.contains("USDC · Base Mainnet") == true)
+        XCTAssertTrue((picker.value as? String)?.contains("0x888888…8888") == true)
         XCTAssertEqual(
             element(identifier: "checkoutNetworkStatus").label,
-            "Base Sepolia testnet"
+            "Base Mainnet, chain 8453"
         )
         XCTAssertEqual(element(identifier: "checkoutAmountDisplay").value as? String, "0.00 USDC")
     }

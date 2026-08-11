@@ -57,6 +57,10 @@ developer resources.
   URIs and all other payloads without changing the field. A separate setup scanner accepts only the
   strict `opk-terminal:provision` payload documented in [PROVISIONING.md](./PROVISIONING.md).
 - The reusable Android and Swift payment SDKs remain keyless and read-only.
+- Their optional incoming-payment evidence resolvers use only the invoice's saved publication and
+  funding cursors to attribute a direct ERC-20 or native customer transaction. An unattributable
+  internal native balance change remains without receipt evidence, and a later settlement or sweep
+  hash is never substituted for the customer's transaction.
 - Each native app generates a separate, device-local secp256k1 operator wallet. Its public address
   is the terminal identity used as the `terminalIdentifier` namespace for every new invoice, so an
   operator wallet must exist before the app can present a new payment QR.
@@ -71,7 +75,8 @@ developer resources.
   transaction, transfer, approval, payout, refund, deployment, private-key export, or seed import.
 - Vault authorization and native-token gas funding are also new-invoice readiness checks. The apps
   freshly validate configuration, owner/operator authorization, and the selected network profile's
-  minimum native-gas reserve (`0.0001 ETH` on Base Sepolia) before creating each customer invoice.
+  minimum native-gas reserve (`0.0001 ETH` on the shipped Base profiles) before creating each
+  customer invoice.
   Failure blocks only new invoice/QR creation; history,
   existing payment monitoring, settlement recovery, and setup remain available. Customer ERC-20
   and native payments still go only to one-time receiver addresses.
@@ -127,7 +132,10 @@ long-lived cache. Wall-clock time remains dependent on the public endpoint and n
    first-detected block hash with its height and restart confirmation depth when that saved cursor
    is missing or no longer canonical. Continue bounded reconciliation of closed and swept QR
    receivers because a published address cannot be revoked.
-6. Persist the paid or overpaid invoice without replacing the confirmed payment observation.
+6. Persist the paid or overpaid invoice without replacing the confirmed payment observation. When
+   the saved publication and funding cursors are available, resolve and conditionally persist the
+   direct incoming customer transaction for receipt details; leave it unavailable when the balance
+   crossing cannot be attributed safely.
 7. Re-prove even historical invoice snapshots against the shipped chain pins and trusted RPC,
    verify current operator authorization and exact balances through the operational RPC, then
    simulate and estimate a constrained `sweepSessions` transaction. Repeat provenance,
@@ -153,22 +161,23 @@ MOBILE_SDK.md  Integration and deployment guide
 
 ## Known EVM networks
 
-Base Sepolia (`84532`) is the only network enabled in the production apps in this release, and its
-immutable pins target the published OPK Protocol 1.6 Route A deployment. A
+Base Mainnet (`8453`) and Base Sepolia (`84532`) are enabled in the production apps. Fresh
+configuration defaults to Base Mainnet; Base Sepolia remains an explicit testing choice. Their
+immutable pins target the published OPK Protocol 1.6 Route A deployments. A
 provisioning QR chooses an enabled chain but cannot supply or override its RPC trust root, factory,
 receiver implementation, vault runtime hash, protocol version, CREATE2 vector, finality floor,
 native-currency metadata, or minimum operator gas reserve. The shared pins are recorded in
 `conformance/opk-terminal-networks-v1.json`. The Swift and Kotlin payment-profile
-catalogs remain EVM-generic. Base Sepolia's compiled confirmation minimum and fresh-network default
-are both one block; the block containing the payment is confirmation one. In Admin/setup, a merchant
-administrator can choose the confirmation requirement for each enabled EVM network within its
-allowed range. Every profile on the same chain shares that network policy, and a new profile inherits
-the existing choice. The value is snapshotted into new invoices and settlement batches, while
+catalogs remain EVM-generic. Both shipped Base profiles have a compiled confirmation minimum and
+fresh-network default of one block; the block containing the payment is confirmation one. In
+Admin/setup, a merchant administrator can choose the confirmation requirement for each enabled EVM
+network within its allowed range. Every profile on the same chain shares that network policy, and a
+new profile inherits the existing choice. The value is snapshotted into new invoices and settlement batches, while
 existing invoices retain their original requirement. The strict v1 provisioning QR does not carry
-or override this local policy. Base Mainnet (`8453`) has a published OPK Protocol 1.6 Route A
-deployment but remains app-disabled until an explicit product decision ships its reviewed RPC,
-finality, native-currency, gas-reserve, deployment-pin, and CREATE2 policy. Any additional network
-has the same release gate; arbitrary QR-provided network infrastructure remains unsupported.
+or override this local policy. Any additional network has the same explicit release gate; arbitrary
+QR-provided network infrastructure remains unsupported. Base's public RPC endpoints are
+rate-limited and are not production-capacity guarantees, so live operators must review their RPC
+provider policy separately from the compiled chain and deployment pins.
 
 The current implementation still lacks cross-operator `Swept`-log discovery and same-nonce fee
 replacement/cancellation; see the recovery limits in [MOBILE_SDK.md](./MOBILE_SDK.md) before
@@ -190,7 +199,7 @@ terminal's device-side verification boundary.
 
 ## Verify
 
-Requirements: JDK 17, Android SDK platform 35, Swift 6.1+, XcodeGen, ripgrep (`rg`), and a full Xcode
+Requirements: JDK 17, Android SDK platform 36, Swift 6.1+, XcodeGen, ripgrep (`rg`), and a full Xcode
 installation with an iOS Simulator SDK.
 
 ```bash
@@ -208,8 +217,9 @@ build outputs.
 
 ## Security and risk
 
-This code has not been independently audited. Base Sepolia (`84532`) is the only network enabled
-in shipped builds; Base Mainnet and every other network remain disabled as described above.
+This code has not been independently audited. Base Mainnet (`8453`) is the fresh-install default and
+Base Sepolia (`84532`) remains available for testing; every other network remains disabled as
+described above.
 
 The safety boundary documented here describes the behaviour of this source tree, built as
 published, against the pinned deployments in `conformance/`. Those properties are not guaranteed

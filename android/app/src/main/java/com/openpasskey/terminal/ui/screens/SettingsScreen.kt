@@ -33,10 +33,12 @@ import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -62,9 +64,11 @@ import com.openpasskey.terminal.ui.components.QRCodeView
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import com.openpasskey.terminal.provisioning.formatNativeCurrencyAmount
 import com.openpasskey.terminal.chain.TerminalPaymentProfile
+import com.openpasskey.terminal.chain.MerchantReceiptProfile
 import com.openpasskey.terminal.viewmodel.SettingsState
 import com.openpasskey.terminal.viewmodel.SettingsViewModel
 import com.openpasskey.terminal.viewmodel.TerminalSetupStatus
+import com.openpasskey.terminal.viewmodel.validateMerchantReceiptProfileInput
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
 
 internal data class SettingsExternalLink(
@@ -97,6 +101,17 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
     var showAdvancedManualSetup by remember { mutableStateOf(false) }
     var profilePendingRemoval by remember { mutableStateOf<TerminalPaymentProfile?>(null) }
     var chainPendingConfirmationEdit by remember { mutableStateOf<Long?>(null) }
+    val setupBusy = privilegedSetupBusy(state)
+
+    LaunchedEffect(state.adminUnlocked, setupBusy) {
+        if (state.adminPinConfigured && (!state.adminUnlocked || setupBusy)) {
+            showProvisioningScanner = false
+            showAdvancedManualSetup = false
+            showReset = false
+            profilePendingRemoval = null
+            chainPendingConfirmationEdit = null
+        }
+    }
 
     if (showProvisioningScanner) {
         ProvisioningScannerDialog(
@@ -226,6 +241,7 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
     }
     if (showAdvancedManualSetup) {
         AdvancedManualSetupDialog(
+            initialChainId = state.chainId,
             onDismiss = { showAdvancedManualSetup = false },
             onProvision = { chainId, vault, token ->
                 showAdvancedManualSetup = false
@@ -245,6 +261,16 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                     state = state,
                     onCreate = { showWalletCreation = true },
                     onRefresh = viewModel::refreshOperatorStatus,
+                )
+            }
+            item {
+                MerchantReceiptProfileCard(
+                    savedName = state.merchantReceiptName,
+                    savedAbn = state.merchantReceiptAbn,
+                    editable = state.adminPinConfigured && state.adminUnlocked &&
+                        !setupBusy,
+                    saving = state.savingMerchantReceiptProfile,
+                    onSave = viewModel::updateMerchantReceiptProfile,
                 )
             }
             if (state.operatorWalletAvailability == OperatorWalletAvailability.READY &&
@@ -272,7 +298,7 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                 item {
                     Button(
                         onClick = { showProvisioningScanner = true },
-                        enabled = state.setupStatus != TerminalSetupStatus.PROVISIONING,
+                        enabled = !setupBusy,
                         modifier = Modifier.fillMaxWidth().height(52.dp),
                     ) {
                         Icon(Icons.Default.QrCodeScanner, contentDescription = null)
@@ -284,12 +310,12 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                 item {
                     ConfigurationSummary(
                         state = state,
-                        onRemove = if (state.adminUnlocked) {
+                        onRemove = if (state.adminUnlocked && !setupBusy) {
                             { profile -> profilePendingRemoval = profile }
                         } else {
                             null
                         },
-                        onEditNetworkConfirmations = if (state.adminUnlocked) {
+                        onEditNetworkConfirmations = if (state.adminUnlocked && !setupBusy) {
                             { chainId -> chainPendingConfirmationEdit = chainId }
                         } else {
                             null
@@ -299,9 +325,17 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
             }
             if (state.adminPinConfigured) {
                 item {
+                    AdvancedSettingsCard(
+                        autoSweepEnabled = state.autoSweepEnabled,
+                        unlocked = state.adminUnlocked,
+                        busy = setupBusy,
+                        onAutoSweepChanged = viewModel::updateAutoSweepEnabled,
+                    )
+                }
+                item {
                     AdminSetupCard(
                         unlocked = state.adminUnlocked,
-                        busy = state.setupStatus == TerminalSetupStatus.PROVISIONING,
+                        busy = setupBusy,
                         onUnlock = { showUnlock = true },
                         onLock = viewModel::lockAdmin,
                         onReprovision = { showProvisioningScanner = true },
@@ -340,6 +374,11 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
         }
     }
 }
+
+internal fun privilegedSetupBusy(state: SettingsState): Boolean =
+    state.setupStatus == TerminalSetupStatus.PROVISIONING ||
+        state.savingMerchantReceiptProfile ||
+        state.savingAutoSweepPreference
 
 @Composable
 private fun ExternalLinksCard() {
@@ -609,6 +648,136 @@ private fun SummaryLine(label: String, value: String) {
 }
 
 @Composable
+private fun MerchantReceiptProfileCard(
+    savedName: String,
+    savedAbn: String,
+    editable: Boolean,
+    saving: Boolean,
+    onSave: (String, String) -> Unit,
+) {
+    var merchantName by remember(savedName) { mutableStateOf(savedName) }
+    var merchantAbn by remember(savedAbn) { mutableStateOf(savedAbn) }
+    val validation = validateMerchantReceiptProfileInput(merchantName, merchantAbn)
+    val changed = merchantName != savedName || merchantAbn != savedAbn
+    val fieldsEnabled = editable && !saving
+
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Receipt merchant", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "These details are copied into each new invoice, so its printed receipt and " +
+                    "later reprints remain identical.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            OutlinedTextField(
+                value = merchantName,
+                onValueChange = { value ->
+                    val sanitized = value.filterNot(Char::isISOControl)
+                    if (sanitized.codePointCount(0, sanitized.length) <=
+                        MerchantReceiptProfile.MAX_NAME_LENGTH
+                    ) {
+                        merchantName = sanitized
+                    }
+                },
+                label = { Text("Merchant name") },
+                supportingText = {
+                    Text(validation.nameError ?: "Required, up to 64 characters")
+                },
+                isError = validation.nameError != null,
+                singleLine = true,
+                enabled = fieldsEnabled,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = merchantAbn,
+                onValueChange = { value ->
+                    if (value.length <= 14 && value.all { it in '0'..'9' || it == ' ' }) {
+                        merchantAbn = value
+                    }
+                },
+                label = { Text("ABN") },
+                supportingText = {
+                    Text(
+                        validation.abnError
+                            ?: "Optional, valid 11-digit Australian ABN",
+                    )
+                },
+                isError = validation.abnError != null,
+                singleLine = true,
+                enabled = fieldsEnabled,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                onClick = { onSave(merchantName, merchantAbn) },
+                enabled = fieldsEnabled && validation.isValid && changed,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (saving) "Saving receipt details…" else "Save receipt details")
+            }
+            if (saving) {
+                Text(
+                    "Saving receipt details…",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            } else if (!editable) {
+                Text(
+                    "Unlock Admin/setup to edit receipt details.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AdvancedSettingsCard(
+    autoSweepEnabled: Boolean,
+    unlocked: Boolean,
+    busy: Boolean,
+    onAutoSweepChanged: (Boolean) -> Unit,
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Advanced settings", style = MaterialTheme.typography.titleMedium)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text("Auto-sweep confirmed payments")
+                    Text(
+                        "For a newly issued invoice with its own incoming transaction evidence, " +
+                            "automatically opens settlement review after canonical confirmation. " +
+                            "Late payments remain manual. Every sweep still requires device " +
+                            "authentication, signing safeguards, finality, and matching on-chain " +
+                            "Swept proof.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Switch(
+                    checked = autoSweepEnabled,
+                    onCheckedChange = onAutoSweepChanged,
+                    enabled = unlocked && !busy,
+                )
+            }
+            if (!unlocked) {
+                Text(
+                    "Unlock Admin/setup to change auto-sweep.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            } else if (busy) {
+                Text(
+                    "Saving or completing another setup change…",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun AdminSetupCard(
     unlocked: Boolean,
     busy: Boolean,
@@ -665,11 +834,14 @@ private fun AdminSetupCard(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AdvancedManualSetupDialog(
+    initialChainId: Long,
     onDismiss: () -> Unit,
     onProvision: (Long, String, String) -> Unit,
 ) {
     val chains = remember { KnownChainPolicy.enabledProfiles() }
-    var selectedChain by remember { mutableStateOf(chains.first()) }
+    var selectedChain by remember(initialChainId) {
+        mutableStateOf(advancedSetupInitialNetwork(initialChainId))
+    }
     var chainMenuExpanded by remember { mutableStateOf(false) }
     var vault by remember { mutableStateOf("") }
     var token by remember { mutableStateOf("") }
@@ -689,7 +861,8 @@ private fun AdvancedManualSetupDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "Choose a verified EVM deployment, then enter or scan the vault and payment asset. " +
+                    "Base Mainnet is the production default. Choose Base Sepolia here only for " +
+                        "testnet use, then enter or scan that network's vault and payment asset. " +
                         "Factory, receiver implementation, symbol, and decimals remain chain-derived and pinned.",
                 )
                 ExposedDropdownMenuBox(
@@ -698,7 +871,7 @@ private fun AdvancedManualSetupDialog(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     OutlinedTextField(
-                        value = "${selectedChain.networkName} (${selectedChain.chainId})",
+                        value = advancedSetupNetworkLabel(selectedChain),
                         onValueChange = {},
                         readOnly = true,
                         label = { Text("Network") },
@@ -714,7 +887,7 @@ private fun AdvancedManualSetupDialog(
                     ) {
                         chains.forEach { chain ->
                             DropdownMenuItem(
-                                text = { Text("${chain.networkName} (${chain.chainId})") },
+                                text = { Text(advancedSetupNetworkLabel(chain)) },
                                 onClick = {
                                     selectedChain = chain
                                     chainMenuExpanded = false
@@ -738,6 +911,15 @@ private fun AdvancedManualSetupDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
+
+internal fun advancedSetupInitialNetwork(chainId: Long) =
+    runCatching { KnownChainPolicy.requireProfile(chainId) }
+        .getOrElse { KnownChainPolicy.defaultProfile() }
+
+internal fun advancedSetupNetworkLabel(
+    profile: com.openpasskey.terminal.provisioning.KnownChainProfile,
+): String = "${profile.networkName} (${profile.chainId}) · " +
+    if (profile.isTestnet) "testnet" else "production"
 
 @Composable
 private fun ManualAddressField(

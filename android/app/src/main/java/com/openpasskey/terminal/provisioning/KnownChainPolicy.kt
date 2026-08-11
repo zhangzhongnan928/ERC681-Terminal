@@ -43,9 +43,36 @@ data class KnownChainProfile(
 
 object KnownChainPolicy {
     // Add a chain only after its deployed factory, receiver implementation, runtime bytecode hash,
-    // and CREATE2 fixture are independently verified. The SDK catalog supports many EVM networks;
-    // only Base Sepolia is currently enabled in the production app.
+    // and CREATE2 fixture are independently verified. The production default is listed explicitly;
+    // callers must never infer it from map or numeric chain ordering.
+    const val DEFAULT_CHAIN_ID = 8453L
+
     private val profiles = mapOf(
+        8453L to KnownChainProfile(
+            chainId = 8453L,
+            networkName = "Base Mainnet",
+            isTestnet = false,
+            nativeCurrencySymbol = "ETH",
+            nativeCurrencyDecimals = 18,
+            minimumConfirmationBlocks = 1,
+            defaultConfirmationBlocks = 1,
+            minimumOperatorNativeReserve = BigInteger("100000000000000"),
+            rpcUrl = "https://mainnet.base.org",
+            factory = EvmAddress.parse("0x5418ab1790eaf96a20e26146c5b7765cb99328da"),
+            receiverImplementation = EvmAddress.parse("0xe6393f6176865cc62cd08d8b8f0c38d35af55254"),
+            vaultRuntimeCodeHash =
+                "0x8c3a56b5606e44613d50c898acf67a3689afc478b47e9a38326699b0df111cbd",
+            protocolVersion = "1.6",
+            fixtureVault = EvmAddress.parse("0x1111111111111111111111111111111111111111"),
+            fixtureInvoiceId = InvoiceId.parse(
+                "0xd5ab0fb2beaa1c3d789ae8a50b9429257b7f830830c8c4e23177a0fb2e116c77",
+            ),
+            fixtureSalt =
+                "0x8b43abe81bab80f024d08540d6ffed9dab76ebd2f0096a53671e7c9aa94462ab",
+            fixtureInitCodeHash =
+                "0x3b2db354080b627c0b567ce3b408da0bd1ad3c63d0cbe675ee0bfd1a34817f1a",
+            fixtureReceiver = EvmAddress.parse("0x3da3df1635ef2334e5b26bee7b87e34d01454d8b"),
+        ),
         84532L to KnownChainProfile(
             chainId = 84532L,
             networkName = "Base Sepolia",
@@ -76,7 +103,12 @@ object KnownChainPolicy {
     fun requireProfile(chainId: Long): KnownChainProfile = profiles[chainId]
         ?: throw IllegalArgumentException("Chain $chainId is not supported by this terminal build")
 
+    fun defaultProfile(): KnownChainProfile = requireProfile(DEFAULT_CHAIN_ID)
+
     fun enabledChainIds(): Set<Long> = profiles.keys
 
-    fun enabledProfiles(): List<KnownChainProfile> = profiles.values.sortedBy { it.chainId }
+    fun enabledProfiles(): List<KnownChainProfile> = profiles.values.sortedWith(
+        compareBy<KnownChainProfile> { it.chainId != DEFAULT_CHAIN_ID }
+            .thenBy { it.chainId },
+    )
 }

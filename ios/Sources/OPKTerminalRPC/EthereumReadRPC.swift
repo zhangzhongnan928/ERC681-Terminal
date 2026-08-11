@@ -61,7 +61,7 @@ public protocol EthereumBatchReadRPC: EthereumReadRPC {
     func batch(_ requests: [EthereumReadBatchRequest]) async throws -> [EthereumReadBatchResult]
 }
 
-public actor JSONRPCEthereumClient: EthereumBatchReadRPC {
+public actor JSONRPCEthereumClient: EthereumBatchReadRPC, PaymentEvidenceChainClient {
     private let client: JSONRPCClient
 
     public init(endpoint: URL, transport: any RPCTransport = URLSessionRPCTransport.shared) throws {
@@ -121,6 +121,73 @@ public actor JSONRPCEthereumClient: EthereumBatchReadRPC {
             params: [.string(address.hex), .string(block.parameter)]
         )
         return try Self.decodeUInt256Quantity(result)
+    }
+
+    public func paymentEvidenceAssetBalance(
+        asset: EthereumAddress,
+        holder: EthereumAddress,
+        blockNumber: UInt64
+    ) async throws -> UInt256 {
+        if NativeAsset.isNative(asset) {
+            return try await balance(of: holder, block: .number(blockNumber))
+        }
+        let result = try await call(
+            to: asset,
+            data: ABI.encodeCall(
+                selector: ABI.balanceOfSelector,
+                words: [ABI.word(holder)]
+            ),
+            block: .number(blockNumber)
+        )
+        return try ABI.decodeUInt256(result)
+    }
+
+    public func paymentEvidenceBlock(
+        at blockNumber: UInt64,
+        includeTransactions: Bool
+    ) async throws -> PaymentEvidenceBlock {
+        let blockParameter = "0x" + String(blockNumber, radix: 16)
+        if includeTransactions {
+            let result: RPCPaymentEvidenceFullBlock = try await client.call(
+                "eth_getBlockByNumber",
+                params: [.string(blockParameter), .bool(true)]
+            )
+            return try Self.decodePaymentEvidenceBlock(result, expected: blockNumber)
+        }
+        let result: RPCPaymentEvidenceBlockHeader = try await client.call(
+            "eth_getBlockByNumber",
+            params: [.string(blockParameter), .bool(false)]
+        )
+        let number = try Self.decodeQuantity(result.number)
+        guard number == blockNumber else { throw JSONRPCError.malformedResponse }
+        return PaymentEvidenceBlock(
+            number: number,
+            hash: try Bytes32(hex: result.hash),
+            timestamp: try Self.decodeQuantity(result.timestamp)
+        )
+    }
+
+    public func paymentEvidenceERC20Transfers(
+        token: EthereumAddress,
+        recipient: EthereumAddress,
+        blockNumber: UInt64
+    ) async throws -> [PaymentEvidenceERC20Transfer] {
+        let blockParameter = "0x" + String(blockNumber, radix: 16)
+        let filter: JSONValue = .object([
+            "address": .string(token.hex),
+            "fromBlock": .string(blockParameter),
+            "toBlock": .string(blockParameter),
+            "topics": .array([
+                .string(Keccak256.hash(utf8: "Transfer(address,address,uint256)").hex),
+                .null,
+                .string(ABI.word(recipient).hexString),
+            ]),
+        ])
+        let logs: [RPCPaymentEvidenceLog] = try await client.call(
+            "eth_getLogs",
+            params: [filter]
+        )
+        return try logs.map(Self.decodePaymentEvidenceTransfer)
     }
 
     public func batch(
@@ -259,6 +326,64 @@ public actor JSONRPCEthereumClient: EthereumBatchReadRPC {
             throw RPCDecodingError.invalidQuantity(value)
         }
     }
+
+    private static func decodePaymentEvidenceBlock(
+        _ block: RPCPaymentEvidenceFullBlock,
+        expected blockNumber: UInt64
+    ) throws -> PaymentEvidenceBlock {
+        let number = try decodeQuantity(block.number)
+        guard number == blockNumber else { throw JSONRPCError.malformedResponse }
+        let blockHash = try Bytes32(hex: block.hash)
+        let transactions = try block.transactions.map { transaction in
+            PaymentEvidenceTransaction(
+                hash: try Bytes32(hex: transaction.hash),
+                from: try EthereumAddress(hex: transaction.from, allowZero: false),
+                to: try transaction.to.map { try EthereumAddress(hex: $0) },
+                value: try decodeUInt256Quantity(transaction.value),
+                blockNumber: try decodeQuantity(transaction.blockNumber),
+                blockHash: try Bytes32(hex: transaction.blockHash),
+                transactionIndex: try decodeQuantity(transaction.transactionIndex)
+            )
+        }
+        return PaymentEvidenceBlock(
+            number: number,
+            hash: blockHash,
+            timestamp: try decodeQuantity(block.timestamp),
+            transactions: transactions
+        )
+    }
+
+    private static func decodePaymentEvidenceTransfer(
+        _ log: RPCPaymentEvidenceLog
+    ) throws -> PaymentEvidenceERC20Transfer {
+        guard log.topics.count == 3,
+              try Bytes32(hex: log.topics[0])
+                == Keccak256.hash(utf8: "Transfer(address,address,uint256)")
+        else { throw JSONRPCError.malformedResponse }
+        let payer = try decodeIndexedAddress(log.topics[1])
+        let recipient = try decodeIndexedAddress(log.topics[2])
+        let amountData = try decodeData(log.data)
+        guard amountData.count == 32 else { throw JSONRPCError.malformedResponse }
+        return PaymentEvidenceERC20Transfer(
+            token: try EthereumAddress(hex: log.address, allowZero: false),
+            transactionHash: try Bytes32(hex: log.transactionHash),
+            payer: payer,
+            recipient: recipient,
+            amount: UInt256(bigEndian: amountData),
+            blockNumber: try decodeQuantity(log.blockNumber),
+            blockHash: try Bytes32(hex: log.blockHash),
+            logIndex: try decodeQuantity(log.logIndex),
+            removed: log.removed ?? false
+        )
+    }
+
+    private static func decodeIndexedAddress(_ topic: String) throws -> EthereumAddress {
+        let word = try Bytes32(hex: topic)
+        guard word.data.prefix(12).allSatisfy({ $0 == 0 }) else {
+            throw JSONRPCError.malformedResponse
+        }
+        return try EthereumAddress(data: word.data.suffix(20), allowZero: false)
+    }
 }
 
 /// Reuses one actor client per endpoint. The pool and its clients all share one URLSession-backed
@@ -288,6 +413,40 @@ public final class EthereumRPCClientPool: @unchecked Sendable {
 private struct RPCBlockIdentity: Decodable, Sendable {
     let number: String
     let hash: String
+}
+
+private struct RPCPaymentEvidenceBlockHeader: Decodable, Sendable {
+    let number: String
+    let hash: String
+    let timestamp: String
+}
+
+private struct RPCPaymentEvidenceFullBlock: Decodable, Sendable {
+    let number: String
+    let hash: String
+    let timestamp: String
+    let transactions: [RPCPaymentEvidenceTransaction]
+}
+
+private struct RPCPaymentEvidenceTransaction: Decodable, Sendable {
+    let hash: String
+    let from: String
+    let to: String?
+    let value: String
+    let blockNumber: String
+    let blockHash: String
+    let transactionIndex: String
+}
+
+private struct RPCPaymentEvidenceLog: Decodable, Sendable {
+    let address: String
+    let transactionHash: String
+    let blockNumber: String
+    let blockHash: String
+    let logIndex: String
+    let topics: [String]
+    let data: String
+    let removed: Bool?
 }
 
 extension Character {

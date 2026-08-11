@@ -264,13 +264,16 @@ final class PaymentProfileTests: XCTestCase {
         }
     }
 
-    func testKnownChainRegistryExposesOnlyShippedDeployment() {
-        XCTAssertEqual(TerminalKnownChainProfile.supportedChainIDs, [84_532])
+    func testKnownChainRegistryExposesReviewedMainnetAndTestnetDeployments() {
+        XCTAssertEqual(TerminalKnownChainProfile.supportedChainIDs, [8_453, 84_532])
         XCTAssertEqual(
             TerminalKnownChainProfile.all.map(\.networkName),
-            ["Base Sepolia"]
+            ["Base Mainnet", "Base Sepolia"]
         )
-        XCTAssertNil(TerminalKnownChainProfile.profile(for: 8_453))
+        XCTAssertEqual(
+            TerminalKnownChainProfile.profile(for: 8_453),
+            TerminalKnownChainProfile.baseMainnet
+        )
         XCTAssertNil(TerminalKnownChainProfile.profile(for: 1))
     }
 

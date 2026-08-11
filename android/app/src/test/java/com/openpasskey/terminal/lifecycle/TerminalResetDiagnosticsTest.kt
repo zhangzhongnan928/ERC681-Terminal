@@ -31,7 +31,7 @@ class TerminalResetDiagnosticsTest {
 
     @Test
     fun unreachableTrustedRpcNamesTheNetworkAndChainAtTheResetBoundary() = runBlocking {
-        val known = KnownChainPolicy.requireProfile(84532)
+        val known = KnownChainPolicy.defaultProfile()
         val reader = RpcOperatorNativeBalanceReader(
             configSnapshot = { unprovisionedSnapshot(known.chainId) },
             clientFactory = { error("RPC offline") },
@@ -64,7 +64,7 @@ class TerminalResetDiagnosticsTest {
 
     @Test
     fun mismatchedTrustedRpcNamesTheExpectedNetworkAndReportedChain() {
-        val known = KnownChainPolicy.requireProfile(84532)
+        val known = KnownChainPolicy.defaultProfile()
         val reportedChain = known.chainId + 1
         val reader = RpcOperatorNativeBalanceReader(
             configSnapshot = { unprovisionedSnapshot(known.chainId) },

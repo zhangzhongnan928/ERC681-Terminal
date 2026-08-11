@@ -36,6 +36,10 @@ struct ContentView: View {
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(RootTab.settings)
         }
+        .onChange(of: model.autoSweepReviewSequence) { _, sequence in
+            guard sequence > 0, model.preparedSettlement != nil else { return }
+            selectedTab = .settle
+        }
         .alert("OPK Terminal", isPresented: errorBinding) {
             Button("OK", role: .cancel) { model.errorMessage = nil }
         } message: {
@@ -358,7 +362,10 @@ private struct CheckoutReadyUITestFixture: View {
     @State private var selectedProfileIndex = 0
 
     private let profiles = [
-        AppPaymentProfile(tokenSymbol: "AUDM"),
+        AppPaymentProfile(
+            tokenAddress: "0x7777777777777777777777777777777777777777",
+            tokenSymbol: "AUDM"
+        ),
         AppPaymentProfile(
             vault: "0x5555555555555555555555555555555555555555",
             tokenAddress: "0x8888888888888888888888888888888888888888",
@@ -572,7 +579,7 @@ private struct CheckoutStatusHeader: View {
             .accessibilityLabel(
                 isTestnet
                     ? "\(networkName) testnet"
-                    : "\(networkName) mainnet, chain \(chainID)"
+                    : "\(networkName), chain \(chainID)"
             )
             .accessibilityIdentifier("checkoutNetworkStatus")
         }
@@ -858,9 +865,11 @@ enum CheckoutAmountInput {
 }
 
 private struct PaymentPresentationView: View {
+    @EnvironmentObject private var model: AppModel
     let request: PaymentRequest
     let observation: PaymentObservation?
     let onClose: () -> Void
+    @State private var receiptDocument: ReceiptDocument?
 
     var body: some View {
         ScrollView {
@@ -908,6 +917,22 @@ private struct PaymentPresentationView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                if isSuccessfulPayment {
+                    Button {
+                        Task {
+                            if let document = await model.ensureReceiptDocument(
+                                for: request.invoiceID.hex
+                            ) {
+                                receiptDocument = document
+                            }
+                        }
+                    } label: {
+                        Label("View receipt", systemImage: "doc.text.magnifyingglass")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("activePaymentReceiptButton")
+                }
+
                 Button("Close", action: onClose)
                     .buttonStyle(.borderedProminent)
                     .frame(maxWidth: .infinity)
@@ -918,6 +943,9 @@ private struct PaymentPresentationView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+        .sheet(item: $receiptDocument) { document in
+            ReceiptView(document: document)
+        }
     }
 
     private var shouldPresentQR: Bool {
@@ -925,6 +953,28 @@ private struct PaymentPresentationView: View {
         switch status {
         case .waiting, .partial, .confirming: return true
         case .paid, .overpaid, .expired: return false
+        }
+    }
+
+    private var isSuccessfulPayment: Bool {
+        guard let status = observation?.status else { return false }
+        return PaymentReceiptPresentationPolicy.presentation(for: status) == .buttonOnly
+    }
+
+}
+
+enum PaymentReceiptPresentation: Equatable {
+    case hidden
+    /// The cashier explicitly opens the receipt. This avoids competing with automatic navigation
+    /// to the settlement review sheet when auto-sweep preparation completes at the same time.
+    case buttonOnly
+}
+
+enum PaymentReceiptPresentationPolicy {
+    static func presentation(for status: PaymentStatus) -> PaymentReceiptPresentation {
+        switch status {
+        case .paid, .overpaid: .buttonOnly
+        case .waiting, .partial, .confirming, .expired: .hidden
         }
     }
 }
@@ -1010,7 +1060,10 @@ private struct HistoryView: View {
 }
 
 private struct InvoiceDetailView: View {
+    @EnvironmentObject private var model: AppModel
     let invoice: StoredInvoice
+    @State private var receiptDocument: ReceiptDocument?
+    @State private var isLoadingReceipt = false
 
     var body: some View {
         List {
@@ -1020,6 +1073,38 @@ private struct InvoiceDetailView: View {
                 LabeledContent("Balance", value: invoice.observedBalance)
                 LabeledContent("Receiver", value: abbreviated(invoice.receiver))
                 LabeledContent("Invoice", value: abbreviated(invoice.invoiceID))
+                if let paymentHash = invoice.paymentTransactionHash {
+                    LabeledContent("Payment transaction", value: abbreviated(paymentHash))
+                }
+            }
+            if invoice.receiptEligible {
+                Section("Receipt") {
+                    Button {
+                        isLoadingReceipt = true
+                        Task {
+                            receiptDocument = await model.ensureReceiptDocument(
+                                for: invoice.invoiceID
+                            )
+                            isLoadingReceipt = false
+                        }
+                    } label: {
+                        if isLoadingReceipt {
+                            Label("Resolving receipt...", systemImage: "hourglass")
+                        } else {
+                            Label(
+                                invoice.hasIncomingPaymentEvidence
+                                    ? "View or reprint receipt"
+                                    : "Resolve payment receipt",
+                                systemImage: "doc.text.magnifyingglass"
+                            )
+                        }
+                    }
+                    .disabled(isLoadingReceipt)
+                    .accessibilityIdentifier("historyReceiptButton")
+                    Text("The receipt uses the saved incoming consumer transaction. A settlement sweep transaction is never substituted.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
             Section("QR") {
                 if invoice.shouldPresentQRCode {
@@ -1036,6 +1121,9 @@ private struct InvoiceDetailView: View {
         }
         .navigationTitle("Invoice")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $receiptDocument) { document in
+            ReceiptView(document: document)
+        }
     }
 }
 

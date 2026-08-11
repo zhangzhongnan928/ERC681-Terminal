@@ -102,8 +102,8 @@ android {
         applicationId = "com.openpasskey.terminal"
         minSdk = 26
         targetSdk = 36
-        versionCode = 16
-        versionName = "0.2.1"
+        versionCode = 17
+        versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -181,6 +181,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.biometric)
+    // Biometric 1.1.0 otherwise resolves Fragment 1.2.5, whose 16-bit permission request-code
+    // validator is incompatible with ActivityResultRegistry in Activity 1.9.3.
+    implementation(libs.androidx.fragment)
 
     // Compose
     implementation(platform(libs.androidx.compose.bom))
@@ -214,6 +217,9 @@ dependencies {
 
     // App-layer operator wallet and settlement transaction signing. The reusable SDK remains read-only.
     implementation(libs.web3j.core)
+
+    // Built-in 58 mm printer on iMin Swift 2. Service binding remains lazy and live-mode-only.
+    implementation(libs.imin.printer)
 
     testImplementation(libs.junit)
     testImplementation("org.mockito:mockito-core:5.12.0")

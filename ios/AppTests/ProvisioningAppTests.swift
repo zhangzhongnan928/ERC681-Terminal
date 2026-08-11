@@ -6,6 +6,131 @@ import OPKTerminalRPC
 import SwiftData
 
 final class ProvisioningAppTests: XCTestCase {
+    func testFreshSettingsDefaultToBaseMainnetWithoutProvisioning() throws {
+        let mainnet = TerminalKnownChainProfile.baseMainnet
+        let settings = AppSettings()
+
+        XCTAssertFalse(settings.isProvisioned)
+        XCTAssertTrue(settings.paymentProfiles.isEmpty)
+        XCTAssertEqual(settings.chainID, String(mainnet.chainID))
+        XCTAssertEqual(settings.rpcURL, mainnet.rpcEndpoint.absoluteString)
+        XCTAssertEqual(settings.factory, mainnet.factory.hex)
+        XCTAssertEqual(
+            settings.receiverImplementation,
+            mainnet.receiverImplementation.hex
+        )
+        XCTAssertEqual(settings.tokenAddress, NativeAsset.address.hex)
+        XCTAssertEqual(settings.tokenSymbol, mainnet.nativeCurrencySymbol)
+        XCTAssertEqual(settings.tokenDecimals, String(mainnet.nativeCurrencyDecimals))
+        XCTAssertEqual(
+            settings.confirmationBlocks,
+            String(mainnet.defaultConfirmationBlocks)
+        )
+        XCTAssertEqual(try settings.configuration().chainID, mainnet.chainID)
+    }
+
+    func testPersistedBaseSepoliaCatalogAndSelectionSurviveMainnetDefaultChange() throws {
+        let sepolia = TerminalKnownChainProfile.baseSepolia
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let configuration = try TerminalConfiguration(
+            chainID: sepolia.chainID,
+            rpcEndpoints: [sepolia.rpcEndpoint],
+            protocolVersion: sepolia.protocolVersion,
+            deployment: OPKDeployment(
+                factory: sepolia.factory,
+                receiverImplementation: sepolia.receiverImplementation,
+                vault: address("0x3333333333333333333333333333333333333333")
+            ),
+            tokens: [PaymentToken(
+                address: address("0x2222222222222222222222222222222222222222"),
+                symbol: "AUDM",
+                decimals: 18
+            )],
+            confirmationPolicy: .init(requiredBlocks: sepolia.defaultConfirmationBlocks),
+            create2TestVector: sepolia.create2TestVector
+        )
+        let stored = try AppSettings().applying(configuration, boundTo: operatorAddress)
+
+        let restored = try JSONDecoder().decode(
+            AppSettings.self,
+            from: JSONEncoder().encode(stored)
+        )
+
+        XCTAssertEqual(restored, stored)
+        XCTAssertTrue(restored.isProvisioned)
+        XCTAssertEqual(restored.chainID, String(sepolia.chainID))
+        XCTAssertEqual(restored.selectedPaymentProfileID, stored.selectedPaymentProfileID)
+        XCTAssertEqual(try restored.configuration().chainID, sepolia.chainID)
+    }
+
+    func testPersistedUnprovisionedSepoliaFallbackIsNotRewrittenToMainnet() throws {
+        let sepolia = TerminalKnownChainProfile.baseSepolia
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(AppSettings()))
+                as? [String: Any]
+        )
+        let fallback = AppPaymentProfile(
+            rpcURL: sepolia.rpcEndpoint.absoluteString,
+            chainID: String(sepolia.chainID),
+            protocolVersion: sepolia.protocolVersion.rawValue,
+            factory: sepolia.factory.hex,
+            receiverImplementation: sepolia.receiverImplementation.hex,
+            vault: sepolia.create2TestVector.vault.hex,
+            tokenAddress: NativeAsset.address.hex,
+            tokenSymbol: sepolia.nativeCurrencySymbol,
+            tokenDecimals: String(sepolia.nativeCurrencyDecimals),
+            confirmationBlocks: String(sepolia.defaultConfirmationBlocks)
+        )
+        object["fallbackProfile"] = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(fallback)
+        )
+
+        let restored = try JSONDecoder().decode(
+            AppSettings.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        XCTAssertFalse(restored.isProvisioned)
+        XCTAssertTrue(restored.paymentProfiles.isEmpty)
+        XCTAssertEqual(restored.chainID, String(sepolia.chainID))
+        XCTAssertEqual(restored.rpcURL, sepolia.rpcEndpoint.absoluteString)
+    }
+
+    func testExplicitProvisioningClearReturnsFutureSetupToMainnet() throws {
+        let sepolia = TerminalKnownChainProfile.baseSepolia
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let configuration = try TerminalConfiguration(
+            chainID: sepolia.chainID,
+            rpcEndpoints: [sepolia.rpcEndpoint],
+            protocolVersion: sepolia.protocolVersion,
+            deployment: OPKDeployment(
+                factory: sepolia.factory,
+                receiverImplementation: sepolia.receiverImplementation,
+                vault: address("0x3333333333333333333333333333333333333333")
+            ),
+            tokens: [PaymentToken(
+                address: address("0x2222222222222222222222222222222222222222"),
+                symbol: "AUDM",
+                decimals: 18
+            )],
+            confirmationPolicy: .init(requiredBlocks: sepolia.defaultConfirmationBlocks),
+            create2TestVector: sepolia.create2TestVector
+        )
+        let provisioned = try AppSettings().applying(
+            configuration,
+            boundTo: operatorAddress
+        )
+
+        let cleared = provisioned.clearingProvisioning()
+
+        XCTAssertFalse(cleared.isProvisioned)
+        XCTAssertTrue(cleared.paymentProfiles.isEmpty)
+        XCTAssertEqual(
+            cleared.chainID,
+            String(TerminalKnownChainProfile.baseMainnet.chainID)
+        )
+    }
+
     func testCheckoutPresentationBlocksWhileProvisioningOrRefreshingReadiness() {
         XCTAssertEqual(
             CheckoutPresentationState.evaluate(
@@ -84,6 +209,7 @@ final class ProvisioningAppTests: XCTestCase {
 
     @MainActor
     func testReadinessRefreshGateSpansValidationAndOperatorStatusPhases() async throws {
+        let known = TerminalKnownChainProfile.baseMainnet
         let savedSettings = AppPreferences.loadSettings()
         defer { AppPreferences.saveSettings(savedSettings) }
         let container = try ModelContainer(
@@ -95,8 +221,8 @@ final class ProvisioningAppTests: XCTestCase {
         let operatorAddress = try address("0x1111111111111111111111111111111111111111")
         let probe = BlockingReadinessRefreshProbe(
             status: OperatorChainStatus(
-                chainID: 84_532,
-                balance: TerminalKnownChainProfile.baseSepolia.minimumOperatorNativeReserve,
+                chainID: known.chainID,
+                balance: known.minimumOperatorNativeReserve,
                 isAuthorizedOperator: true,
                 isVaultOwner: false,
                 isLowGas: false
@@ -1268,6 +1394,7 @@ final class ProvisioningAppTests: XCTestCase {
     }
 
     func testReadinessRequiresCurrentValidationAuthorizationAndMinimumGas() throws {
+        let known = TerminalKnownChainProfile.baseMainnet
         let operatorAddress = try address("0x1111111111111111111111111111111111111111")
         var settings = AppSettings()
 
@@ -1302,8 +1429,8 @@ final class ProvisioningAppTests: XCTestCase {
         )
 
         let unauthorized = OperatorChainStatus(
-            chainID: 84_532,
-            balance: TerminalKnownChainProfile.baseSepolia.minimumOperatorNativeReserve,
+            chainID: known.chainID,
+            balance: known.minimumOperatorNativeReserve,
             isAuthorizedOperator: false,
             isVaultOwner: false,
             isLowGas: false
@@ -1318,9 +1445,12 @@ final class ProvisioningAppTests: XCTestCase {
             .authorizationRequired
         )
 
+        let oneBelowReserve = known.minimumOperatorNativeReserve
+            .subtractingReportingOverflow(UInt256(1))
+        XCTAssertFalse(oneBelowReserve.overflow)
         let underfunded = OperatorChainStatus(
-            chainID: 84_532,
-            balance: UInt256(99_999_999_999_999),
+            chainID: known.chainID,
+            balance: oneBelowReserve.partialValue,
             isAuthorizedOperator: true,
             isVaultOwner: false,
             isLowGas: true
@@ -1334,15 +1464,15 @@ final class ProvisioningAppTests: XCTestCase {
             ),
             .gasRequired(
                 available: underfunded.balance,
-                required: TerminalKnownChainProfile.baseSepolia.minimumOperatorNativeReserve,
-                nativeCurrencySymbol: "ETH",
-                nativeCurrencyDecimals: 18
+                required: known.minimumOperatorNativeReserve,
+                nativeCurrencySymbol: known.nativeCurrencySymbol,
+                nativeCurrencyDecimals: known.nativeCurrencyDecimals
             )
         )
 
         let ready = OperatorChainStatus(
-            chainID: 84_532,
-            balance: TerminalKnownChainProfile.baseSepolia.minimumOperatorNativeReserve,
+            chainID: known.chainID,
+            balance: known.minimumOperatorNativeReserve,
             isAuthorizedOperator: true,
             isVaultOwner: false,
             isLowGas: false
@@ -1583,7 +1713,7 @@ final class ProvisioningAppTests: XCTestCase {
         settings.provisionedOperatorAddress = current.hex
         XCTAssertEqual(
             settings.operatorFundingPayload(for: current),
-            "ethereum:\(current.hex)@84532"
+            "ethereum:\(current.hex)@\(TerminalKnownChainProfile.baseMainnet.chainID)"
         )
     }
 
@@ -3244,7 +3374,7 @@ final class ProvisioningAppTests: XCTestCase {
     }
 
     func testPersistedSettingsCannotOverrideImmutableDeploymentPins() throws {
-        let profile = TerminalKnownChainProfile.baseSepolia
+        let profile = TerminalKnownChainProfile.baseMainnet
         var settings = AppSettings()
         XCTAssertEqual(try settings.configuration().deployment.factory, profile.factory)
         XCTAssertEqual(

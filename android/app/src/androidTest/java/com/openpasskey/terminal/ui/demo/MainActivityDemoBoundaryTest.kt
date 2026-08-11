@@ -85,6 +85,14 @@ class MainActivityDemoBoundaryTest {
         composeRule.onNodeWithText(ReviewerDemoCopy.BANNER_LABEL).assertIsDisplayed()
     }
 
+    @Suppress("DEPRECATION")
+    @Test
+    fun fragmentActivityAcceptsActivityResultRegistryPermissionRequestCodes() {
+        composeRule.runOnUiThread {
+            composeRule.activity.validateRequestPermissionsRequestCode(0x0001_0000)
+        }
+    }
+
     private fun requestLiveTerminalDirectly(activity: MainActivity) {
         val method = MainActivity::class.java.getDeclaredMethod(
             "activateLiveTerminal",

@@ -1,5 +1,6 @@
 package com.openpasskey.terminal.viewmodel
 
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -10,7 +11,10 @@ import com.openpasskey.terminal.chain.resolvedPaymentProfiles
 import com.openpasskey.terminal.chain.selectedPaymentProfile
 import com.openpasskey.terminal.data.model.Invoice
 import com.openpasskey.terminal.data.model.InvoiceStatus
+import com.openpasskey.terminal.data.model.receiptPrintFingerprint
 import com.openpasskey.terminal.data.repository.InvoiceRepository
+import com.openpasskey.terminal.printing.ReceiptCoordinator
+import com.openpasskey.terminal.printing.ReceiptRequestResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -18,6 +22,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class CreateInvoiceState(
     val amount: String = "",
@@ -36,9 +42,17 @@ data class CreateInvoiceState(
 
 data class PaymentUiState(val invoice: Invoice? = null, val error: String? = null)
 
+data class ReceiptUiState(
+    val printingInvoiceId: String? = null,
+    val message: String? = null,
+    val isError: Boolean = false,
+    val sequence: Long = 0,
+)
+
 class InvoiceViewModel(
     private val repository: InvoiceRepository,
-    private val chainConfig: ChainConfig
+    private val chainConfig: ChainConfig,
+    private val receiptCoordinator: ReceiptCoordinator,
 ) : ViewModel() {
     private val _createState = MutableStateFlow(CreateInvoiceState())
     val createState: StateFlow<CreateInvoiceState> = _createState.asStateFlow()
@@ -49,12 +63,46 @@ class InvoiceViewModel(
     private val _recentInvoices = MutableStateFlow<List<Invoice>>(emptyList())
     val recentInvoices: StateFlow<List<Invoice>> = _recentInvoices.asStateFlow()
 
+    private val _receiptState = MutableStateFlow(ReceiptUiState())
+    val receiptState: StateFlow<ReceiptUiState> = _receiptState.asStateFlow()
+
+    private val pendingAutoReceipts = MutableStateFlow<List<Invoice>>(emptyList())
+    /** Canonical snapshots proven unsupported before any physical print could be submitted. */
+    private val unsupportedAutoPrintFingerprints = mutableSetOf<String>()
+    private val autoPrintRetryStates = mutableMapOf<String, AutoReceiptRetryState>()
+    /** Rechecks suppression/backoff after queued attempts acquire serialization ownership. */
+    private val automaticPrintMutex = Mutex()
+
     private var monitorJob: Job? = null
 
     init {
         refreshConfiguration()
         viewModelScope.launch {
-            repository.observeRecent(100).collect { _recentInvoices.value = it }
+            repository.observeReceiptHistory().collect { _recentInvoices.value = it }
+        }
+        viewModelScope.launch {
+            repository.observePendingAutoReceipts().collect { pending ->
+                pendingAutoReceipts.value = pending
+                val liveFingerprints = pending.mapTo(mutableSetOf(), Invoice::autoReceiptFingerprint)
+                unsupportedAutoPrintFingerprints.retainAll(liveFingerprints)
+                autoPrintRetryStates.keys.retainAll(liveFingerprints)
+                attemptNextAutomaticReceipt()
+            }
+        }
+        viewModelScope.launch {
+            repository.observeUnprintedReceiptSnapshots().collect { snapshots ->
+                // Claim liveness is independent of current print eligibility. In particular,
+                // transient CONFIRMING must retain the exact claim that can later return to PAID.
+                val liveFingerprints = unprintedReceiptFingerprints(snapshots)
+                // A failed prune leaves extra markers and therefore fails safe by suppressing.
+                runCatching { chainConfig.retainOnly(liveFingerprints) }
+            }
+        }
+        viewModelScope.launch {
+            while (true) {
+                delay(AUTO_PRINT_RETRY_MILLIS)
+                attemptNextAutomaticReceipt()
+            }
         }
         viewModelScope.launch {
             delay(RECOVERY_STAGGER_MILLIS)
@@ -220,6 +268,160 @@ class InvoiceViewModel(
         stopPaymentMonitoring()
     }
 
+    fun reprintReceipt(invoiceId: String) {
+        if (_receiptState.value.printingInvoiceId != null) return
+        _receiptState.value = _receiptState.value.copy(
+            printingInvoiceId = invoiceId,
+            message = null,
+            isError = false,
+        )
+        viewModelScope.launch { printReceiptInteractively(invoiceId) }
+    }
+
+    fun consumeReceiptMessage(sequence: Long) {
+        val current = _receiptState.value
+        if (current.sequence == sequence) {
+            _receiptState.value = current.copy(message = null)
+        }
+    }
+
+    private suspend fun attemptNextAutomaticReceipt() {
+        val now = SystemClock.elapsedRealtime()
+        val invoice = selectAutomaticReceiptCandidate(
+            pending = pendingAutoReceipts.value,
+            suppressedFingerprints = currentAutoPrintSuppressions(),
+            retryStates = autoPrintRetryStates,
+            nowElapsedRealtimeMillis = now,
+        ) ?: return
+        printReceiptAutomatically(invoice)
+    }
+
+    private suspend fun printReceiptAutomatically(queuedInvoice: Invoice) {
+        automaticPrintMutex.withLock {
+            val fingerprint = queuedInvoice.autoReceiptFingerprint()
+            val currentFingerprint = pendingAutoReceipts.value
+                .firstOrNull { it.invoiceId == queuedInvoice.invoiceId }
+                ?.autoReceiptFingerprint()
+            val retryAt = autoPrintRetryStates[fingerprint]?.retryAfterElapsedRealtimeMillis ?: 0L
+            // This check is intentionally inside serialization. An already-queued duplicate can
+            // never reach the printer after an earlier attempt becomes ambiguous or unsupported.
+            if (!automaticReceiptAttemptAllowed(
+                    queuedFingerprint = fingerprint,
+                    currentFingerprint = currentFingerprint,
+                    suppressedFingerprints = currentAutoPrintSuppressions(),
+                    retryAfterElapsedRealtimeMillis = retryAt,
+                    nowElapsedRealtimeMillis = SystemClock.elapsedRealtime(),
+                )
+            ) return@withLock
+
+            val current = _receiptState.value
+            if (current.printingInvoiceId == null) {
+                _receiptState.value = current.copy(printingInvoiceId = queuedInvoice.invoiceId)
+            }
+            val result = requestReceipt(queuedInvoice.invoiceId, automatic = true)
+            when (result) {
+                is ReceiptRequestResult.Printed,
+                ReceiptRequestResult.AlreadyPrinted -> {
+                    autoPrintRetryStates.remove(fingerprint)
+                    unsupportedAutoPrintFingerprints.remove(fingerprint)
+                }
+                is ReceiptRequestResult.AutomaticSuppressed ->
+                    autoPrintRetryStates.remove(fingerprint)
+                is ReceiptRequestResult.Failed -> {
+                    if (result.retryAutomatically) {
+                        scheduleAutomaticReceiptRetry(fingerprint)
+                    } else {
+                        autoPrintRetryStates.remove(fingerprint)
+                    }
+                }
+                is ReceiptRequestResult.Unavailable -> {
+                    if (result.retryAutomatically) {
+                        scheduleAutomaticReceiptRetry(fingerprint)
+                    } else {
+                        autoPrintRetryStates.remove(fingerprint)
+                        unsupportedAutoPrintFingerprints += fingerprint
+                    }
+                }
+            }
+            publishReceiptResult(queuedInvoice.invoiceId, result, automatic = true)
+        }
+    }
+
+    private suspend fun printReceiptInteractively(invoiceId: String) {
+        val result = requestReceipt(invoiceId, automatic = false)
+        if (result is ReceiptRequestResult.Printed) {
+            repository.getInvoice(invoiceId)?.autoReceiptFingerprint()?.let { fingerprint ->
+                autoPrintRetryStates.remove(fingerprint)
+                unsupportedAutoPrintFingerprints.remove(fingerprint)
+            }
+        }
+        publishReceiptResult(invoiceId, result, automatic = false)
+    }
+
+    private suspend fun requestReceipt(
+        invoiceId: String,
+        automatic: Boolean,
+    ): ReceiptRequestResult {
+        val result = try {
+            receiptCoordinator.print(invoiceId, automatic)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            // The exception boundary cannot prove whether a submitted physical job completed.
+            ReceiptRequestResult.Failed(
+                message = error.message ?: "Receipt printing failed.",
+                retryAutomatically = false,
+            )
+        }
+        return result
+    }
+
+    private fun publishReceiptResult(
+        invoiceId: String,
+        result: ReceiptRequestResult,
+        automatic: Boolean,
+    ) {
+        if (automatic && result == ReceiptRequestResult.AlreadyPrinted) {
+            val current = _receiptState.value
+            if (current.printingInvoiceId == invoiceId) {
+                _receiptState.value = current.copy(printingInvoiceId = null)
+            }
+            return
+        }
+        val (message, isError) = when (result) {
+            is ReceiptRequestResult.Printed ->
+                (if (result.wasReprint) "Receipt reprinted." else "Receipt printed.") to false
+            ReceiptRequestResult.AlreadyPrinted -> "Receipt was already printed." to false
+            is ReceiptRequestResult.AutomaticSuppressed -> result.message to true
+            is ReceiptRequestResult.Unavailable -> result.message to true
+            is ReceiptRequestResult.Failed -> result.message to true
+        }
+        val current = _receiptState.value
+        _receiptState.value = current.copy(
+            printingInvoiceId = null,
+            message = message,
+            isError = isError,
+            sequence = current.sequence + 1,
+        )
+    }
+
+    private fun scheduleAutomaticReceiptRetry(fingerprint: String) {
+        autoPrintRetryStates[fingerprint] = nextAutoReceiptRetryState(
+            previous = autoPrintRetryStates[fingerprint],
+            nowElapsedRealtimeMillis = SystemClock.elapsedRealtime(),
+            baseDelayMillis = AUTO_PRINT_RETRY_MILLIS,
+            maximumDelayMillis = MAX_AUTO_PRINT_RETRY_MILLIS,
+            maximumBackoffSteps = MAX_AUTO_PRINT_BACKOFF_STEPS,
+        )
+    }
+
+    private fun currentAutoPrintSuppressions(): Set<String> =
+        unsupportedAutoPrintFingerprints + runCatching { chainConfig.claims() }.getOrElse {
+            // Reading durable safety state failed. Returning every current fingerprint prevents
+            // any automatic print until storage is readable again.
+            pendingAutoReceipts.value.mapTo(mutableSetOf(), Invoice::autoReceiptFingerprint)
+        }
+
     override fun onCleared() {
         stopPaymentMonitoring()
         super.onCleared()
@@ -227,18 +429,87 @@ class InvoiceViewModel(
 
     class Factory(
         private val repository: InvoiceRepository,
-        private val chainConfig: ChainConfig
+        private val chainConfig: ChainConfig,
+        private val receiptCoordinator: ReceiptCoordinator,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            InvoiceViewModel(repository, chainConfig) as T
+            InvoiceViewModel(repository, chainConfig, receiptCoordinator) as T
     }
 
     private companion object {
         const val RECOVERY_INTERVAL_MILLIS = 60_000L
         const val RECOVERY_STAGGER_MILLIS = 30_000L
+        const val AUTO_PRINT_RETRY_MILLIS = 30_000L
+        const val MAX_AUTO_PRINT_RETRY_MILLIS = 30 * 60_000L
+        const val MAX_AUTO_PRINT_BACKOFF_STEPS = 7
     }
 }
+
+internal data class AutoReceiptRetryState(
+    val failureCount: Int,
+    val retryAfterElapsedRealtimeMillis: Long,
+)
+
+internal fun selectAutomaticReceiptCandidate(
+    pending: List<Invoice>,
+    suppressedFingerprints: Set<String>,
+    retryStates: Map<String, AutoReceiptRetryState>,
+    nowElapsedRealtimeMillis: Long,
+): Invoice? = pending.firstOrNull { candidate ->
+    val fingerprint = candidate.autoReceiptFingerprint()
+    automaticReceiptAttemptAllowed(
+        queuedFingerprint = fingerprint,
+        currentFingerprint = fingerprint,
+        suppressedFingerprints = suppressedFingerprints,
+        retryAfterElapsedRealtimeMillis = retryStates[fingerprint]
+            ?.retryAfterElapsedRealtimeMillis
+            ?: 0L,
+        nowElapsedRealtimeMillis = nowElapsedRealtimeMillis,
+    )
+}
+
+internal fun automaticReceiptAttemptAllowed(
+    queuedFingerprint: String,
+    currentFingerprint: String?,
+    suppressedFingerprints: Set<String>,
+    retryAfterElapsedRealtimeMillis: Long,
+    nowElapsedRealtimeMillis: Long,
+): Boolean = currentFingerprint == queuedFingerprint &&
+    queuedFingerprint !in suppressedFingerprints &&
+    retryAfterElapsedRealtimeMillis <= nowElapsedRealtimeMillis
+
+internal fun nextAutoReceiptRetryState(
+    previous: AutoReceiptRetryState?,
+    nowElapsedRealtimeMillis: Long,
+    baseDelayMillis: Long,
+    maximumDelayMillis: Long,
+    maximumBackoffSteps: Int,
+): AutoReceiptRetryState {
+    require(nowElapsedRealtimeMillis >= 0)
+    require(baseDelayMillis > 0 && maximumDelayMillis >= baseDelayMillis)
+    require(maximumBackoffSteps in 1..62)
+    val failureCount = ((previous?.failureCount ?: 0) + 1).coerceAtMost(maximumBackoffSteps)
+    val shift = (failureCount - 1).coerceAtMost(62)
+    val delay = runCatching { Math.multiplyExact(baseDelayMillis, 1L shl shift) }
+        .getOrDefault(maximumDelayMillis)
+        .coerceAtMost(maximumDelayMillis)
+    return AutoReceiptRetryState(
+        failureCount = failureCount,
+        retryAfterElapsedRealtimeMillis = Math.addExact(nowElapsedRealtimeMillis, delay),
+    )
+}
+
+/** Changes when the canonical payment snapshot changes, allowing a corrected proof to retry. */
+internal fun Invoice.autoReceiptFingerprint(): String = receiptPrintFingerprint()
+
+internal fun unprintedReceiptFingerprints(snapshots: List<Invoice>): Set<String> = snapshots
+    .asSequence()
+    .filter { invoice ->
+        invoice.receiptAutoPrintEligible && invoice.receiptNumber > 0 &&
+            invoice.receiptPrintedAt == null
+    }
+    .mapTo(mutableSetOf(), Invoice::autoReceiptFingerprint)
 
 internal fun CreateInvoiceState.withEditedAmount(value: String): CreateInvoiceState = copy(
     amount = value,

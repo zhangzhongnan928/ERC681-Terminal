@@ -27,10 +27,29 @@ data class Invoice(
     // New invoices explicitly snapshot a profile, while direct model construction defaults to 1.
     @ColumnInfo(defaultValue = "2") val confirmationBlocks: Int = 1,
     @ColumnInfo(defaultValue = "''") val erc681Uri: String = "",
+    /** Canonical checkout head before this receiver QR was published. */
+    val publishedAtBlock: Long? = null,
+    val publishedAtBlockHash: String? = null,
     val firstDetectedBlock: Long? = null,
     val firstDetectedBlockHash: String? = null,
     val lastObservedBlock: Long? = null,
     val confirmedAtBlock: Long? = null,
+    /** Incoming consumer payment evidence. This is never the later merchant sweep hash. */
+    val paymentTxHash: String? = null,
+    val paymentPayerAddress: String? = null,
+    val paymentBlockNumber: Long? = null,
+    val paymentBlockHash: String? = null,
+    /** Canonical payment-block timestamp, in Unix seconds. */
+    val paidAt: Long? = null,
+    /** Stable number allocated before the QR is shown, so reprints remain identical. */
+    @ColumnInfo(defaultValue = "0") val receiptNumber: Long = 0,
+    /** Immutable merchant identity captured when this invoice QR is published. */
+    @ColumnInfo(defaultValue = "'OPK Terminal'") val receiptMerchantName: String = "OPK Terminal",
+    @ColumnInfo(defaultValue = "''") val receiptMerchantAbn: String = "",
+    /** False for migrated rows, whose incoming payment transaction cannot be safely inferred. */
+    @ColumnInfo(defaultValue = "0") val receiptAutoPrintEligible: Boolean = false,
+    /** Set only after the printer reports successful completion of the whole buffered job. */
+    val receiptPrintedAt: Long? = null,
     val settledTxHash: String? = null,
     val settlementId: String? = null,
     val settledAtBlock: Long? = null,

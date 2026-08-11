@@ -10,12 +10,70 @@ import com.openpasskey.erc681.NetworkConfig
 import com.openpasskey.erc681.NativeAsset
 import com.openpasskey.erc681.PaymentProfile
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
+import com.openpasskey.terminal.printing.AutomaticReceiptClaimResult
+import com.openpasskey.terminal.printing.AutomaticReceiptClaimStore
 
 data class PaymentToken(
     val address: String,
     val symbol: String,
     val decimals: Int,
 )
+
+/** Local receipt identity. Invoices snapshot this so later profile edits cannot alter reprints. */
+class MerchantReceiptProfile private constructor(
+    val name: String,
+    val abn: String,
+) {
+    override fun equals(other: Any?): Boolean =
+        other is MerchantReceiptProfile && name == other.name && abn == other.abn
+
+    override fun hashCode(): Int = 31 * name.hashCode() + abn.hashCode()
+
+    override fun toString(): String = "MerchantReceiptProfile(name=$name, abn=$abn)"
+
+    companion object {
+        const val DEFAULT_NAME = "OPK Terminal"
+        const val MAX_NAME_LENGTH = 64
+        val DEFAULT = MerchantReceiptProfile(DEFAULT_NAME, "")
+
+        fun fromInput(name: String, abn: String): MerchantReceiptProfile {
+            require(name.none(Char::isISOControl)) {
+                "Merchant name must be a single printable line."
+            }
+            val canonicalName = name.trim().replace(Regex("\\s+"), " ")
+            require(canonicalName.isNotEmpty()) { "Merchant name is required." }
+            require(canonicalName.codePointCount(0, canonicalName.length) <= MAX_NAME_LENGTH) {
+                "Merchant name must be $MAX_NAME_LENGTH characters or fewer."
+            }
+            val digits = abn.filter { it in '0'..'9' }
+            require(abn.all { it in '0'..'9' || it == ' ' }) {
+                "ABN may contain digits and spaces only."
+            }
+            if (digits.isNotEmpty()) {
+                require(digits.length == 11) { "ABN must contain 11 digits." }
+                require(isValidAustralianAbn(digits)) { "Enter a valid Australian ABN." }
+            }
+            val formattedAbn = if (digits.isEmpty()) {
+                ""
+            } else {
+                "${digits.take(2)} ${digits.substring(2, 5)} " +
+                    "${digits.substring(5, 8)} ${digits.takeLast(3)}"
+            }
+            return MerchantReceiptProfile(canonicalName, formattedAbn)
+        }
+
+        internal fun isValidAustralianAbn(digits: String): Boolean {
+            if (digits.length != 11 || !digits.all { it in '0'..'9' }) return false
+            val weights = intArrayOf(10, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19)
+            val weightedSum = digits.map { it - '0' }
+                .mapIndexed { index, digit ->
+                    (if (index == 0) digit - 1 else digit) * weights[index]
+                }
+                .sum()
+            return weightedSum % 89 == 0
+        }
+    }
+}
 
 /** One selectable currency destination. An invoice always snapshots exactly one of these. */
 data class TerminalPaymentProfile(
@@ -64,7 +122,7 @@ data class ChainConfigMigrationNotice(
 )
 
 /** Non-secret, atomically stored catalog of chain/vault/token payment profiles. */
-class ChainConfig(context: Context) {
+class ChainConfig(context: Context) : AutomaticReceiptClaimStore {
     companion object {
         private const val PREFS_NAME = "opk_chain_config"
         private const val KEY_CONFIG_JSON_V3 = "provisioned_config_v3"
@@ -73,6 +131,12 @@ class ChainConfig(context: Context) {
         private const val KEY_PROVISIONED_V2 = "is_provisioned_v2"
         private const val KEY_FINALITY_MIGRATION_PROFILE_IDS_V3 =
             "finality_migration_profile_ids_v3"
+        private const val KEY_RECEIPT_MERCHANT_NAME = "receipt_merchant_name"
+        private const val KEY_RECEIPT_MERCHANT_ABN = "receipt_merchant_abn"
+        private const val KEY_AUTO_SWEEP_ENABLED = "auto_sweep_enabled_v1"
+        private const val KEY_AUTO_SWEEP_DISMISSED_FINGERPRINTS =
+            "auto_sweep_dismissed_fingerprints_v1"
+        private const val KEY_AUTOMATIC_RECEIPT_CLAIMS = "automatic_receipt_claims_v1"
 
         // Legacy per-field keys are read only to preserve the merchant's confirmation preference.
         private const val KEY_NETWORK_NAME = "network_name"
@@ -84,13 +148,16 @@ class ChainConfig(context: Context) {
         private const val KEY_CONFIRMATION_BLOCKS = "confirmation_blocks"
         private const val KEY_PAYMENT_TOKENS = "payment_tokens"
 
-        const val DEFAULT_NETWORK_NAME = "Base Sepolia"
-        const val DEFAULT_RPC_URL = "https://sepolia.base.org"
-        const val DEFAULT_CHAIN_ID = 84532L
-        const val DEFAULT_FACTORY_ADDRESS = "0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f"
-        const val DEFAULT_RECEIVER_IMPLEMENTATION = "0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18"
+        const val DEFAULT_NETWORK_NAME = "Base Mainnet"
+        const val DEFAULT_RPC_URL = "https://mainnet.base.org"
+        const val DEFAULT_CHAIN_ID = KnownChainPolicy.DEFAULT_CHAIN_ID
+        const val DEFAULT_FACTORY_ADDRESS = "0x5418ab1790eaf96a20e26146c5b7765cb99328da"
+        const val DEFAULT_RECEIVER_IMPLEMENTATION = "0xe6393f6176865cc62cd08d8b8f0c38d35af55254"
         const val DEFAULT_CONFIRMATION_BLOCKS = 1
         const val MAX_PAYMENT_PROFILES = 32
+        private const val MAX_AUTO_SWEEP_DISMISSALS = 512
+        private const val MAX_AUTOMATIC_RECEIPT_CLAIMS = 1_024
+        private val RECEIPT_CLAIM_FINGERPRINT = Regex("^receipt-v1:[0-9a-f]{64}$")
 
         private val LEGACY_MUTABLE_KEYS = listOf(
             KEY_NETWORK_NAME,
@@ -119,6 +186,114 @@ class ChainConfig(context: Context) {
     val paymentProfiles: List<TerminalPaymentProfile> get() = snapshot().resolvedPaymentProfiles()
 
     @Synchronized
+    fun merchantReceiptProfile(): MerchantReceiptProfile =
+        MerchantReceiptProfile.fromInput(
+            name = prefs.getString(
+                KEY_RECEIPT_MERCHANT_NAME,
+                MerchantReceiptProfile.DEFAULT_NAME,
+            ) ?: MerchantReceiptProfile.DEFAULT_NAME,
+            abn = prefs.getString(KEY_RECEIPT_MERCHANT_ABN, "") ?: "",
+        )
+
+    /** Saves only local receipt presentation metadata, never chain or signing configuration. */
+    @Synchronized
+    fun updateMerchantReceiptProfile(name: String, abn: String): Boolean {
+        val profile = MerchantReceiptProfile.fromInput(name, abn)
+        return prefs.edit()
+            .putString(KEY_RECEIPT_MERCHANT_NAME, profile.name)
+            .putString(KEY_RECEIPT_MERCHANT_ABN, profile.abn)
+            .commit()
+    }
+
+    /** Local operational preference. Missing values deliberately remain disabled after upgrades. */
+    @Synchronized
+    fun autoSweepEnabled(): Boolean = prefs.getBoolean(KEY_AUTO_SWEEP_ENABLED, false)
+
+    @Synchronized
+    fun updateAutoSweepEnabled(enabled: Boolean): Boolean = prefs.edit()
+        .putBoolean(KEY_AUTO_SWEEP_ENABLED, enabled)
+        .commit()
+
+    /** Exact canonical review snapshots dismissed by the merchant, never signing authority. */
+    @Synchronized
+    fun autoSweepDismissedFingerprints(): Set<String> =
+        prefs.getStringSet(KEY_AUTO_SWEEP_DISMISSED_FINGERPRINTS, emptySet())
+            ?.filterTo(linkedSetOf()) { fingerprint ->
+                fingerprint.isNotBlank() && fingerprint.length <= 1_024 &&
+                    fingerprint.none(Char::isISOControl)
+            }
+            .orEmpty()
+
+    @Synchronized
+    fun updateAutoSweepDismissedFingerprints(
+        fingerprints: Set<String>,
+        retainFingerprint: String? = null,
+    ): Boolean {
+        val valid = fingerprints.filterTo(linkedSetOf(), ::isValidLocalFingerprint)
+        val required = retainFingerprint?.takeIf(::isValidLocalFingerprint)
+        required?.let(valid::add)
+        if (valid.size > MAX_AUTO_SWEEP_DISMISSALS) {
+            // Preserve every earlier dismissal. Turning the preference off is safer than evicting
+            // an old fingerprint and silently reopening its review after process restart.
+            prefs.edit().putBoolean(KEY_AUTO_SWEEP_ENABLED, false).commit()
+            return false
+        }
+        return prefs.edit()
+            .putStringSet(KEY_AUTO_SWEEP_DISMISSED_FINGERPRINTS, valid)
+            .commit()
+    }
+
+    @Synchronized
+    override fun claims(): Set<String> = storedAutomaticReceiptClaims()
+
+    @Synchronized
+    override fun claim(fingerprint: String): AutomaticReceiptClaimResult {
+        if (!isValidReceiptClaimFingerprint(fingerprint)) {
+            return AutomaticReceiptClaimResult.PERSISTENCE_FAILED
+        }
+        val claims = storedAutomaticReceiptClaims().toMutableSet()
+        if (fingerprint in claims) return AutomaticReceiptClaimResult.ALREADY_CLAIMED
+        if (claims.size >= MAX_AUTOMATIC_RECEIPT_CLAIMS) {
+            return AutomaticReceiptClaimResult.PERSISTENCE_FAILED
+        }
+        claims += fingerprint
+        return if (prefs.edit().putStringSet(KEY_AUTOMATIC_RECEIPT_CLAIMS, claims).commit()) {
+            AutomaticReceiptClaimResult.CLAIMED
+        } else {
+            AutomaticReceiptClaimResult.PERSISTENCE_FAILED
+        }
+    }
+
+    @Synchronized
+    override fun release(fingerprint: String): Boolean {
+        val claims = storedAutomaticReceiptClaims().toMutableSet()
+        if (!claims.remove(fingerprint)) return true
+        return prefs.edit().putStringSet(KEY_AUTOMATIC_RECEIPT_CLAIMS, claims).commit()
+    }
+
+    @Synchronized
+    override fun retainOnly(liveFingerprints: Set<String>): Boolean {
+        val current = storedAutomaticReceiptClaims()
+        val retained = current.intersect(
+            liveFingerprints.filterTo(mutableSetOf(), ::isValidReceiptClaimFingerprint),
+        )
+        if (retained == current) return true
+        return prefs.edit().putStringSet(KEY_AUTOMATIC_RECEIPT_CLAIMS, retained).commit()
+    }
+
+    private fun storedAutomaticReceiptClaims(): Set<String> =
+        prefs.getStringSet(KEY_AUTOMATIC_RECEIPT_CLAIMS, emptySet())
+            ?.filterTo(linkedSetOf(), ::isValidReceiptClaimFingerprint)
+            .orEmpty()
+
+    private fun isValidReceiptClaimFingerprint(fingerprint: String): Boolean =
+        RECEIPT_CLAIM_FINGERPRINT.matches(fingerprint)
+
+    private fun isValidLocalFingerprint(fingerprint: String): Boolean =
+        fingerprint.isNotBlank() && fingerprint.length <= 1_024 &&
+            fingerprint.none(Char::isISOControl)
+
+    @Synchronized
     fun snapshot(): TerminalConfigSnapshot {
         // Once v3 exists it is authoritative. A malformed v3 value must fail closed rather than
         // falling back to stale v2 data that may describe a different checkout route.
@@ -132,11 +307,11 @@ class ChainConfig(context: Context) {
     }
 
     private fun unprovisionedSnapshot(): TerminalConfigSnapshot {
-        val legacyChainId = prefs.getLong(KEY_CHAIN_ID, DEFAULT_CHAIN_ID)
-        val legacyRpcUrl = prefs.getString(KEY_RPC_URL, DEFAULT_RPC_URL) ?: DEFAULT_RPC_URL
         return TerminalConfigSnapshot(
             networkName = DEFAULT_NETWORK_NAME,
-            rpcUrl = if (legacyChainId == DEFAULT_CHAIN_ID) legacyRpcUrl else DEFAULT_RPC_URL,
+            // Legacy mutable endpoint fields are not trust roots. A fresh, reset, or malformed
+            // unprovisioned configuration always returns the compiled production default.
+            rpcUrl = DEFAULT_RPC_URL,
             chainId = DEFAULT_CHAIN_ID,
             factoryAddress = DEFAULT_FACTORY_ADDRESS.lowercase(),
             receiverImplementationAddress = DEFAULT_RECEIVER_IMPLEMENTATION.lowercase(),
@@ -211,7 +386,7 @@ class ChainConfig(context: Context) {
         )
     }
 
-    /** Admin-only reset of configuration; invoice history is intentionally untouched. */
+    /** Admin-only reset; invoice history and its snapshotted receipt identity remain untouched. */
     @Synchronized
     fun clearProvisioning(): Boolean = prefs.edit()
         .remove(KEY_CONFIG_JSON_V3)
@@ -219,6 +394,8 @@ class ChainConfig(context: Context) {
         .remove(KEY_CONFIG_JSON_V2)
         .remove(KEY_PROVISIONED_V2)
         .remove(KEY_FINALITY_MIGRATION_PROFILE_IDS_V3)
+        .remove(KEY_AUTO_SWEEP_ENABLED)
+        .remove(KEY_AUTO_SWEEP_DISMISSED_FINGERPRINTS)
         .commit()
 
     fun isConfigured(): Boolean = snapshot().let { it.provisioned && it.hasCompleteProvisioning() }

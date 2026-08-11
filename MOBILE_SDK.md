@@ -19,8 +19,9 @@ The payment SDK source is intentionally limited to:
 - canonical ERC-681 encoding and strict parsing;
 - payment QR display;
 - Settings-only camera scanning for strict address fields and the separate provisioning payload;
-- read-only JSON-RPC calls for chain/configuration checks, ERC-20 `balanceOf`, and native
-  `eth_getBalance` observation;
+- read-only JSON-RPC calls for chain/configuration checks, ERC-20 `balanceOf`, native
+  `eth_getBalance` observation, exact blocks, and receiver-scoped ERC-20 logs used for incoming
+  transaction evidence;
 - local invoice persistence and recovery; and
 - a data-only handoff that a native app may pass into its isolated operator module.
 
@@ -123,6 +124,76 @@ of at most 60 seconds remains valid. Live mutable signing checks and the evidenc
 authentication and immediately before key use. Do not replace these rules with a general-purpose
 RPC cache.
 
+## Incoming customer transaction evidence
+
+The read-only SDKs can attribute the direct customer transaction that first made a receiver meet
+its invoice amount. This is separate from payment status: the balance observer remains the payment
+authority. Before showing the QR, persist its canonical publication cursor. When the observer first
+meets the expected amount, persist that canonical funding cursor. Do not manufacture either cursor
+for migrated or legacy rows.
+
+Both resolvers verify the RPC chain and both saved cursor hashes, require the publication balance
+to be below the invoice amount, then binary-search the first fixed block whose ending balance meets
+the amount. For ERC-20 payments they decode only `Transfer` logs for the requested token and
+receiver, order them by log index, and select the first cumulative incoming transfer that crosses
+the threshold. For native payments they order full-block top-level transactions by transaction
+index and consider only direct positive-value transfers to the receiver. They then re-read the
+payment block and require its number, hash, and timestamp to remain unchanged, followed by fresh
+publication and funding cursor checks. Wrong-chain, malformed, overflowed, duplicate, removed, or
+reorganized evidence fails closed.
+
+Kotlin:
+
+```kotlin
+val evidenceRequest = PaymentEvidenceRequest(
+    chainId = invoiceChainId,
+    receiver = invoiceReceiver,
+    asset = invoiceAsset,
+    expectedAmount = invoiceRawAmount,
+    publicationCursor = PaymentConfirmationCursor(
+        blockNumber = publishedBlock,
+        blockHash = publishedBlockHash,
+    ),
+    fundingCursor = PaymentConfirmationCursor(
+        blockNumber = firstFundedBlock,
+        blockHash = firstFundedBlockHash,
+    ),
+)
+val incomingEvidence = PaymentEvidenceResolver(ReadOnlyRpcClient(network))
+    .resolve(evidenceRequest)
+```
+
+Swift:
+
+```swift
+let evidenceRequest = try PaymentEvidenceRequest(
+    chainID: invoiceChainID,
+    receiver: invoiceReceiver,
+    asset: invoiceAsset,
+    expectedAmount: invoiceRawAmount,
+    publicationCursor: PaymentConfirmationCursor(
+        blockNumber: publishedBlock,
+        blockHash: publishedBlockHash
+    ),
+    fundingCursor: PaymentConfirmationCursor(
+        blockNumber: firstFundedBlock,
+        blockHash: firstFundedBlockHash
+    )
+)
+let evidenceClient = try JSONRPCEthereumClient(endpoint: trustedRPCEndpoint)
+let incomingEvidence = try await PaymentTransactionResolver(client: evidenceClient)
+    .resolve(evidenceRequest)
+```
+
+Successful evidence contains the direct transaction hash, a non-zero payer, canonical block
+number and hash, and canonical block timestamp. `null` or `nil` means the confirmed balance
+crossing could not be attributed safely. In particular, internal native transfers, self-destruct
+funding, and other indirect balance changes are intentionally unsupported without trace evidence.
+Keep the payment confirmed, but disable consumer receipt details until direct evidence is
+available. Never use a later settlement, sweep, or `Swept` receipt transaction hash as the
+customer's payment transaction. Persist a result only if the invoice's publication and funding
+cursors still match the request after resolution.
+
 ## Invoice lifecycle
 
 1. Require the device operator wallet and freshly validate the RPC chain, deployed code,
@@ -148,8 +219,9 @@ covers the original invoice, a repeat settlement still requires a new positive c
 historical proof must never turn a zero repeat event into proof of newly observed value.
 
 The reusable payment SDKs never sweep the receiver. A native app may pass their data-only handoff
-into its separate approved operator module. The shipped Base Sepolia profile uses the deployed OPK
-Protocol 1.6 stack for both ERC-20 and native routes, but transaction receipt success alone is never
+into its separate approved operator module. The shipped Base Mainnet and Base Sepolia profiles use
+their deployed OPK Protocol 1.6 stacks for both ERC-20 and native routes, but transaction receipt
+success alone is never
 proof of settlement: the app must
 decode a fully matching confirmed `Swept` event and record a positive actual amount. The
 asset-scoped settlement counters, including `settled(invoiceId, NATIVE_ASSET)` for native invoices,
@@ -160,13 +232,25 @@ invoice namespace. The reusable SDK does not require that namespace to have a pr
 shipped Android and iOS apps apply the stricter application policy described above: they always
 pass the device operator EOA public address for new invoices and fail invoice creation unless that
 wallet exists, is authorized by the selected profile's vault, and meets the selected network's
-compiled minimum native-gas reserve. Base Sepolia's current policy is `100000000000000` wei, or
-`0.0001 ETH`; another enabled EVM network may use a different native currency, decimals, and
-reserve. These checks run again when preparing a settlement.
+compiled minimum native-gas reserve. Both shipped Base profiles currently require
+`100000000000000` wei, or `0.0001 ETH`; another enabled EVM network may use a different native
+currency, decimals, and reserve. These checks run again when preparing a settlement.
 
 ## Known EVM networks
 
-The default development network is Base Sepolia, chain ID `84532`:
+Base Mainnet, chain ID `8453`, is the default for fresh application configuration:
+
+| Item | Value |
+|---|---|
+| Protocol version | `1.6` |
+| Factory | `0x5418ab1790eaf96a20e26146c5b7765cb99328da` |
+| Receiver implementation | `0xe6393f6176865cc62cd08d8b8f0c38d35af55254` |
+| Vault beacon embedded in the proxy runtime | `0xd051ba174636a1bb663559e9c454053a543488ef` |
+| Deployed vault-proxy runtime hash | `0x8c3a56b5606e44613d50c898acf67a3689afc478b47e9a38326699b0df111cbd` |
+| CREATE2 example vault | `0x1111111111111111111111111111111111111111` |
+| Native asset identifier | `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` (`ETH`, 18 decimals) |
+
+Base Sepolia, chain ID `84532`, remains available as the explicit test network:
 
 | Item | Value |
 |---|---|
@@ -179,9 +263,10 @@ The default development network is Base Sepolia, chain ID `84532`:
 | AUD test token | `0x7ffba642bc902880a737cb1c18a4e9540879e211` (18 decimals) |
 | Native asset identifier | `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` (`ETH`, 18 decimals) |
 
-The runtime hash is over the exact on-chain proxy bytecode, including the Base Sepolia beacon
-immutable (`0xc9c24c87f55c46d42419bc181d427acd1755e46c`). Do not substitute the upstream browser
-deployer's zero-immutable artifact hash when validating `eth_getCode`; it does not match a
+Each runtime hash is over the exact on-chain proxy bytecode, including that deployment's beacon
+immutable (`0xd051ba174636a1bb663559e9c454053a543488ef` on Base Mainnet and
+`0xc9c24c87f55c46d42419bc181d427acd1755e46c` on Base Sepolia). Do not substitute an upstream
+browser deployer's zero-immutable artifact hash when validating `eth_getCode`; it does not match a
 deployed vault.
 
 The example vault is an off-chain CREATE2 test input, not a deployed merchant vault. A production
@@ -191,26 +276,32 @@ native route additionally requires a successful `NATIVE_ASSET()` read returning 
 sentinel and that sentinel's whitelist entry; `isPaymentToken(NATIVE_ASSET) == false` does not
 prove native capability.
 
-Base Sepolia is the only network enabled in the production apps in this release. The Swift and
-Kotlin profile catalogs are EVM-generic and can model routes on other EVM chains, but an app rejects
-any chain absent from its immutable enabled-network registry before RPC use. Base Mainnet (`8453`)
-has a published OPK Protocol 1.6 Route A deployment but remains disabled pending explicit product
-enablement and a reviewed operational RPC policy. Enabling it or another network requires reviewed
-OPK deployment constants, vault runtime hash, trusted HTTPS RPC, matching CREATE2 vector, finality
-floor/default, native-currency metadata, and minimum gas reserve in both native registries. A QR
-cannot introduce these values.
+Base Mainnet and Base Sepolia are enabled in the production apps. The Swift and Kotlin profile
+catalogs remain EVM-generic and can model routes on other EVM chains, but an app rejects any chain
+absent from its immutable enabled-network registry before RPC use. Enabling another network still
+requires reviewed OPK deployment constants, vault runtime hash, trusted HTTPS RPC, matching CREATE2
+vector, finality floor/default, native-currency metadata, and minimum gas reserve in both native
+registries. A QR cannot introduce these values. Base's public `mainnet.base.org` and
+`sepolia.base.org` endpoints are rate-limited and are not production-capacity guarantees; review an
+operational provider before live volume.
 The enabled cross-platform pins and vectors are recorded in
 `conformance/opk-terminal-networks-v1.json`.
 
-The published OPK Protocol 1.6 Route A deployment changed receiver addresses because its factory
-and receiver implementation changed. This release repoints the shipped Base Sepolia profile to its
-reviewed factory, receiver implementation, runtime hash, and CREATE2 test vector. Any future fresh
-stack has the same release gate. Only an in-place beacon upgrade of the same stack can preserve its
-receiver commitments.
+The reusable SDKs also expose metadata-only `BaseNetworks.mainnet` and `BaseNetworks.sepolia`
+descriptors, verified against `conformance/opk-base-networks-v1.json`. These descriptors contain
+chain identity, native-currency, and BaseScan metadata only. They do not include OPK deployment
+anchors or an SDK-wide default. The Android and iOS application layers choose their default
+explicitly; a descriptor alone never enables a payment network.
 
-Base Sepolia's compiled confirmation minimum and fresh-network default are both `1`; the block that
-contains the payment counts as confirmation one. A merchant administrator may select a value from
-the enabled network's compiled minimum through `64` in the PIN-protected terminal settings. Every
+The published OPK Protocol 1.6 Route A deployments changed receiver addresses from earlier stacks
+because their factory and receiver implementation changed. This release pins the reviewed Base
+Mainnet and Base Sepolia factories, receiver implementations, runtime hashes, and CREATE2 test
+vectors. Any future fresh stack has the same release gate. Only an in-place beacon upgrade of the
+same stack can preserve its receiver commitments.
+
+Both shipped Base profiles have a compiled confirmation minimum and fresh-network default of `1`;
+the block that contains the payment counts as confirmation one. A merchant administrator may select
+a value from the enabled network's compiled minimum through `64` in the PIN-protected terminal settings. Every
 profile on the same chain shares the choice, and a new profile on that chain inherits it. The policy
 is copied into each new invoice and its settlement batch, so a later settings change cannot alter
 already published payment requests. The strict `opk-terminal:provision` v1 payload has no
@@ -223,18 +314,18 @@ make the EOA a vault operator. For each payment profile, the merchant must grant
 address with that vault's administrative `grantOperator` flow (the vault owner itself is also
 accepted), then scan its operator-bound provisioning QR. Repeated scans add or update profiles; they
 do not erase unrelated profiles. Fund that same EOA with at least the compiled native-gas reserve
-shown for each selected network (`0.0001 ETH` on Base Sepolia). Until the selected profile passes
-all checks, the app does not create its invoice or customer QR.
+shown for each selected network (`0.0001 ETH` on both shipped Base profiles). Until the selected
+profile passes all checks, the app does not create its invoice or customer QR.
 The app shows the entire address, offers Copy, and displays this address-only funding QR:
 
 ```text
 ethereum:{OPERATOR_ADDRESS}@{CHAIN_ID}
 ```
 
-For example, on Base Sepolia:
+For example, on Base Mainnet:
 
 ```text
-ethereum:0x2222222222222222222222222222222222222222@84532
+ethereum:0x2222222222222222222222222222222222222222@8453
 ```
 
 The QR intentionally omits `?value=` so the funding wallet chooses the amount. Loss or deletion of
@@ -250,13 +341,21 @@ operator must be authorized on each historical vault before it can recover later
 
 ## Android app and SDK
 
-Requirements: JDK 17 and Android SDK platform 35. Gradle installs the compatible Build Tools selected by the Android Gradle plugin.
+Requirements: JDK 17 and Android SDK platform 36. The app compiles against and targets Android API
+36. Gradle installs the compatible Build Tools selected by the Android Gradle plugin.
+
+The iMin printer integration is pinned to
+`com.github.iminsoftware:IminPrinterLibrary:V2.0.0.18`. Before compiling the app, verification
+resolves that non-transitive AAR through Gradle and requires its SHA-256 digest to equal
+`8efa28e31c6e03ad9b460ecfa36d30471b4ded7f7a3ee4b7ed22e369afb14071`. Treat a coordinate or
+digest change as a supply-chain review, not a routine dependency update.
 
 Build the app and publish the SDK to the project-local Maven repository:
 
 ```bash
 cd android
 ./gradlew \
+  :verifyIminPrinterArtifact \
   :erc681-sdk:test \
   :erc681-sdk:publishAllPublicationsToProjectLocalRepository \
   :app:testDebugUnitTest \
@@ -271,7 +370,7 @@ Outputs:
 - unsigned, minified release APK: `android/app/build/outputs/apk/release/app-release-unsigned.apk`
 - SDK JAR and sources: `android/erc681-sdk/build/libs/`
 - Maven repository: `android/erc681-sdk/build/repository/`
-- Maven coordinate: `com.openpasskey:opk-erc681-sdk:0.2.1`
+- Maven coordinate: `com.openpasskey:opk-erc681-sdk:0.3.0`
 
 Point a terminal project at the local repository and add the dependency:
 
@@ -281,7 +380,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.openpasskey:opk-erc681-sdk:0.2.1")
+    implementation("com.openpasskey:opk-erc681-sdk:0.3.0")
 }
 ```
 
@@ -292,11 +391,14 @@ import com.openpasskey.erc681.*
 
 val provisionedVault = EvmAddress.parse(requireNotNull(loadProvisionedMerchantVault()))
 val provisionedAsset = EvmAddress.parse(requireNotNull(loadProvisionedPaymentAsset()))
+val base = BaseNetworks.mainnet
 val network = NetworkConfig(
-    chainId = 84532,
-    rpcUrl = "https://sepolia.base.org",
-    factory = EvmAddress.parse("0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f"),
-    receiverImplementation = EvmAddress.parse("0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18"),
+    chainId = base.chainId,
+    // Use an operational HTTPS endpoint reviewed for your live volume. Base's public endpoint is
+    // rate-limited and is not a production-capacity guarantee.
+    rpcUrl = requireNotNull(loadReviewedRpcEndpoint(base.chainId)),
+    factory = EvmAddress.parse("0x5418ab1790eaf96a20e26146c5b7765cb99328da"),
+    receiverImplementation = EvmAddress.parse("0xe6393f6176865cc62cd08d8b8f0c38d35af55254"),
     vault = provisionedVault,
 )
 val paymentAsset = provisionedAsset
@@ -349,8 +451,8 @@ if (observation.status == PaymentStatus.PAID) {
 }
 ```
 
-The shipped Base Sepolia profile targets OPK Protocol 1.6 for every payment asset. A
-native-sentinel route additionally requires a successful exact `NATIVE_ASSET()` capability read
+The shipped Base Mainnet and Base Sepolia profiles target OPK Protocol 1.6 for every payment asset.
+A native-sentinel route additionally requires a successful exact `NATIVE_ASSET()` capability read
 and whitelist membership on that vault. Profiles and invoices from pre-release v1.4 builds are
 unsupported and must not be
 reinterpreted under current deployment pins. Reset any development install carrying those
@@ -381,9 +483,10 @@ let provisionedAsset = try EthereumAddress(
     hex: loadProvisionedPaymentAsset(),
     allowZero: false
 )
+let knownNetwork = TerminalKnownChainProfile.baseMainnet
 let deployment = try OPKDeployment(
-    factory: EthereumAddress(hex: "0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f", allowZero: false),
-    receiverImplementation: EthereumAddress(hex: "0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18", allowZero: false),
+    factory: knownNetwork.factory,
+    receiverImplementation: knownNetwork.receiverImplementation,
     vault: provisionedVault
 )
 let isNative = NativeAsset.isNative(provisionedAsset)
@@ -392,11 +495,13 @@ let token = try PaymentToken(
     symbol: isNative ? "ETH" : "AUD",
     decimals: isNative ? NativeAsset.decimals : 18
 )
-let endpoint = URL(string: "https://sepolia.base.org")!
+// Select an operational endpoint reviewed for live volume. The profile's public Base endpoint is
+// rate-limited and is not a production-capacity guarantee.
+let endpoint = try loadReviewedRPCEndpoint(for: knownNetwork.chainID)
 let configuration = try TerminalConfiguration(
-    chainID: 84_532,
+    chainID: knownNetwork.chainID,
     rpcEndpoints: [endpoint],
-    protocolVersion: .v1_6,
+    protocolVersion: knownNetwork.protocolVersion,
     deployment: deployment,
     tokens: [token],
     confirmationPolicy: .init(requiredBlocks: 1)
@@ -506,7 +611,7 @@ implementation.
    provisioning QR back on the terminal. The terminal derives and validates every deployment and
    payment-asset field before atomically adding or updating that profile.
 3. Send at least the selected network's compiled native-gas reserve to the operator address for gas
-   only (`0.0001 ETH` on Base Sepolia). Do not send customer payment tokens to it. The Settings UI
+   only (`0.0001 ETH` on both shipped Base profiles). Do not send customer payment tokens to it. The Settings UI
    displays the exact address, chain, funding QR, balance, authorization state, and readiness
    result. Authorization and the per-network minimum balance are required before each new invoice
    and checked again before a sweep.
@@ -546,10 +651,9 @@ invoice namespace.
 
 ### Current recovery limits
 
-Base Mainnet remains disabled until its deployment governance and implementation can be pinned as
-described above. Production readiness on any enabled network also requires the operational recovery
-and device testing below. Reconciliation intentionally trusts only canonical receipt logs for
-transactions the terminal
+Base Mainnet is enabled and is the fresh-configuration default, but production readiness still
+requires an operational RPC sized for live volume plus the recovery and device testing below.
+Reconciliation intentionally trusts only canonical receipt logs for transactions the terminal
 persisted itself. If the vault owner or a different authorized operator sweeps one of the same
 receivers externally, the app does not yet discover that proof with `eth_getLogs`; reconcile that
 invoice manually instead of retrying it blindly.
@@ -569,8 +673,9 @@ From the repository root:
 ./scripts/verify-mobile.sh
 ```
 
-The script runs the mobile boundary guard, Android SDK/app tests, Maven publication, app lint, debug
-assembly, and unsigned release-mode assembly, then Swift build/tests and the conformance executable.
+The script runs the mobile boundary guard, verifies the pinned iMin printer AAR bytes, runs Android
+SDK/app tests, Maven publication, app lint, debug assembly, and unsigned release-mode assembly,
+then Swift build/tests and the conformance executable.
 It requires XcodeGen, proves the included project and Info.plist are current, and compiles the iOS
 app for Simulator. It respects `JAVA_HOME`, `ANDROID_HOME`/`ANDROID_SDK_ROOT`, and `GRADLE_USER_HOME`. If they are unset,
 it checks the repository-local `.tools/jdk17` and `.tools/android-sdk` directories.

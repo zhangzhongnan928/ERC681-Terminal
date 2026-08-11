@@ -6,6 +6,8 @@ private enum SettingsFocusField: Hashable {
     case createPIN
     case confirmPIN
     case unlockPIN
+    case merchantName
+    case merchantABN
     case vault
     case token
 }
@@ -34,8 +36,10 @@ struct SettingsView: View {
     @State private var unlockPIN = ""
     @State private var manualVault = ""
     @State private var manualToken = ""
-    @State private var manualChainID = TerminalKnownChainProfile.baseSepolia.chainID
+    @State private var manualChainID = TerminalKnownChainProfile.baseMainnet.chainID
     @State private var confirmationBlocksDraft = 1
+    @State private var merchantReceiptNameDraft = ""
+    @State private var merchantReceiptABNDraft = ""
     @State private var isPresentingProvisioningScanner = false
     @State private var isConfirmingWalletReset = false
     @State private var isConfirmingUnreadableSettingsReset = false
@@ -115,6 +119,7 @@ struct SettingsView: View {
                 manualChainID = selectedChainID
             }
             syncConfirmationBlocksDraft()
+            syncMerchantReceiptDraft()
         }
         .onChange(of: model.settings.selectedPaymentProfileID) {
             syncConfirmationBlocksDraft()
@@ -364,6 +369,48 @@ struct SettingsView: View {
             }
         }
 
+        Section("Receipt and automatic settlement") {
+            TextField("Merchant name", text: $merchantReceiptNameDraft)
+                .textInputAutocapitalization(.words)
+                .autocorrectionDisabled()
+                .focused($focusedField, equals: .merchantName)
+                .accessibilityIdentifier("merchantReceiptName")
+            TextField("ABN (optional)", text: $merchantReceiptABNDraft)
+                .keyboardType(.numberPad)
+                .focused($focusedField, equals: .merchantABN)
+                .accessibilityIdentifier("merchantReceiptABN")
+            Button("Save receipt details") {
+                focusedField = nil
+                model.updateMerchantReceiptProfile(
+                    name: merchantReceiptNameDraft,
+                    abn: merchantReceiptABNDraft
+                )
+                if model.errorMessage == nil { syncMerchantReceiptDraft() }
+            }
+            .disabled(
+                merchantReceiptNameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || model.operationBusy
+                    || model.isProvisioning
+            )
+            .accessibilityIdentifier("saveMerchantReceiptProfile")
+
+            Toggle(
+                "Auto-prepare newly paid invoices",
+                isOn: Binding(
+                    get: { model.settings.autoSweepEnabled },
+                    set: { model.updateAutoSweepEnabled($0) }
+                )
+            )
+            .disabled(
+                !model.settings.autoSweepEnabled
+                    && (model.operationBusy || model.isProvisioning)
+            )
+            .accessibilityIdentifier("autoSweepEnabled")
+            Text("Auto-sweep is off by default. When enabled, the app can prepare one newly paid, receipt-evidenced invoice while it is active and open the existing settlement review. It never signs or broadcasts without explicit confirmation and device-owner authentication. Late payments remain manual.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+
         Section("4. Readiness") {
             if model.settings.isProvisioned {
                 LabeledContent(
@@ -404,14 +451,28 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                     Picker("Network", selection: $manualChainID) {
                         ForEach(TerminalKnownChainProfile.all, id: \.chainID) { profile in
-                            Text(profile.networkName).tag(profile.chainID)
+                            Text(
+                                profile.isTestnet
+                                    ? "\(profile.networkName) (testnet)"
+                                    : "\(profile.networkName)"
+                            )
+                            .tag(profile.chainID)
                         }
                     }
+                    .accessibilityIdentifier("advancedNetworkPicker")
                     .onChange(of: manualChainID) {
                         manualVault = ""
                         manualToken = ""
                         focusedField = .vault
                     }
+                    Text(
+                        manualNetworkIsTestnet
+                            ? "Base Sepolia is for testing only. It uses test assets and does not change or replace existing Base Mainnet profiles or invoice history."
+                            : "Base Mainnet is the default for new terminal setup. Adding this profile does not change or replace existing testnet profiles or invoice history."
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(manualNetworkIsTestnet ? .orange : .secondary)
+                    .accessibilityIdentifier("advancedNetworkHelp")
                     AddressField(
                         "Vault",
                         text: $manualVault,
@@ -674,6 +735,10 @@ struct SettingsView: View {
         return lowerBound...AppSettings.adjustableConfirmationBlockRange.upperBound
     }
 
+    private var manualNetworkIsTestnet: Bool {
+        TerminalKnownChainProfile.profile(for: manualChainID)?.isTestnet == true
+    }
+
     private func syncConfirmationBlocksDraft() {
         confirmationBlocksDraft = min(
             max(
@@ -682,6 +747,11 @@ struct SettingsView: View {
             ),
             selectedConfirmationBlockRange.upperBound
         )
+    }
+
+    private func syncMerchantReceiptDraft() {
+        merchantReceiptNameDraft = model.settings.merchantReceiptName
+        merchantReceiptABNDraft = model.settings.merchantReceiptABN
     }
 
     private var removalConfirmationBinding: Binding<Bool> {

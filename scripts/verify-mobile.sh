@@ -41,10 +41,11 @@ fi
 
 export GRADLE_USER_HOME=${OPK_GRADLE_USER_HOME:-${GRADLE_USER_HOME:-"$REPO_ROOT/android/.gradle-user"}}
 
-echo "[2/4] Testing SDK and app, publishing Maven artifacts, linting and assembling Android"
+echo "[2/4] Verifying printer dependency, testing SDK and app, publishing Maven artifacts, linting and assembling Android"
 (
   cd "$REPO_ROOT/android"
   ./gradlew --no-daemon \
+    :verifyIminPrinterArtifact \
     :erc681-sdk:test \
     :erc681-sdk:publishAllPublicationsToProjectLocalRepository \
     :app:testDebugUnitTest \

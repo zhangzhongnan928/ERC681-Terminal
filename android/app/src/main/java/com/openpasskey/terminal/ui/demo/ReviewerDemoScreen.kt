@@ -167,17 +167,17 @@ private fun ReviewerDemoCheckout(
         )
         DemoPaymentStatusCard(paymentStatus)
         QRCodeView(
-            data = ReviewerDemoCopy.SAMPLE_ERC681_URI,
+            data = ReviewerDemoCopy.SAMPLE_DEMO_MARKER,
             size = 220.dp,
-            contentDescription = "Demo ERC-681 payment QR code",
+            contentDescription = "Non-payment demo marker QR code",
             modifier = Modifier.testTag("reviewer_demo_qr"),
         )
         Text(
-            "Locally rendered sample ERC-681 QR",
+            "Non-payment simulation marker generated locally for this demo",
             style = MaterialTheme.typography.titleSmall,
         )
         Text(
-            ReviewerDemoCopy.SAMPLE_ERC681_URI,
+            ReviewerDemoCopy.SAMPLE_DEMO_MARKER,
             modifier = Modifier.fillMaxWidth(),
             style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
         )
@@ -259,7 +259,7 @@ private fun ReviewerDemoHistory(paymentStatus: ReviewerDemoPaymentStatus) {
                     )
                     Text(if (paid) "Paid" else "Waiting")
                 }
-                Text("Base Sepolia · chain ${ReviewerDemoCopy.SAMPLE_CHAIN_ID}")
+                Text("Base Mainnet format · chain ${ReviewerDemoCopy.SAMPLE_CHAIN_ID}")
                 Text(
                     if (paid) {
                         "Received ${ReviewerDemoCopy.SAMPLE_AMOUNT} " +
@@ -303,7 +303,7 @@ private fun ReviewerDemoSettlement(
                     "Amount",
                     "${ReviewerDemoCopy.SAMPLE_AMOUNT} ${ReviewerDemoCopy.SAMPLE_TOKEN}",
                 )
-                DemoDetail("Network", "Base Sepolia (${ReviewerDemoCopy.SAMPLE_CHAIN_ID})")
+                DemoDetail("Network", "Base Mainnet format (${ReviewerDemoCopy.SAMPLE_CHAIN_ID})")
                 DemoDetail("Receiver", ReviewerDemoCopy.SAMPLE_RECEIVER)
                 DemoDetail("Vault", ReviewerDemoCopy.SAMPLE_VAULT)
                 DemoDetail("Operator", ReviewerDemoCopy.SAMPLE_OPERATOR)

@@ -33,6 +33,40 @@ class ChainConfigSharedPreferencesMigrationTest {
     }
 
     @Test
+    fun freshUnprovisionedConfigurationUsesPinnedBaseMainnetDefault() {
+        val snapshot = ChainConfig(context).snapshot()
+
+        assertFalse(snapshot.provisioned)
+        assertEquals("Base Mainnet", snapshot.networkName)
+        assertEquals(8453L, snapshot.chainId)
+        assertEquals("https://mainnet.base.org", snapshot.rpcUrl)
+        assertEquals("0x5418ab1790eaf96a20e26146c5b7765cb99328da", snapshot.factoryAddress)
+        assertEquals(
+            "0xe6393f6176865cc62cd08d8b8f0c38d35af55254",
+            snapshot.receiverImplementationAddress,
+        )
+        assertEquals(1, snapshot.confirmationBlocks)
+    }
+
+    @Test
+    fun merchantReceiptProfileUsesLegacyDefaultsAndPersistsCanonicalValues() {
+        val config = ChainConfig(context)
+
+        assertEquals(MerchantReceiptProfile.DEFAULT, config.merchantReceiptProfile())
+        assertTrue(
+            config.updateMerchantReceiptProfile(
+                name = "  Blue   Brew  ",
+                abn = "61 695 642 285",
+            ),
+        )
+
+        assertEquals(
+            MerchantReceiptProfile.fromInput("Blue Brew", "61695642285"),
+            ChainConfig(context).merchantReceiptProfile(),
+        )
+    }
+
+    @Test
     fun storedV2ProfileMigratesIntoV3CatalogAndSurvivesReopen() {
         assertTrue(
             preferences.edit()

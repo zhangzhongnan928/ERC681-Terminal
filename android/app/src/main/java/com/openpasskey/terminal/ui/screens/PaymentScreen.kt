@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -22,6 +23,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -29,6 +32,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -46,8 +50,15 @@ import com.openpasskey.terminal.viewmodel.InvoiceViewModel
 @Composable
 fun PaymentScreen(invoiceId: String, viewModel: InvoiceViewModel, onBack: () -> Unit) {
     val state by viewModel.paymentState.collectAsState()
+    val receiptState by viewModel.receiptState.collectAsState()
     val clipboard = LocalClipboardManager.current
+    val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(invoiceId) { viewModel.startPaymentMonitoring(invoiceId) }
+    LaunchedEffect(receiptState.sequence) {
+        val message = receiptState.message ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(message)
+        viewModel.consumeReceiptMessage(receiptState.sequence)
+    }
     DisposableEffect(invoiceId) { onDispose { viewModel.stopPaymentMonitoring() } }
 
     Scaffold(
@@ -60,7 +71,8 @@ fun PaymentScreen(invoiceId: String, viewModel: InvoiceViewModel, onBack: () -> 
                     }
                 }
             )
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         val invoice = state.invoice
         if (invoice == null) {
@@ -79,6 +91,9 @@ fun PaymentScreen(invoiceId: String, viewModel: InvoiceViewModel, onBack: () -> 
             error = state.error,
             onCopyUri = { clipboard.setText(AnnotatedString(invoice.erc681Uri)) },
             onCancel = { viewModel.cancelInvoice(); onBack() },
+            printingReceipt = receiptState.printingInvoiceId == invoice.invoiceId,
+            printerBusy = receiptState.printingInvoiceId != null,
+            onPrintReceipt = { viewModel.reprintReceipt(invoice.invoiceId) },
             modifier = Modifier.padding(padding)
         )
     }
@@ -90,6 +105,9 @@ private fun PaymentContent(
     error: String?,
     onCopyUri: () -> Unit,
     onCancel: () -> Unit,
+    printingReceipt: Boolean,
+    printerBusy: Boolean,
+    onPrintReceipt: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val open = invoice.status in listOf(
@@ -126,6 +144,20 @@ private fun PaymentContent(
         OutlinedButton(onClick = onCopyUri, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Default.ContentCopy, contentDescription = null)
             Text(" Copy ERC-681 URI")
+        }
+        if (invoice.canPrintPrimaryReceipt()) {
+            OutlinedButton(
+                onClick = onPrintReceipt,
+                enabled = !printerBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (printingReceipt) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                }
+                Text(
+                    if (invoice.receiptPrintedAt == null) " Print receipt" else " Reprint receipt"
+                )
+            }
         }
         if (open) {
             Button(onClick = onCancel, modifier = Modifier.fillMaxWidth()) { Text("Close invoice") }
@@ -202,6 +234,7 @@ private fun DetailCard(invoice: Invoice) {
             )
             Detail("Receiver", invoice.receiver)
             Detail("Invoice", invoice.invoiceId)
+            invoice.paymentTxHash?.let { Detail("Payment tx", it) }
             Text("ERC-681 URI", style = MaterialTheme.typography.labelMedium)
             Text(invoice.erc681Uri, style = MaterialTheme.typography.bodySmall)
         }

@@ -3,6 +3,8 @@ package com.openpasskey.terminal.ui.screens
 import com.openpasskey.terminal.viewmodel.SettingsState
 import com.openpasskey.terminal.viewmodel.TerminalSetupStatus
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SettingsPresentationTest {
@@ -49,5 +51,29 @@ class SettingsPresentationTest {
         )
 
         assertEquals("On-chain validation in progress", configurationValidationLabel(state))
+    }
+
+    @Test
+    fun `privileged setup stays busy for provisioning and both settings saves`() {
+        assertFalse(privilegedSetupBusy(SettingsState(setupStatus = TerminalSetupStatus.READY)))
+        assertTrue(
+            privilegedSetupBusy(SettingsState(setupStatus = TerminalSetupStatus.PROVISIONING)),
+        )
+        assertTrue(
+            privilegedSetupBusy(
+                SettingsState(
+                    setupStatus = TerminalSetupStatus.READY,
+                    savingMerchantReceiptProfile = true,
+                ),
+            ),
+        )
+        assertTrue(
+            privilegedSetupBusy(
+                SettingsState(
+                    setupStatus = TerminalSetupStatus.READY,
+                    savingAutoSweepPreference = true,
+                ),
+            ),
+        )
     }
 }
