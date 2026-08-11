@@ -1,12 +1,28 @@
 package com.openpasskey.terminal.chain
 
-import org.junit.Assert.assertFalse
+import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChainConfigPolicyTest {
+    @Test
+    fun unprovisionedFacadeMatchesThePinnedProductionDefault() {
+        val production = KnownChainPolicy.defaultProfile()
+
+        assertEquals(production.networkName, ChainConfig.DEFAULT_NETWORK_NAME)
+        assertEquals(production.rpcUrl, ChainConfig.DEFAULT_RPC_URL)
+        assertEquals(production.chainId, ChainConfig.DEFAULT_CHAIN_ID)
+        assertEquals(production.factory.value, ChainConfig.DEFAULT_FACTORY_ADDRESS)
+        assertEquals(
+            production.receiverImplementation.value,
+            ChainConfig.DEFAULT_RECEIVER_IMPLEMENTATION,
+        )
+        assertEquals(production.defaultConfirmationBlocks, ChainConfig.DEFAULT_CONFIRMATION_BLOCKS)
+    }
+
     @Test
     fun missingLegacyOperatorBindingIsNeverCompleteProvisioning() {
         assertTrue(config().hasCompleteProvisioning())

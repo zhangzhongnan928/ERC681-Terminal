@@ -106,7 +106,7 @@ final class TerminalProvisioningTests: XCTestCase {
                 receiverImplementation: profile.receiverImplementation
             )
         }
-        XCTAssertNil(TerminalKnownChainProfile.profile(for: 8_453))
+        XCTAssertNotNil(TerminalKnownChainProfile.profile(for: 8_453))
         XCTAssertNil(TerminalKnownChainProfile.profile(for: 1))
     }
 

@@ -1,6 +1,6 @@
 # Apple App Store — English (Australia)
 
-Release target: OPK Terminal `0.1.12` build `14`.
+Release target: the already-uploaded OPK Terminal `0.1.12` build `13`.
 
 ## Product details
 
@@ -15,7 +15,7 @@ Release target: OPK Terminal `0.1.12` build `14`.
 | In-app purchases | None |
 | Privacy Policy URL | https://www.openpasskey.com/privacy |
 | Support URL | https://www.openpasskey.com/support |
-| Marketing URL | Leave blank |
+| Marketing URL | https://www.openpasskey.com |
 | Copyright | 2026 OpenPasskey Pty Ltd |
 
 ## Promotional text (170 max)
@@ -72,28 +72,29 @@ First public-store build of OPK Terminal:
 • OpenPasskey provisioning for up to 32 vault/token profiles
 • ERC-681 payment QR display and on-chain confirmation monitoring
 • device-protected, constrained settlement and local history
-• clearly labelled, isolated offline Base Sepolia product tour
 • in-app Privacy Policy and Support links
 
 ## App Review notes
 
-Paste the completed Apple section from `../review/reviewer-instructions.md`. Do not submit
-placeholders or commit review credentials to this repository.
+Build 13 has no offline product tour. Paste the exact Apple build-13 section from
+`../review/reviewer-instructions.md`; do not paste the former build-14 demo text, placeholders, or
+credentials.
 
 ## Owner decisions before paste
 
 - Keep **Business** as the primary category and no secondary category; OPK Terminal is a merchant
   tool, not a financial-services app.
-- Complete the current age-rating questionnaire honestly; do not assume a rating from this draft.
-- Confirm organisation enrolment and the financial/cryptocurrency classification described in
-  `../console-declarations.md`.
-- Confirm distribution territories. The rights holder for the store listing is OpenPasskey Pty Ltd
-  (ACN 688 670 420), which also owns the OPK Terminal name and icon; the open-source code copyright
-  is held separately by Victor Zhang under Apache-2.0. See `../../TRADEMARK.md`.
-- Leave the optional **Marketing URL** blank because the general homepage describes capabilities
-  outside this Base Sepolia-only app. The required **Support URL** is the dedicated live
+- The current App Store Connect result is 4+ with regional equivalents.
+- The Apple account is verified as the OPENPASSKEY PTY LTD organisation; retain the
+  merchant-tool classification described in `../console-declarations.md`.
+- The current listing is Free, Public, and available in 175 countries or regions.
+- The rights holder for the store listing is OpenPasskey Pty Ltd (ACN 688 670 420), which also
+  owns the OPK Terminal name and icon; the open-source code copyright is held separately by
+  Victor Zhang under Apache-2.0. See `../../TRADEMARK.md`.
+- The required **Support URL** is the dedicated live
   `https://www.openpasskey.com/support` page.
 - Confirm the live privacy policy retains the approved first-party OPK Terminal statement before
   using the URL above. Complete App Store privacy separately under Apple's definitions, and do not
-  submit either **Data Not Collected** or the current conservative manifest draft until the direct
-  Base RPC treatment is explicitly approved.
+  publish the current **Data Not Collected** draft. Exact build-13 RPC evidence shows
+  off-device data handling covered by Apple's third-party-inclusive definition; use the minimum
+  truthful mapping in `../console-declarations.md` after owner approval.

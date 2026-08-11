@@ -70,7 +70,7 @@ final class StoreScreenshotUITests: XCTestCase {
         XCTAssertTrue(safetyLabel.waitForExistence(timeout: 5))
         XCTAssertEqual(
             safetyLabel.label,
-            "OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS"
+            "OFFLINE DEMO · BASE MAINNET FORMAT · SIMULATED · NO NETWORK · NO REAL FUNDS"
         )
         XCTAssertTrue(element("reviewerDemoQRCode").exists)
         XCTAssertEqual(element("reviewerDemoPaymentStatus").label, "Waiting for payment")

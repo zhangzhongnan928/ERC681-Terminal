@@ -3,16 +3,39 @@
   "rail": "OPK terminal known EVM network profiles",
   "notes": [
     "Every enabled network is pinned in the native apps; provisioning QR payloads cannot supply or override these trust anchors.",
-    "Base Sepolia is the only production-app-enabled network in this release. Base Mainnet v1.6 is deployed but remains disabled pending an explicit product enablement and operational RPC policy.",
+    "Base Mainnet is listed first for stable presentation and is the production application default; Base Sepolia remains available for explicit testing. Reusable SDK callers still select a network explicitly.",
     "The CREATE2 example vault is a deterministic test input, not a deployed merchant vault.",
-    "The vault runtime code hash is the exact OPK Protocol 1.6 Base Sepolia proxy runtime with beacon 0xc9c24c87f55c46d42419bc181d427acd1755e46c embedded; it intentionally does not use the zero-immutable artifact hash recorded by the upstream browser deployer.",
+    "Each vault runtime code hash is the exact deployed OPK Protocol 1.6 proxy runtime for that network; it intentionally does not use a zero-immutable browser-deployer artifact hash.",
     "The CREATE2 vectors use the same example vault and invoice ID so implementations can prove that network-specific factory and receiver implementation constants produce the published receiver.",
     "One payment profile selects exactly one network, vault, and payment asset for an invoice.",
-    "These Base Sepolia pins target the published OPK Protocol 1.6 Route A record at https://github.com/Open-Passkey/OPK-Terminal-Native-Payment-Protocol/blob/main/contracts/deployments/base-sepolia-1.6.json.",
+    "The Base Mainnet and Base Sepolia pins were verified against OPK Protocol commit 4629fb3fe5cd0d4d23676fe6b80b89fb097b7512 and its Route A records under contracts/deployments.",
+    "The public Base RPC endpoints are rate-limited and are not suitable production-provider guarantees; operators should review endpoint capacity before handling live volume.",
     "A vault on this pinned stack offers the native asset only after NATIVE_ASSET() succeeds with the EIP-7528 sentinel and isPaymentToken(sentinel) is true.",
     "The compiled confirmation value is a floor and fresh-network default. A merchant administrator may choose a network policy at or above the floor; every profile on that chain shares it, and the provisioning QR cannot override it."
   ],
   "networks": [
+    {
+      "chainId": 8453,
+      "networkName": "Base Mainnet",
+      "isTestnet": false,
+      "nativeCurrencySymbol": "ETH",
+      "nativeCurrencyDecimals": 18,
+      "minimumConfirmationBlocks": 1,
+      "defaultConfirmationBlocks": 1,
+      "minimumOperatorNativeReserveWei": "100000000000000",
+      "rpcUrl": "https://mainnet.base.org",
+      "protocolVersion": "1.6",
+      "factory": "0x5418ab1790eaf96a20e26146c5b7765cb99328da",
+      "receiverImplementation": "0xe6393f6176865cc62cd08d8b8f0c38d35af55254",
+      "vaultRuntimeCodeHash": "0x8c3a56b5606e44613d50c898acf67a3689afc478b47e9a38326699b0df111cbd",
+      "create2TestVector": {
+        "vault": "0x1111111111111111111111111111111111111111",
+        "invoiceId": "0xd5ab0fb2beaa1c3d789ae8a50b9429257b7f830830c8c4e23177a0fb2e116c77",
+        "salt": "0x8b43abe81bab80f024d08540d6ffed9dab76ebd2f0096a53671e7c9aa94462ab",
+        "initCodeHash": "0x3b2db354080b627c0b567ce3b408da0bd1ad3c63d0cbe675ee0bfd1a34817f1a",
+        "expectedReceiver": "0x3da3df1635ef2334e5b26bee7b87e34d01454d8b"
+      }
+    },
     {
       "chainId": 84532,
       "networkName": "Base Sepolia",

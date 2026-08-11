@@ -2,17 +2,16 @@ import SwiftUI
 
 enum ReviewerDemoCopy {
     static let safetyBannerLabel =
-        "OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS"
+        "OFFLINE DEMO · BASE MAINNET FORMAT · SIMULATED · NO NETWORK · NO REAL FUNDS"
     static let isolationDetail =
         "Offline, in-memory product tour. No wallet, network request, signing, broadcast, or storage is used."
 
     static let sampleAmount = "1.00"
     static let sampleSymbol = "USDC"
-    static let sampleToken = "0x1111111111111111111111111111111111111111"
     static let sampleReceiver = "0x2222222222222222222222222222222222222222"
     static let sampleInvoice = "DEMO-0001"
-    static let sampleERC681URI =
-        "ethereum:\(sampleToken)@84532/transfer?address=\(sampleReceiver)&uint256=1000000"
+    static let sampleMarker =
+        "opk-demo:v1?network=base-mainnet&chainId=8453&simulated=true"
 }
 
 enum ReviewerDemoTab: Hashable {
@@ -131,18 +130,18 @@ private struct ReviewerDemoCheckoutView: View {
                     if state.paymentState == .waiting {
                         VStack {
                             QRCodeImage(
-                                payload: ReviewerDemoCopy.sampleERC681URI,
+                                payload: ReviewerDemoCopy.sampleMarker,
                                 size: 220,
-                                accessibilityLabel: "Demo ERC-681 payment QR code",
+                                accessibilityLabel: "Non-payment demo marker QR code",
                                 failureDescription: "The local demo QR could not be rendered."
                             )
                             .accessibilityHidden(true)
                         }
                         .accessibilityElement(children: .ignore)
-                        .accessibilityLabel("Demo ERC-681 payment QR code")
+                        .accessibilityLabel("Non-payment demo marker QR code")
                         .accessibilityIdentifier("reviewerDemoQRCode")
 
-                        Text("Sample ERC-681 request generated locally for this demo.")
+                        Text("Non-payment simulation marker generated locally for this demo.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -181,7 +180,7 @@ private struct ReviewerDemoCheckoutView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             ReviewerDemoDetailRow(
                                 label: "Network",
-                                value: "Base Sepolia · 84532"
+                                value: "Base Mainnet · 8453"
                             )
                             ReviewerDemoDetailRow(
                                 label: "Receiver",
@@ -245,7 +244,7 @@ private struct ReviewerDemoHistoryView: View {
                         .accessibilityLabel("Status")
                         .accessibilityValue(state.paymentState.label)
                         .accessibilityIdentifier("reviewerDemoHistoryStatus")
-                    LabeledContent("Network", value: "Base Sepolia")
+                    LabeledContent("Network", value: "Base Mainnet")
                     LabeledContent("Invoice", value: ReviewerDemoCopy.sampleInvoice)
                 }
 

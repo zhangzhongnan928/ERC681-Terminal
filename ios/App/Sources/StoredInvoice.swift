@@ -26,6 +26,24 @@ final class StoredInvoice {
     var observedBlockHash: String?
     var thresholdBlock: Int64?
     var thresholdBlockHash: String?
+    /// Canonical block immediately before the checkout QR was published.
+    var publishedAtBlock: Int64?
+    var publishedAtBlockHash: String?
+    /// Incoming consumer-payment evidence. This is never populated from a settlement sweep hash.
+    var paymentTransactionHash: String?
+    var paymentPayerAddress: String?
+    var paymentBlockNumber: Int64?
+    var paymentBlockHash: String?
+    var paidAtEpochSeconds: Int64?
+    /// Funding cursor against which the incoming evidence was resolved. It is kept separately
+    /// from the live monitor cursor so a later canonical sweep cannot erase a historical receipt.
+    var paymentEvidenceFundingBlock: Int64?
+    var paymentEvidenceFundingBlockHash: String?
+    /// Immutable receipt presentation snapshot. Legacy rows remain ineligible by default.
+    var receiptNumber: Int64 = 0
+    var receiptMerchantName: String = MerchantReceiptProfile.defaultName
+    var receiptMerchantABN: String = ""
+    var receiptEligible: Bool = false
     var confirmationBlocks: Int64 = 1
     var locallyClosed: Bool = false
     /// Confirmed cumulative sweep evidence whose block was no later than `observedBlock`.
@@ -48,7 +66,14 @@ final class StoredInvoice {
     var sweepableCandidateBalance: String?
     var sweepableCandidateCumulative: String?
 
-    init(request: PaymentRequest, configuration: TerminalConfiguration) throws {
+    init(
+        request: PaymentRequest,
+        configuration: TerminalConfiguration,
+        publicationCursor: PaymentConfirmationCursor? = nil,
+        receiptProfile: MerchantReceiptProfile = .default,
+        receiptNumber: Int64 = 0,
+        receiptEligible: Bool = false
+    ) throws {
         guard let storedChainID = Int64(exactly: request.chainID),
               let storedConfirmationBlocks = Int64(exactly: configuration.confirmationPolicy.requiredBlocks)
         else { throw AppSettingsError.invalidValue }
@@ -71,6 +96,24 @@ final class StoredInvoice {
         statusLabel = "Waiting"
         observedBalance = "0"
         confirmationBlocks = storedConfirmationBlocks
+        switch publicationCursor {
+        case let cursor?:
+            guard let storedPublicationBlock = Int64(exactly: cursor.blockNumber) else {
+                throw AppSettingsError.invalidValue
+            }
+            publishedAtBlock = storedPublicationBlock
+            publishedAtBlockHash = cursor.blockHash.hex
+        case nil:
+            publishedAtBlock = nil
+            publishedAtBlockHash = nil
+        }
+        guard !receiptEligible || receiptNumber > 0 else {
+            throw AppSettingsError.invalidValue
+        }
+        self.receiptNumber = receiptNumber
+        receiptMerchantName = receiptProfile.name
+        receiptMerchantABN = receiptProfile.abn
+        self.receiptEligible = receiptEligible
     }
 
     func configurationSnapshot() throws -> TerminalConfiguration {
@@ -172,6 +215,11 @@ final class StoredInvoice {
         observedBlockHash = observation.blockHash.hex
         thresholdBlock = storedThreshold
         thresholdBlockHash = storedThresholdHash
+        if hasIncomingPaymentEvidence,
+           let evidenceCursor = paymentEvidenceFundingCursor,
+           !observation.validated(evidenceCursor) {
+            clearIncomingPaymentEvidence()
+        }
         cumulativeSweptAtObservation = cumulativeConfirmedSweptAmount.decimalString
         switch observation.status {
         case .waiting:
@@ -248,6 +296,100 @@ final class StoredInvoice {
             || historyStatusLabel.hasPrefix("Confirming ")
     }
 
+    var publicationCursor: PaymentConfirmationCursor? {
+        confirmationCursor(block: publishedAtBlock, hash: publishedAtBlockHash)
+    }
+
+    var hasIncomingPaymentEvidence: Bool {
+        guard paymentTransactionHash.flatMap({ try? Bytes32(hex: $0) }) != nil,
+              paymentBlockHash.flatMap({ try? Bytes32(hex: $0) }) != nil,
+              let block = paymentBlockNumber, block >= 0,
+              let paidAtEpochSeconds, paidAtEpochSeconds > 0,
+              let publicationCursor,
+              let fundingCursor = paymentEvidenceFundingCursor,
+              let paymentBlock = paymentBlockNumber.flatMap({ UInt64(exactly: $0) }),
+              let paymentPayerAddress,
+              (try? EthereumAddress(hex: paymentPayerAddress, allowZero: false)) != nil,
+              fundingCursor.blockNumber > publicationCursor.blockNumber,
+              paymentBlock > publicationCursor.blockNumber,
+              paymentBlock <= fundingCursor.blockNumber
+        else { return false }
+        return true
+    }
+
+    func applyIncomingPaymentEvidence(
+        _ evidence: PaymentTransactionEvidence,
+        expectedFundingCursor: PaymentConfirmationCursor
+    ) throws -> Bool {
+        let currentEvidenceCursor = paymentEvidenceFundingCursor
+        guard (hasIncomingPaymentEvidence
+                ? currentEvidenceCursor == expectedFundingCursor
+                : paymentThresholdCursor == expectedFundingCursor),
+              let publicationCursor,
+              evidence.blockNumber > publicationCursor.blockNumber,
+              evidence.blockNumber <= expectedFundingCursor.blockNumber,
+              evidence.blockTimestamp > 0,
+              let storedBlock = Int64(exactly: evidence.blockNumber),
+              let storedFundingBlock = Int64(exactly: expectedFundingCursor.blockNumber),
+              let storedTimestamp = Int64(exactly: evidence.blockTimestamp)
+        else { return false }
+        paymentTransactionHash = evidence.transactionHash.hex
+        paymentPayerAddress = evidence.payer.hex
+        paymentBlockNumber = storedBlock
+        paymentBlockHash = evidence.blockHash.hex
+        paidAtEpochSeconds = storedTimestamp
+        paymentEvidenceFundingBlock = storedFundingBlock
+        paymentEvidenceFundingBlockHash = expectedFundingCursor.blockHash.hex
+        return true
+    }
+
+    func clearIncomingPaymentEvidence() {
+        paymentTransactionHash = nil
+        paymentPayerAddress = nil
+        paymentBlockNumber = nil
+        paymentBlockHash = nil
+        paidAtEpochSeconds = nil
+        paymentEvidenceFundingBlock = nil
+        paymentEvidenceFundingBlockHash = nil
+    }
+
+    func clearIncomingPaymentEvidence(
+        expectedFundingCursor: PaymentConfirmationCursor
+    ) -> Bool {
+        guard paymentEvidenceFundingCursor == expectedFundingCursor else { return false }
+        clearIncomingPaymentEvidence()
+        return true
+    }
+
+    func receiptDocument() throws -> ReceiptDocument? {
+        guard receiptEligible,
+              receiptNumber > 0,
+              !receiptMerchantName.isEmpty,
+              let chainID = UInt64(exactly: chainID),
+              let transactionHash = paymentTransactionHash,
+              let paidAtEpochSeconds,
+              hasIncomingPaymentEvidence,
+              let amount = try? UInt256(decimalString: expectedAmount),
+              let decimals = UInt8(exactly: tokenDecimals)
+        else { return nil }
+        let explorerURL = try BaseScanExplorer.transactionURL(
+            chainID: chainID,
+            hash: transactionHash
+        )
+        return ReceiptDocument(
+            merchantName: receiptMerchantName,
+            merchantABN: receiptMerchantABN.isEmpty ? nil : receiptMerchantABN,
+            displayAmount: TokenAmount(rawValue: amount, decimals: decimals).displayString(),
+            tokenSymbol: tokenSymbol,
+            networkName: "Base",
+            terminalAddress: terminalIdentifier,
+            paymentTransactionHash: transactionHash,
+            receiptNumber: receiptNumber,
+            paidAtEpochSeconds: paidAtEpochSeconds,
+            explorerURL: explorerURL
+        )
+    }
+
     var hasObservedFunds: Bool {
         guard let amount = try? UInt256(decimalString: observedBalance) else { return false }
         return !amount.isZero
@@ -320,6 +462,13 @@ final class StoredInvoice {
 
     var paymentThresholdCursor: PaymentConfirmationCursor? {
         confirmationCursor(block: thresholdBlock, hash: thresholdBlockHash)
+    }
+
+    var paymentEvidenceFundingCursor: PaymentConfirmationCursor? {
+        confirmationCursor(
+            block: paymentEvidenceFundingBlock,
+            hash: paymentEvidenceFundingBlockHash
+        )
     }
 
     var sweepableConfirmationCursor: PaymentConfirmationCursor? {

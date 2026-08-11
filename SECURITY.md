@@ -7,11 +7,15 @@ reporting an issue, and before running the code with real value.
 ## Scope and status
 
 - **This code has not been independently audited.**
-- **Base Sepolia (`84532`) is the only network enabled in shipped builds.**
-  Base Mainnet (`8453`) has a published OPK Protocol 1.6 deployment but remains
-  disabled in code pending explicit product enablement and a reviewed
-  operational RPC, finality, gas-reserve, deployment-pin, and CREATE2 policy.
-  Every other network remains disabled behind the same release gate.
+- **Base Mainnet (`8453`) is the default network in new builds.** Base Sepolia
+  (`84532`) remains enabled only as an explicit test-network choice in protected
+  Advanced Settings. Both networks use independently pinned OPK Protocol 1.6
+  deployments, runtime hashes, and CREATE2 vectors. Every other network remains
+  disabled behind the same release gate.
+- The compiled `https://mainnet.base.org` and `https://sepolia.base.org` endpoints
+  are Base's public, rate-limited endpoints. Sustained production operation
+  requires an approved HTTPS RPC provider without weakening the immutable
+  chain and deployment checks.
 - The safety boundary described in `README.md` and `MOBILE_SDK.md`
   describes the behaviour of *this* source tree, built as published,
   against the pinned deployments in `conformance/`. Those properties are

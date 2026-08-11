@@ -59,12 +59,32 @@ fun AppNavigation(
 ) {
     val controller = rememberNavController()
     val settingsState by settingsViewModel.state.collectAsState()
+    val settlementState by settlementViewModel.state.collectAsState()
     val current by controller.currentBackStackEntryAsState()
     val currentRoute = current?.destination?.route
     val showBottomBar = currentRoute in navItems.map { it.route }
 
     LaunchedEffect(settingsState.selectedProfileId, settingsState.paymentProfiles) {
         invoiceViewModel.refreshConfiguration()
+    }
+
+    LaunchedEffect(settingsState.autoSweepEnabled) {
+        settlementViewModel.setAutoSweepEnabled(settingsState.autoSweepEnabled)
+    }
+
+    LaunchedEffect(settlementState.autoSweepReviewSequence) {
+        if (settlementViewModel.beginAutoSweepReviewNavigation(
+                settlementState.autoSweepReviewSequence,
+            )
+        ) {
+            controller.navigateTopLevel(Routes.SETTLEMENT)
+        }
+    }
+
+    LaunchedEffect(settlementState.autoSweepSafetyDisableSequence) {
+        if (settlementState.autoSweepSafetyDisableSequence > 0) {
+            settingsViewModel.autoSweepDisabledBySafetyCapacity()
+        }
     }
 
     Scaffold(

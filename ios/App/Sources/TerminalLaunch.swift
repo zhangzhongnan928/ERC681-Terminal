@@ -78,7 +78,7 @@ struct TerminalLaunchChooserView: View {
                             Label("OFFLINE PRODUCT TOUR", systemImage: "eye.fill")
                                 .font(.headline)
                             Text(
-                                "BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS"
+                                "BASE MAINNET FORMAT · SIMULATED · NO NETWORK · NO REAL FUNDS"
                             )
                                 .font(.caption.weight(.bold))
                                 .foregroundStyle(.orange)

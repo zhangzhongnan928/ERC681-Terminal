@@ -7,6 +7,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
@@ -57,8 +58,11 @@ class ColdLaunchDemoIsolationTest {
         composeRule.onNodeWithTag("cold_launch_reviewer_demo").performClick()
         composeRule.onNodeWithText("Offline product tour").assertIsDisplayed()
         composeRule.onNodeWithText(ReviewerDemoCopy.BANNER_LABEL).assertIsDisplayed()
-        composeRule.onNodeWithTag("reviewer_demo_simulate_payment").performClick()
-        composeRule.onNodeWithText("Paid").assertIsDisplayed()
+        composeRule.onNodeWithTag("reviewer_demo_simulate_payment")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+        composeRule.onNodeWithText("Paid").performScrollTo().assertIsDisplayed()
 
         assertTrue(demoModeSelected.get())
         assertFalse(liveFactoryTripwire.get())
@@ -77,7 +81,15 @@ class ColdLaunchDemoIsolationTest {
     }
 
     private fun directoryEntries(dataDir: String, child: String): Set<String> =
-        File(dataDir, child).list()?.toSet().orEmpty()
+        File(dataDir, child).list()
+            ?.filterNot { entry ->
+                // AndroidX ProfileInstaller writes this framework-owned marker asynchronously on
+                // first install. It is unrelated to the live terminal factory and may appear
+                // between the two snapshots on a clean device.
+                child == "files" && entry == PROFILE_INSTALLER_MARKER
+            }
+            ?.toSet()
+            .orEmpty()
 
     private fun androidKeystoreAliases(): Set<String> {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -90,5 +102,9 @@ class ColdLaunchDemoIsolationTest {
         ) {
             assertEquals(before, after)
         }
+    }
+
+    private companion object {
+        const val PROFILE_INSTALLER_MARKER = "profileInstalled"
     }
 }

@@ -8,9 +8,9 @@ package com.openpasskey.terminal.ui.demo
  */
 internal object ReviewerDemoCopy {
     const val BANNER_LABEL =
-        "OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS"
+        "OFFLINE DEMO · BASE MAINNET FORMAT · SIMULATED · NO NETWORK · NO REAL FUNDS"
     const val DEMO_LABEL = "OFFLINE DEMO"
-    const val NETWORK_LABEL = "BASE SEPOLIA TESTNET"
+    const val NETWORK_LABEL = "BASE MAINNET FORMAT"
     const val FUNDS_LABEL = "NO REAL FUNDS"
     const val SAFETY_EXPLANATION =
         "Offline product tour. Nothing leaves this screen: no account, wallet, PIN, " +
@@ -19,13 +19,12 @@ internal object ReviewerDemoCopy {
         "Demo activity is held in memory only and resets when you close this preview."
     const val SAMPLE_AMOUNT = "1.00"
     const val SAMPLE_TOKEN = "USDC"
-    const val SAMPLE_CHAIN_ID = 84532L
+    const val SAMPLE_CHAIN_ID = 8453L
     const val SAMPLE_RECEIVER = "0x2222222222222222222222222222222222222222"
     const val SAMPLE_VAULT = "0x3333333333333333333333333333333333333333"
     const val SAMPLE_OPERATOR = "0x4444444444444444444444444444444444444444"
-    const val SAMPLE_ERC681_URI =
-        "ethereum:0x1111111111111111111111111111111111111111@84532/transfer" +
-            "?address=0x2222222222222222222222222222222222222222&uint256=1000000"
+    const val SAMPLE_DEMO_MARKER =
+        "opk-demo:v1?network=base-mainnet&chainId=8453&simulated=true"
     const val SETTLEMENT_DISABLED_LABEL = "Settlement disabled in demo"
     const val SETTLEMENT_EXPLANATION =
         "Preview only — no authentication, signing, RPC, or broadcast is available."

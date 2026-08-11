@@ -7,23 +7,25 @@ final class ReviewerDemoTests: XCTestCase {
     func testRequiredSafetyLabelsAreExplicit() {
         XCTAssertEqual(
             ReviewerDemoCopy.safetyBannerLabel,
-            "OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS"
+            "OFFLINE DEMO · BASE MAINNET FORMAT · SIMULATED · NO NETWORK · NO REAL FUNDS"
         )
         XCTAssertTrue(ReviewerDemoCopy.isolationDetail.contains("Offline"))
         XCTAssertTrue(ReviewerDemoCopy.isolationDetail.contains("in-memory"))
         XCTAssertTrue(ReviewerDemoCopy.isolationDetail.contains("product tour"))
     }
 
-    func testSamplePaymentURIIsCanonicalBaseSepoliaERC681() throws {
-        let request = try ERC681TransferRequest.parse(
-            ReviewerDemoCopy.sampleERC681URI,
-            expectedChainID: 84_532
+    func testSampleMarkerIsNonPaymentBaseMainnetDemoData() {
+        XCTAssertEqual(
+            ReviewerDemoCopy.sampleMarker,
+            "opk-demo:v1?network=base-mainnet&chainId=8453&simulated=true"
         )
-
-        XCTAssertEqual(request.canonicalString, ReviewerDemoCopy.sampleERC681URI)
-        XCTAssertEqual(request.amount.decimalString, "1000000")
-        XCTAssertEqual(request.token.hex, ReviewerDemoCopy.sampleToken)
-        XCTAssertEqual(request.recipient.hex, ReviewerDemoCopy.sampleReceiver)
+        XCTAssertFalse(ReviewerDemoCopy.sampleMarker.hasPrefix("ethereum:"))
+        XCTAssertThrowsError(
+            try ERC681TransferRequest.parse(
+                ReviewerDemoCopy.sampleMarker,
+                expectedChainID: 8_453
+            )
+        )
     }
 
     func testDemoStateTransitionsOnlyFromWaitingToPaidAndResets() {

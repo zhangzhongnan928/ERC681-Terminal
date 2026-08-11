@@ -46,6 +46,9 @@ final class AppModel: ObservableObject {
             if !settingsRecoveryRequired {
                 AppPreferences.saveSettings(settings)
             }
+            if settings.autoSweepEnabled != oldValue.autoSweepEnabled {
+                autoSweepAttemptGate.invalidate()
+            }
             guard !settings.hasSamePaymentConfiguration(as: oldValue) else { return }
             validatedConfigurationFingerprint = nil
             configurationValidationProof = nil
@@ -71,6 +74,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var adminPINConfigurationState: AdminPINConfigurationState
     @Published private(set) var adminUnlocked: Bool
     @Published private(set) var preparedSettlement: PreparedSettlement?
+    @Published private(set) var autoSweepReviewSequence: UInt64 = 0
+    @Published private(set) var autoSweepMessage: String?
     @Published private(set) var settingsRecoveryRequired = false
     @Published var errorMessage: String?
 
@@ -102,13 +107,19 @@ final class AppModel: ObservableObject {
     private let foregroundInvoiceReconciliationGate = ForegroundInvoiceReconciliationGate()
     private let backgroundRPCWorkGate: BackgroundRPCWorkGate
     private let backgroundRPCUnitDeadline: Duration
+    private let paymentEvidenceResolutionDeadline: Duration
     private let paymentObservationSampler: PaymentObservationSampling
+    private let paymentEvidenceResolver: AppPaymentEvidenceResolving
     private let paymentMonitorPollIntervalNanoseconds: UInt64
     private let validationNow: @Sendable () -> Date
     private let configurationValidationTTL: TimeInterval
     private let preparedSettlementValidationTTL: TimeInterval
     private var configurationValidationProof: ConfigurationValidationProof?
     private var preparedSettlementValidationProof: PreparedSettlementValidationProof?
+    private var preparedAutoSweepFingerprint: String?
+    private var suppressedAutoSweepFingerprints = Set<String>()
+    private var autoSweepRetryAfter = [String: Date]()
+    private var autoSweepAttemptGate = AutoSweepAttemptGate()
 
     init(
         container: ModelContainer,
@@ -139,12 +150,15 @@ final class AppModel: ObservableObject {
         preparedSettlementValidationTTL: TimeInterval = 60,
         interactiveBackgroundDrainTimeout: Duration = .seconds(5),
         backgroundRPCUnitDeadline: Duration = .seconds(5),
+        paymentEvidenceResolutionDeadline: Duration = .seconds(60),
         paymentObservationSampler: PaymentObservationSampling? = nil,
+        paymentEvidenceResolver: AppPaymentEvidenceResolving? = nil,
         paymentMonitorPollIntervalNanoseconds: UInt64 =
             PaymentMonitor.defaultPollIntervalNanoseconds
     ) {
         precondition(interactiveBackgroundDrainTimeout > .zero)
         precondition(backgroundRPCUnitDeadline > .zero)
+        precondition(paymentEvidenceResolutionDeadline > .zero)
         precondition(paymentMonitorPollIntervalNanoseconds > 0)
         self.container = container
         self.operatorWallet = operatorWallet
@@ -163,6 +177,7 @@ final class AppModel: ObservableObject {
             maximumInteractiveDrainWait: interactiveBackgroundDrainTimeout
         )
         self.backgroundRPCUnitDeadline = backgroundRPCUnitDeadline
+        self.paymentEvidenceResolutionDeadline = paymentEvidenceResolutionDeadline
         self.paymentObservationSampler = paymentObservationSampler
             ?? { request, configuration, paymentCursor, sweepableCursors in
                 let rpc = try EthereumRPCClientPool.shared.client(
@@ -178,9 +193,19 @@ final class AppModel: ObservableObject {
                     expectedChainID: configuration.chainID
                 )
             }
+        self.paymentEvidenceResolver = paymentEvidenceResolver
+            ?? { request, configuration in
+                try await AppPaymentEvidenceResolver.resolve(
+                    request,
+                    configuration: configuration
+                )
+            }
         self.paymentMonitorPollIntervalNanoseconds = paymentMonitorPollIntervalNanoseconds
         let settingsLoadResult = AppPreferences.loadSettingsResult()
         settings = settingsLoadResult.settings
+        suppressedAutoSweepFingerprints = Set(
+            settingsLoadResult.settings.dismissedAutoSweepFingerprints
+        )
         settingsRecoveryRequired = settingsLoadResult.recoveryRequired
         let pinConfigurationState: AdminPINConfigurationState
         do {
@@ -379,6 +404,92 @@ final class AppModel: ObservableObject {
 
         endExclusiveOperation()
         await refreshReadiness()
+    }
+
+    func updateMerchantReceiptProfile(name: String, abn: String) {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
+        guard adminPINConfigured, adminUnlocked else {
+            errorMessage = "Unlock Admin before changing receipt details."
+            return
+        }
+        guard let adminSession = adminSessionGate.capture() else {
+            errorMessage = AppSafetyError.adminSessionExpired.localizedDescription
+            return
+        }
+        guard beginExclusiveOperation() else {
+            errorMessage = AppSettlementError.operationInProgress.localizedDescription
+            return
+        }
+        defer { endExclusiveOperation() }
+        do {
+            let original = settings
+            let candidate = try original.updatingMerchantReceiptProfile(name: name, abn: abn)
+            guard settings == original else { throw AppSafetyError.configurationChanged }
+            try adminSessionGate.requireCurrent(adminSession)
+            settings = candidate
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func updateAutoSweepEnabled(_ enabled: Bool) {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return
+        }
+        guard adminPINConfigured, adminUnlocked else {
+            errorMessage = "Unlock Admin before changing auto-sweep."
+            return
+        }
+        guard let adminSession = adminSessionGate.capture() else {
+            errorMessage = AppSafetyError.adminSessionExpired.localizedDescription
+            return
+        }
+        let original = settings
+        guard original.autoSweepEnabled != enabled else {
+            errorMessage = nil
+            return
+        }
+
+        // Turning automation off is a cancellation signal, so it must remain available while an
+        // evidence lookup or automatic preparation owns the normal lifecycle operation gate.
+        if !enabled {
+            do {
+                try adminSessionGate.requireCurrent(adminSession)
+                guard settings == original else { throw AppSafetyError.configurationChanged }
+                settings = original.updatingAutoSweepEnabled(false)
+                if preparedAutoSweepFingerprint != nil, !operationBusy {
+                    clearPreparedSettlementState()
+                }
+                autoSweepMessage = nil
+                errorMessage = nil
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            return
+        }
+        guard beginExclusiveOperation() else {
+            errorMessage = AppSettlementError.operationInProgress.localizedDescription
+            return
+        }
+        defer { endExclusiveOperation() }
+        do {
+            try adminSessionGate.requireCurrent(adminSession)
+            guard settings == original else { throw AppSafetyError.configurationChanged }
+            settings = original.updatingAutoSweepEnabled(true)
+            suppressedAutoSweepFingerprints.removeAll()
+            autoSweepRetryAfter.removeAll()
+            Task { [weak self] in
+                await self?.attemptAutoSweepPreparation()
+            }
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     func configureAdminPIN(_ pin: String, confirmation: String) {
@@ -667,7 +778,20 @@ final class AppModel: ObservableObject {
             else {
                 throw AppSafetyError.configurationChanged
             }
-            container.mainContext.insert(try StoredInvoice(request: request, configuration: configuration))
+            let publicationCursor = PaymentConfirmationCursor(
+                blockNumber: freshness.blockNumber,
+                blockHash: freshness.blockHash
+            )
+            container.mainContext.insert(
+                try StoredInvoice(
+                    request: request,
+                    configuration: configuration,
+                    publicationCursor: publicationCursor,
+                    receiptProfile: settingsSnapshot.merchantReceiptProfile,
+                    receiptNumber: try nextReceiptNumber(),
+                    receiptEligible: true
+                )
+            )
             try saveMainContextOrRollback()
             activeRequest = request
             activeObservation = nil
@@ -721,8 +845,10 @@ final class AppModel: ObservableObject {
                             request: request,
                             configuration: configuration,
                             previousThresholdCursor: invoice.paymentThresholdCursor,
-                            additionalCursors: [invoice.sweepableConfirmationCursor]
-                                .compactMap { $0 }
+                            additionalCursors: Array(Set([
+                                invoice.sweepableConfirmationCursor,
+                                invoice.paymentEvidenceFundingCursor,
+                            ].compactMap { $0 }))
                         )
                     )
                 } catch {
@@ -769,6 +895,17 @@ final class AppModel: ObservableObject {
             for await (token, outcome) in group {
                 backgroundRPCWorkGate.release(token)
                 persistForegroundInvoiceReconciliation(outcome, at: Date())
+                if let invoiceID = outcome.successfulPaymentInvoiceID {
+                    do {
+                        try await resolvePaymentEvidenceIfNeeded(invoiceID: invoiceID)
+                    } catch {
+                        // Payment status remains authoritative. Receipt evidence is retried on the
+                        // next foreground pass and when History explicitly requests the receipt.
+                        if settings.autoSweepEnabled {
+                            autoSweepMessage = "Payment confirmed. Transaction receipt details will retry."
+                        }
+                    }
+                }
                 if nextIndex < candidates.count,
                    let nextToken = backgroundRPCWorkGate.acquire(
                        interactiveOperationBusy: operationBusy
@@ -789,6 +926,7 @@ final class AppModel: ObservableObject {
                 nextIndex += 1
             }
         }
+        await attemptAutoSweepPreparation()
     }
 
     func createOperatorWallet() async {
@@ -892,10 +1030,12 @@ final class AppModel: ObservableObject {
                     receiverImplementation: trustedProfile.receiverImplementation,
                     vault: trustedProfile.create2TestVector.vault
                 )
+                // This scaffold is used only for the chain's native-balance reset check. Model the
+                // actual native asset instead of misrepresenting a deployment address as a token.
                 let resetOnlyToken = try PaymentToken(
-                    address: trustedProfile.factory,
-                    symbol: "RESET",
-                    decimals: 18
+                    address: NativeAsset.address,
+                    symbol: trustedProfile.nativeCurrencySymbol,
+                    decimals: trustedProfile.nativeCurrencyDecimals
                 )
                 let configuration = try TerminalConfiguration(
                     chainID: trustedProfile.chainID,
@@ -1048,13 +1188,22 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func prepareSettlement(for invoices: [StoredInvoice]) async {
+    func prepareSettlement(
+        for invoices: [StoredInvoice],
+        automatic: Bool = false
+    ) async {
         guard !invoices.isEmpty else { return }
+        guard preparedSettlement == nil else { return }
         guard beginExclusiveOperation() else {
-            errorMessage = AppSettlementError.operationInProgress.localizedDescription
+            if automatic {
+                autoSweepMessage = "Auto-sweep preparation is waiting for the current operation."
+            } else {
+                errorMessage = AppSettlementError.operationInProgress.localizedDescription
+            }
             return
         }
         defer { endExclusiveOperation() }
+        let priorGlobalError = errorMessage
         preparedSettlementValidationProof = nil
         do {
             await backgroundRPCWorkGate.waitUntilIdle()
@@ -1167,10 +1316,15 @@ final class AppModel: ObservableObject {
                 confirmationSnapshots: confirmationSnapshots,
                 validatedAt: preparedValidationTimestamp
             )
-            errorMessage = nil
+            if !automatic { errorMessage = nil }
         } catch {
             clearPreparedSettlementState()
-            errorMessage = error.localizedDescription
+            if automatic {
+                errorMessage = priorGlobalError
+                autoSweepMessage = "Auto-sweep preparation was deferred: \(error.localizedDescription)"
+            } else {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -1180,7 +1334,138 @@ final class AppModel: ObservableObject {
             return
         }
         defer { endExclusiveOperation() }
+        if let fingerprint = preparedAutoSweepFingerprint {
+            suppressedAutoSweepFingerprints.insert(fingerprint)
+            let priorSettings = settings
+            let updatedSettings = settings.recordingAutoSweepDismissal(fingerprint)
+            settings = updatedSettings
+            if priorSettings.autoSweepEnabled, !updatedSettings.autoSweepEnabled {
+                autoSweepMessage = "Automatic sweep review was dismissed. Auto-sweep was turned off to avoid losing protected dismissal history. Re-enable it explicitly to start a new automation session."
+            } else {
+                autoSweepMessage = "Automatic sweep review was dismissed. This payment will remain manual until auto-sweep is toggled again."
+            }
+        }
         clearPreparedSettlementState()
+    }
+
+    /// Foreground automation stops at the existing review sheet. Signing and broadcast remain in
+    /// `confirmPreparedSettlement`, which always invokes device-owner authentication.
+    func attemptAutoSweepPreparation(now: Date? = nil) async {
+        guard let attemptToken = autoSweepAttemptGate.acquire(
+            enabled: settings.autoSweepEnabled
+        ) else { return }
+        defer {
+            let shouldRunNewGeneration = autoSweepAttemptGate.release(
+                attemptToken,
+                enabled: settings.autoSweepEnabled
+            )
+            if shouldRunNewGeneration {
+                Task { [weak self] in
+                    await self?.attemptAutoSweepPreparation()
+                }
+            }
+        }
+        guard autoSweepAttemptGate.isCurrent(
+                  attemptToken,
+                  enabled: settings.autoSweepEnabled
+              ),
+              preparedSettlement == nil,
+              !operationBusy,
+              operatorAddress != nil
+        else { return }
+        let currentDate = now ?? validationNow()
+        var attemptedCandidate: AutoSweepCandidate?
+        do {
+            let invoices = try container.mainContext.fetch(FetchDescriptor<StoredInvoice>())
+            let activeIDs = try activeSettlementInvoiceIDs()
+            let liveFingerprints = Set(invoices.compactMap(\.autoSweepFingerprint))
+            autoSweepRetryAfter = autoSweepRetryAfter.filter {
+                liveFingerprints.contains($0.key)
+            }
+            suppressedAutoSweepFingerprints = suppressedAutoSweepFingerprints.intersection(
+                liveFingerprints
+            )
+            guard let candidate = AutoSweepPolicy.selectCandidate(
+                from: invoices,
+                excludingActiveInvoiceIDs: activeIDs,
+                suppressedFingerprints: suppressedAutoSweepFingerprints,
+                retryAfter: autoSweepRetryAfter,
+                now: currentDate
+            ),
+            let invoice = invoices.first(where: { $0.invoiceID == candidate.invoiceID })
+            else { return }
+            attemptedCandidate = candidate
+
+            // A persisted BaseScan hash is never trusted merely because it exists. Re-resolve the
+            // durable publication/funding bracket before automatic preparation can proceed.
+            guard autoSweepAttemptGate.isCurrent(
+                attemptToken,
+                enabled: settings.autoSweepEnabled
+            ) else { return }
+            try await resolvePaymentEvidenceIfNeeded(
+                invoiceID: candidate.invoiceID,
+                forceRevalidation: true
+            )
+            guard autoSweepAttemptGate.isCurrent(
+                      attemptToken,
+                      enabled: settings.autoSweepEnabled
+                  ),
+                  preparedSettlement == nil,
+                  !operationBusy,
+                  invoice.autoSweepFingerprint == candidate.fingerprint
+            else { return }
+
+            guard autoSweepAttemptGate.isCurrent(
+                attemptToken,
+                enabled: settings.autoSweepEnabled
+            ) else { return }
+            await prepareSettlement(for: [invoice], automatic: true)
+            guard autoSweepAttemptGate.isCurrent(
+                attemptToken,
+                enabled: settings.autoSweepEnabled
+            ) else {
+                if preparedSettlement != nil { clearPreparedSettlementState() }
+                autoSweepMessage = nil
+                return
+            }
+            guard preparedSettlement != nil else {
+                let failureDate = now ?? validationNow()
+                autoSweepRetryAfter[candidate.fingerprint] = failureDate.addingTimeInterval(
+                    AutoSweepPolicy.retryDelay
+                )
+                autoSweepMessage = "Auto-sweep preparation was deferred. It will retry while the app is active."
+                return
+            }
+            let candidateInvoiceID = candidate.invoiceID
+            var descriptor = FetchDescriptor<StoredInvoice>(
+                predicate: #Predicate { $0.invoiceID == candidateInvoiceID }
+            )
+            descriptor.fetchLimit = 1
+            let activeIDsAfterPreparation = try activeSettlementInvoiceIDs()
+            guard try container.mainContext.fetch(descriptor).first?.autoSweepFingerprint
+                == candidate.fingerprint,
+                !activeIDsAfterPreparation.contains(candidate.invoiceID)
+            else {
+                clearPreparedSettlementState()
+                return
+            }
+            preparedAutoSweepFingerprint = candidate.fingerprint
+            autoSweepRetryAfter.removeValue(forKey: candidate.fingerprint)
+            autoSweepMessage = "Auto-sweep is ready for review. Device authentication is still required."
+            autoSweepReviewSequence &+= 1
+        } catch {
+            guard autoSweepAttemptGate.isCurrent(
+                attemptToken,
+                enabled: settings.autoSweepEnabled
+            ) else { return }
+            if preparedSettlement != nil { clearPreparedSettlementState() }
+            if let attemptedCandidate {
+                let failureDate = now ?? validationNow()
+                autoSweepRetryAfter[attemptedCandidate.fingerprint] = failureDate
+                    .addingTimeInterval(AutoSweepPolicy.retryDelay)
+            }
+            autoSweepMessage = "Auto-sweep preparation was deferred: \(error.localizedDescription)"
+        }
     }
 
     func confirmPreparedSettlement() async {
@@ -1294,6 +1579,7 @@ final class AppModel: ObservableObject {
             try stored.apply(submission)
             try saveMainContextOrRollback()
             clearPreparedSettlementState()
+            autoSweepMessage = nil
             errorMessage = submission.broadcastError
             await refreshOperatorStatusWithinInteractiveOperation()
         } catch {
@@ -1955,6 +2241,16 @@ final class AppModel: ObservableObject {
         operationBusy = false
     }
 
+    private func nextReceiptNumber() throws -> Int64 {
+        let invoices = try container.mainContext.fetch(FetchDescriptor<StoredInvoice>())
+        let maximum = invoices.map(\.receiptNumber).max() ?? 0
+        let next = maximum.addingReportingOverflow(1)
+        guard !next.overflow, next.partialValue > 0 else {
+            throw AppSettingsError.invalidValue
+        }
+        return next.partialValue
+    }
+
     /// SwiftData keeps failed mutations registered in memory unless the context is explicitly
     /// rolled back. Never allow an invoice total, proof-ledger insert, settlement phase, or
     /// signed-transaction insert from a failed save to hitchhike on a later unrelated save.
@@ -2029,6 +2325,7 @@ final class AppModel: ObservableObject {
         preparedConfiguration = nil
         preparedConfirmationSnapshots = nil
         preparedSettlementValidationProof = nil
+        preparedAutoSweepFingerprint = nil
     }
 
     private func validateSnapshot(
@@ -2069,7 +2366,10 @@ final class AppModel: ObservableObject {
                                 request,
                                 configuration,
                                 cursors.payment,
-                                cursors.sweepable.map { [$0] } ?? []
+                                Array(Set([
+                                    cursors.sweepable,
+                                    cursors.evidence,
+                                ].compactMap { $0 }))
                             )
                         }
                     } catch {
@@ -2089,7 +2389,19 @@ final class AppModel: ObservableObject {
                     self.activeObservation = observation
                     try self.persist(observation)
                     switch observation.status {
-                    case .paid, .overpaid, .expired:
+                    case .paid, .overpaid:
+                        do {
+                            try await self.resolvePaymentEvidenceIfNeeded(
+                                invoiceID: request.invoiceID.hex
+                            )
+                        } catch {
+                            if self.settings.autoSweepEnabled {
+                                self.autoSweepMessage = "Payment confirmed. Transaction receipt details will retry."
+                            }
+                        }
+                        await self.attemptAutoSweepPreparation()
+                        return
+                    case .expired:
                         return
                     default:
                         break
@@ -2130,6 +2442,120 @@ final class AppModel: ObservableObject {
         throw CancellationError()
     }
 
+    func receiptDocument(for invoiceID: String) throws -> ReceiptDocument? {
+        var descriptor = FetchDescriptor<StoredInvoice>(
+            predicate: #Predicate { $0.invoiceID == invoiceID }
+        )
+        descriptor.fetchLimit = 1
+        return try container.mainContext.fetch(descriptor).first?.receiptDocument()
+    }
+
+    func ensureReceiptDocument(for invoiceID: String) async -> ReceiptDocument? {
+        do {
+            try await resolvePaymentEvidenceIfNeeded(
+                invoiceID: invoiceID,
+                forceRevalidation: true
+            )
+            let document = try receiptDocument(for: invoiceID)
+            if document == nil {
+                errorMessage = "The payment is confirmed, but its incoming transaction could not be attributed yet. Settlement transaction hashes are never used as receipt evidence."
+            }
+            return document
+        } catch {
+            errorMessage = "The payment is confirmed, but receipt evidence is unavailable: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    private func resolvePaymentEvidenceIfNeeded(
+        invoiceID: String,
+        forceRevalidation: Bool = false
+    ) async throws {
+        var descriptor = FetchDescriptor<StoredInvoice>(
+            predicate: #Predicate { $0.invoiceID == invoiceID }
+        )
+        descriptor.fetchLimit = 1
+        guard let invoice = try container.mainContext.fetch(descriptor).first,
+              invoice.receiptEligible,
+              let publicationCursor = invoice.publicationCursor,
+              let fundingCursor = invoice.hasIncomingPaymentEvidence
+                ? invoice.paymentEvidenceFundingCursor
+                : invoice.paymentThresholdCursor,
+              forceRevalidation || !invoice.hasIncomingPaymentEvidence
+        else { return }
+        let paymentRequest = try invoice.paymentRequest()
+        let configuration = try invoice.configurationSnapshot()
+        let evidenceRequest = try PaymentEvidenceRequest(
+            chainID: paymentRequest.chainID,
+            receiver: paymentRequest.receiver,
+            asset: paymentRequest.token.address,
+            expectedAmount: paymentRequest.expectedAmount,
+            publicationCursor: publicationCursor,
+            fundingCursor: fundingCursor
+        )
+
+        let token = try await acquireBackgroundRPCWork()
+        let evidence: PaymentTransactionEvidence?
+        do {
+            // Attribution validates both saved anchors, performs a sequential logarithmic balance
+            // search, reads the crossing block/logs, then rechecks all anchors. Give that bounded
+            // proof its own configurable budget instead of the five-second sampling budget.
+            evidence = try await RPCRequestDeadline.withDeadline(
+                after: paymentEvidenceResolutionDeadline
+            ) {
+                try await self.paymentEvidenceResolver(evidenceRequest, configuration)
+            }
+        } catch {
+            backgroundRPCWorkGate.release(token)
+            if let resolutionError = error as? PaymentEvidenceResolutionError,
+               resolutionError.isDefinitiveStoredEvidenceInvalidation {
+                try clearPaymentEvidenceIfMatching(
+                    invoiceID: invoiceID,
+                    publicationCursor: publicationCursor,
+                    fundingCursor: fundingCursor
+                )
+            }
+            throw error
+        }
+        backgroundRPCWorkGate.release(token)
+        guard let evidence else {
+            try clearPaymentEvidenceIfMatching(
+                invoiceID: invoiceID,
+                publicationCursor: publicationCursor,
+                fundingCursor: fundingCursor
+            )
+            return
+        }
+
+        // Re-fetch after RPC work. A monitor or foreground reconciliation may have replaced the
+        // threshold cursor while evidence was being resolved.
+        guard let durable = try container.mainContext.fetch(descriptor).first,
+              durable.receiptEligible,
+              try durable.applyIncomingPaymentEvidence(
+                  evidence,
+                  expectedFundingCursor: fundingCursor
+              )
+        else { return }
+        try saveMainContextOrRollback()
+        autoSweepMessage = nil
+    }
+
+    private func clearPaymentEvidenceIfMatching(
+        invoiceID: String,
+        publicationCursor: PaymentConfirmationCursor,
+        fundingCursor: PaymentConfirmationCursor
+    ) throws {
+        var descriptor = FetchDescriptor<StoredInvoice>(
+            predicate: #Predicate { $0.invoiceID == invoiceID }
+        )
+        descriptor.fetchLimit = 1
+        guard let durable = try container.mainContext.fetch(descriptor).first,
+              durable.publicationCursor == publicationCursor,
+              durable.clearIncomingPaymentEvidence(expectedFundingCursor: fundingCursor)
+        else { return }
+        try saveMainContextOrRollback()
+    }
+
     private func persist(_ observation: PaymentObservation) throws {
         let id = observation.invoiceID.hex
         var descriptor = FetchDescriptor<StoredInvoice>(predicate: #Predicate { $0.invoiceID == id })
@@ -2159,7 +2585,8 @@ final class AppModel: ObservableObject {
         }
         return InvoiceConfirmationCursors(
             payment: invoice.paymentThresholdCursor,
-            sweepable: invoice.sweepableConfirmationCursor
+            sweepable: invoice.sweepableConfirmationCursor,
+            evidence: invoice.paymentEvidenceFundingCursor
         )
     }
 }
@@ -2230,6 +2657,7 @@ private struct ForegroundInvoiceReconciliationCandidate: Sendable {
 private struct InvoiceConfirmationCursors: Sendable {
     let payment: PaymentConfirmationCursor?
     let sweepable: PaymentConfirmationCursor?
+    let evidence: PaymentConfirmationCursor?
 }
 
 private enum ForegroundInvoiceReconciliationOutcome: Sendable {
@@ -2243,6 +2671,16 @@ private enum ForegroundInvoiceReconciliationOutcome: Sendable {
              let .failure(invoiceID, _),
              let .cancelled(invoiceID):
             invoiceID
+        }
+    }
+
+    var successfulPaymentInvoiceID: String? {
+        guard case let .success(invoiceID, observation) = self else { return nil }
+        switch observation.status {
+        case .paid, .overpaid:
+            return invoiceID
+        case .waiting, .partial, .confirming, .expired:
+            return nil
         }
     }
 }

@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.openpasskey"
-version = "0.2.1"
+version = "0.3.0"
 
 kotlin {
     jvmToolchain(17)
@@ -41,7 +41,8 @@ publishing {
                 name.set("OPK ERC-681 SDK")
                 description.set(
                     "Keyless, read-only Kotlin SDK for canonical ERC-681 ERC-20 and native-asset " +
-                        "payment requests, CREATE2 receiver derivation, and payment observation."
+                        "payment requests, CREATE2 receiver derivation, payment observation, and " +
+                        "direct incoming-transaction evidence."
                 )
                 url.set("https://github.com/zhangzhongnan928/ERC681-Terminal")
                 licenses {

@@ -56,6 +56,8 @@ struct LiveTerminalRoot: View {
                 while !Task.isCancelled {
                     await model.reconcileForegroundInvoices()
                     guard !Task.isCancelled else { return }
+                    await model.attemptAutoSweepPreparation()
+                    guard !Task.isCancelled else { return }
                     await model.reconcileSettlements(mode: .periodic)
                     guard !Task.isCancelled else { return }
                     await model.refreshReadiness()

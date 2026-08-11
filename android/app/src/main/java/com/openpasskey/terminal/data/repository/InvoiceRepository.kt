@@ -13,6 +13,7 @@ import com.openpasskey.erc681.ReadOnlyRpcClient
 import com.openpasskey.erc681.RpcException
 import com.openpasskey.erc681.TokenAmount
 import com.openpasskey.terminal.chain.ChainConfig
+import com.openpasskey.terminal.chain.MerchantReceiptProfile
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.chain.selectedPaymentProfile
@@ -24,6 +25,12 @@ import com.openpasskey.terminal.data.db.InvoiceDao
 import com.openpasskey.terminal.data.db.SettlementEventDao
 import com.openpasskey.terminal.data.model.Invoice
 import com.openpasskey.terminal.data.model.InvoiceStatus
+import com.openpasskey.terminal.data.model.hasSameFundingCursor
+import com.openpasskey.terminal.data.model.hasSuccessfulPrimaryPayment
+import com.openpasskey.terminal.data.model.withoutIncomingPaymentEvidence
+import com.openpasskey.terminal.payment.PaymentTransactionEvidence
+import com.openpasskey.terminal.payment.PaymentTransactionResolver
+import com.openpasskey.terminal.payment.Web3jPaymentTransactionResolver
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
 import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
 import com.openpasskey.terminal.wallet.OperatorWalletStore
@@ -45,6 +52,23 @@ internal sealed interface VisibleRpcAttemptResult<out T, out S> {
     data class Stop<S>(val durableState: S) : VisibleRpcAttemptResult<Nothing, S>
     data object Deferred : VisibleRpcAttemptResult<Nothing, Nothing>
 }
+
+private data class PaymentEvidenceAttempt(val evidence: PaymentTransactionEvidence?)
+
+internal sealed interface AutomaticPaymentEvidenceResult {
+    data class Available(val invoice: Invoice?) : AutomaticPaymentEvidenceResult
+    /** Interactive work was active or the bounded background unit reached its deadline. */
+    data object Deferred : AutomaticPaymentEvidenceResult
+    /** The canonical payment cannot be attributed to a printable top-level transaction. */
+    data class Unsupported(val invoice: Invoice?) : AutomaticPaymentEvidenceResult
+}
+
+private fun Invoice.matches(evidence: PaymentTransactionEvidence): Boolean =
+    paymentTxHash?.equals(evidence.txHash, ignoreCase = true) == true &&
+        paymentPayerAddress.equals(evidence.payerAddress, ignoreCase = true) &&
+        paymentBlockNumber == evidence.blockNumber &&
+        paymentBlockHash?.equals(evidence.blockHash, ignoreCase = true) == true &&
+        paidAt == evidence.blockTimestamp
 
 /** Retry transport/reorg failures, but never turn a proven wrong chain into an endless spinner. */
 internal suspend fun <T : Any, S : Any> runVisibleRpcAttempt(
@@ -86,6 +110,8 @@ class InvoiceRepository(
     private val operatorWalletStore: OperatorWalletStore,
     private val lifecycleGate: TerminalLifecycleGate,
     private val rpcWorkCoordinator: RpcWorkCoordinator = RpcWorkCoordinator(),
+    private val paymentTransactionResolver: PaymentTransactionResolver =
+        Web3jPaymentTransactionResolver(),
 ) {
     private val lateInvoiceReconciler = LateInvoiceReconciler(
         invoiceDao,
@@ -194,6 +220,10 @@ class InvoiceRepository(
                         selectedProfile = selectedProfile,
                         operatorAddress = operatorIdentifier,
                         createdAt = System.currentTimeMillis() / 1_000,
+                        publishedAtBlock = checkoutProof.blockNumber,
+                        publishedAtBlockHash = checkoutProof.blockHash,
+                        receiptNumber = invoiceDao.countIssuedInvoices().toLong() + 1,
+                        merchantReceiptProfile = chainConfig.merchantReceiptProfile(),
                     )
                     // Persist the complete request before the UI can display its QR.
                     invoiceDao.insert(invoice)
@@ -284,6 +314,44 @@ class InvoiceRepository(
             } else {
                 null
             }
+            val fundingCursorUnchanged =
+                observation.fundedAtBlock != null &&
+                    observation.fundedAtBlock == invoice.firstDetectedBlock &&
+                    observation.fundedAtBlockHash.equals(
+                        invoice.firstDetectedBlockHash,
+                        ignoreCase = true,
+                    )
+            val evidence = if (
+                observation.fundedAtBlock != null &&
+                !fundingCursorUnchanged &&
+                invoice.receiptAutoPrintEligible
+            ) {
+                val candidate = invoice.copy(
+                    receivedAmount = observation.observedRawUnits.toString(),
+                    status = status,
+                    firstDetectedBlock = observation.fundedAtBlock,
+                    firstDetectedBlockHash = observation.fundedAtBlockHash,
+                    lastObservedBlock = observation.blockNumber,
+                    confirmedAtBlock = confirmedBlock,
+                    paymentTxHash = null,
+                    paymentPayerAddress = null,
+                    paymentBlockNumber = null,
+                    paymentBlockHash = null,
+                    paidAt = null,
+                )
+                try {
+                    rpcWorkCoordinator.withBackgroundOperation {
+                        PaymentEvidenceAttempt(paymentTransactionResolver.resolve(candidate))
+                    }?.evidence
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
+            } else {
+                null
+            }
+            val retainEvidence = observation.fundedAtBlock != null && fundingCursorUnchanged
             val proposed = invoice.copy(
                 receivedAmount = observation.observedRawUnits.toString(),
                 status = status,
@@ -291,6 +359,23 @@ class InvoiceRepository(
                 firstDetectedBlockHash = observation.fundedAtBlockHash,
                 lastObservedBlock = observation.blockNumber,
                 confirmedAtBlock = confirmedBlock,
+                paymentTxHash = if (retainEvidence) invoice.paymentTxHash else evidence?.txHash,
+                paymentPayerAddress = if (retainEvidence) {
+                    invoice.paymentPayerAddress
+                } else {
+                    evidence?.payerAddress
+                },
+                paymentBlockNumber = if (retainEvidence) {
+                    invoice.paymentBlockNumber
+                } else {
+                    evidence?.blockNumber
+                },
+                paymentBlockHash = if (retainEvidence) {
+                    invoice.paymentBlockHash
+                } else {
+                    evidence?.blockHash
+                },
+                paidAt = if (retainEvidence) invoice.paidAt else evidence?.blockTimestamp,
             )
             val (latest, observationPersisted) = lifecycleGate.withExclusiveMutation {
                 val current = invoiceDao.getById(invoice.invoiceId)
@@ -307,6 +392,11 @@ class InvoiceRepository(
                             firstDetectedBlockHash = observation.fundedAtBlockHash,
                             lastObservedBlock = observation.blockNumber,
                             confirmedAtBlock = confirmedBlock,
+                            paymentTxHash = proposed.paymentTxHash,
+                            paymentPayerAddress = proposed.paymentPayerAddress,
+                            paymentBlockNumber = proposed.paymentBlockNumber,
+                            paymentBlockHash = proposed.paymentBlockHash,
+                            paidAt = proposed.paidAt,
                         ) == 1,
                     ) { "Invoice observation changed during its lifecycle mutation" }
                     proposed to true
@@ -342,7 +432,114 @@ class InvoiceRepository(
     }
 
     fun observeRecent(limit: Int): Flow<List<Invoice>> = invoiceDao.observeRecent(limit)
+    fun observeReceiptHistory(): Flow<List<Invoice>> = invoiceDao.observeReceiptHistory()
+    fun observePendingAutoReceipts(): Flow<List<Invoice>> = invoiceDao.observePendingAutoReceipts()
+    fun observeUnprintedReceiptSnapshots(): Flow<List<Invoice>> =
+        invoiceDao.observeUnprintedReceiptSnapshots()
     suspend fun getInvoice(invoiceId: String): Invoice? = invoiceDao.getById(invoiceId)
+
+    /** Revalidate incoming evidence against the current canonical publication and funding anchors. */
+    suspend fun ensurePaymentEvidence(invoiceId: String): Invoice? = withContext(Dispatchers.IO) {
+        val invoice = invoiceDao.getById(invoiceId) ?: return@withContext null
+        if (!invoice.needsPaymentEvidenceValidation()) {
+            return@withContext invoice
+        }
+        val evidence = rpcWorkCoordinator.withInteractiveOperation {
+            paymentTransactionResolver.resolve(invoice)
+        } ?: return@withContext invoice.withoutIncomingPaymentEvidence()
+        persistValidatedPaymentEvidence(invoice, evidence)
+    }
+
+    /**
+     * Automatic printing is cooperative background work. A cashier action always wins, and the
+     * whole resolver unit is capped by [RpcWorkCoordinator]'s background deadline.
+     */
+    internal suspend fun ensurePaymentEvidenceAutomatically(
+        invoiceId: String,
+    ): AutomaticPaymentEvidenceResult = withContext(Dispatchers.IO) {
+        val invoice = invoiceDao.getById(invoiceId)
+            ?: return@withContext AutomaticPaymentEvidenceResult.Available(null)
+        if (!invoice.needsPaymentEvidenceValidation()) {
+            return@withContext AutomaticPaymentEvidenceResult.Available(invoice)
+        }
+        val attempt = try {
+            rpcWorkCoordinator.withBackgroundOperation {
+                PaymentEvidenceAttempt(paymentTransactionResolver.resolve(invoice))
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: NetworkConfigurationException) {
+            return@withContext AutomaticPaymentEvidenceResult.Unsupported(
+                invoice.withoutIncomingPaymentEvidence(),
+            )
+        } catch (_: Exception) {
+            return@withContext AutomaticPaymentEvidenceResult.Deferred
+        } ?: return@withContext AutomaticPaymentEvidenceResult.Deferred
+
+        val evidence = attempt.evidence
+            ?: return@withContext AutomaticPaymentEvidenceResult.Unsupported(
+                invoice.withoutIncomingPaymentEvidence(),
+            )
+        AutomaticPaymentEvidenceResult.Available(
+            persistValidatedPaymentEvidence(invoice, evidence),
+        )
+    }
+
+    private suspend fun persistValidatedPaymentEvidence(
+        invoice: Invoice,
+        evidence: PaymentTransactionEvidence,
+    ): Invoice? {
+        val current = lifecycleGate.withExclusiveMutation {
+            val durable = invoiceDao.getById(invoice.invoiceId)
+                ?: return@withExclusiveMutation null
+            if (!durable.receiptAutoPrintEligible || !durable.hasSuccessfulPrimaryPayment() ||
+                !durable.hasSameFundingCursor(invoice)
+            ) {
+                return@withExclusiveMutation durable.withoutIncomingPaymentEvidence()
+            }
+            if (!durable.matches(evidence)) {
+                invoiceDao.persistPaymentEvidence(
+                    invoiceId = durable.invoiceId,
+                    fundingCursorBlock = requireNotNull(durable.firstDetectedBlock),
+                    fundingCursorHash = requireNotNull(durable.firstDetectedBlockHash),
+                    expectedPaymentTxHash = durable.paymentTxHash,
+                    paymentTxHash = evidence.txHash,
+                    paymentPayerAddress = evidence.payerAddress,
+                    paymentBlockNumber = evidence.blockNumber,
+                    paymentBlockHash = evidence.blockHash,
+                    paidAt = evidence.blockTimestamp,
+                )
+            }
+            invoiceDao.getById(invoice.invoiceId)
+        }
+        return current?.takeIf {
+            it.receiptAutoPrintEligible && it.hasSuccessfulPrimaryPayment() &&
+                it.hasSameFundingCursor(invoice) && it.matches(evidence)
+        } ?: current?.withoutIncomingPaymentEvidence()
+    }
+
+    private fun Invoice.needsPaymentEvidenceValidation(): Boolean =
+        receiptAutoPrintEligible && hasSuccessfulPrimaryPayment() &&
+            firstDetectedBlock != null && firstDetectedBlockHash != null
+
+    suspend fun markReceiptPrinted(
+        invoiceId: String,
+        expectedPaymentTxHash: String,
+        expectedFundingCursorBlock: Long,
+        expectedFundingCursorHash: String,
+        printedAt: Long,
+    ): Boolean =
+        withContext(Dispatchers.IO) {
+            lifecycleGate.withExclusiveMutation {
+                invoiceDao.markReceiptPrinted(
+                    invoiceId = invoiceId,
+                    expectedPaymentTxHash = expectedPaymentTxHash,
+                    expectedFundingCursorBlock = expectedFundingCursorBlock,
+                    expectedFundingCursorHash = expectedFundingCursorHash,
+                    printedAt = printedAt,
+                ) == 1
+            }
+        }
     suspend fun updateStatus(invoiceId: String, status: InvoiceStatus) =
         withContext(Dispatchers.IO) {
             require(status == InvoiceStatus.EXPIRED) { "Only an open invoice can be closed manually" }
@@ -452,6 +649,10 @@ internal fun buildPublishedInvoiceSnapshot(
     selectedProfile: TerminalPaymentProfile,
     operatorAddress: EvmAddress,
     createdAt: Long,
+    publishedAtBlock: Long,
+    publishedAtBlockHash: String,
+    receiptNumber: Long,
+    merchantReceiptProfile: MerchantReceiptProfile,
 ): Invoice {
     val request = protocolInvoice.request
     val token = selectedProfile.token
@@ -468,6 +669,11 @@ internal fun buildPublishedInvoiceSnapshot(
         "Invoice amount decimals do not match the selected payment profile"
     }
     require(!operatorAddress.isZero) { "Invoice operator address must not be zero" }
+    require(publishedAtBlock >= 0) { "Published block must not be negative" }
+    require(BLOCK_HASH_PATTERN.matches(publishedAtBlockHash)) {
+        "Published block hash must be canonical"
+    }
+    require(receiptNumber > 0) { "Receipt number must be positive" }
 
     return Invoice(
         invoiceId = protocolInvoice.invoiceId.hex,
@@ -489,8 +695,16 @@ internal fun buildPublishedInvoiceSnapshot(
         vaultAddress = EvmAddress.parse(selectedProfile.vaultAddress).value,
         confirmationBlocks = selectedProfile.confirmationBlocks,
         erc681Uri = protocolInvoice.erc681Uri,
+        publishedAtBlock = publishedAtBlock,
+        publishedAtBlockHash = publishedAtBlockHash.lowercase(),
+        receiptNumber = receiptNumber,
+        receiptMerchantName = merchantReceiptProfile.name,
+        receiptMerchantAbn = merchantReceiptProfile.abn,
+        receiptAutoPrintEligible = true,
     )
 }
+
+private val BLOCK_HASH_PATTERN = Regex("^0x[0-9a-fA-F]{64}$")
 
 internal suspend fun selectPaymentProfileExclusively(
     lifecycleGate: TerminalLifecycleGate,

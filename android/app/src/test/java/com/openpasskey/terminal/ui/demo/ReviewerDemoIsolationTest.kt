@@ -79,6 +79,8 @@ class ReviewerDemoIsolationTest {
             "app.terminalResetCoordinator",
             "app.terminalLifecycleGate",
             "app.rpcWorkCoordinator",
+            "app.receiptPrinter",
+            "app.receiptCoordinator",
         )
 
         assertTrue(activityBody.contains("ColdLaunchRoot("))

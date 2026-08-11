@@ -13,6 +13,8 @@ import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.lifecycle.TerminalResetCoordinator
 import com.openpasskey.terminal.lifecycle.RpcOperatorNativeBalanceReader
 import com.openpasskey.terminal.rpc.RpcWorkCoordinator
+import com.openpasskey.terminal.printing.IminReceiptPrinter
+import com.openpasskey.terminal.printing.ReceiptCoordinator
 
 class OPKTerminalApp : Application() {
     val chainConfig by lazy { ChainConfig(this) }
@@ -21,6 +23,7 @@ class OPKTerminalApp : Application() {
     val adminPinStore by lazy { AdminPinStore(this) }
     val terminalLifecycleGate by lazy { TerminalLifecycleGate() }
     val rpcWorkCoordinator by lazy { RpcWorkCoordinator() }
+    val receiptPrinter by lazy { IminReceiptPrinter(this) }
     val terminalProvisioner by lazy {
         TerminalProvisioner(
             chainConfig::snapshot,
@@ -50,6 +53,9 @@ class OPKTerminalApp : Application() {
             terminalLifecycleGate,
             rpcWorkCoordinator,
         )
+    }
+    val receiptCoordinator by lazy {
+        ReceiptCoordinator(invoiceRepository, receiptPrinter, chainConfig)
     }
     val settlementRepository by lazy {
         SettlementRepository(

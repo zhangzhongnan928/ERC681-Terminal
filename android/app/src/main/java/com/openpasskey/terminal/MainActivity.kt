@@ -40,7 +40,11 @@ private object DefaultLiveTerminalStackFactory : LiveTerminalStackFactory {
     ): LiveTerminalStack {
         val invoiceViewModel = ViewModelProvider(
             activity,
-            InvoiceViewModel.Factory(app.invoiceRepository, app.chainConfig),
+            InvoiceViewModel.Factory(
+                app.invoiceRepository,
+                app.chainConfig,
+                app.receiptCoordinator,
+            ),
         )[InvoiceViewModel::class.java]
         val settingsViewModel = ViewModelProvider(
             activity,
@@ -56,7 +60,7 @@ private object DefaultLiveTerminalStackFactory : LiveTerminalStackFactory {
         )[SettingsViewModel::class.java]
         val settlementViewModel = ViewModelProvider(
             activity,
-            SettlementViewModel.Factory(app.settlementRepository),
+            SettlementViewModel.Factory(app.settlementRepository, app.chainConfig),
         )[SettlementViewModel::class.java]
         return LiveTerminalStack(
             invoiceViewModel = invoiceViewModel,

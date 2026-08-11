@@ -7,6 +7,40 @@ import java.lang.reflect.Proxy
 
 class InvoiceDatabaseMigrationTest {
     @Test
+    fun v8AddsStableMerchantReceiptIdentity() {
+        val statements = mutableListOf<String>()
+        val database = recordingDatabase(statements)
+
+        InvoiceDatabase.MIGRATION_7_8.migrate(database)
+
+        assertTrue(statements.any {
+            "receiptMerchantName TEXT NOT NULL DEFAULT 'OPK Terminal'" in it
+        })
+        assertTrue(statements.any {
+            "receiptMerchantAbn TEXT NOT NULL DEFAULT ''" in it
+        })
+    }
+
+    @Test
+    fun v7PersistsIncomingPaymentAndStableReceiptStateWithoutEnablingLegacyAutoPrint() {
+        val statements = mutableListOf<String>()
+        val database = recordingDatabase(statements)
+
+        InvoiceDatabase.MIGRATION_6_7.migrate(database)
+
+        assertTrue(statements.any { "publishedAtBlock INTEGER" in it })
+        assertTrue(statements.any { "paymentTxHash TEXT" in it })
+        assertTrue(statements.any { "paymentBlockHash TEXT" in it })
+        assertTrue(statements.any { "paidAt INTEGER" in it })
+        assertTrue(statements.any { "receiptNumber INTEGER NOT NULL DEFAULT 0" in it })
+        assertTrue(statements.any {
+            "receiptAutoPrintEligible INTEGER NOT NULL DEFAULT 0" in it
+        })
+        assertTrue(statements.any { "receiptPrintedAt INTEGER" in it })
+        assertTrue(statements.any { "receiptAutoPrintEligible = 0" in it })
+    }
+
+    @Test
     fun v6PersistsTheInvoiceOperatorSnapshot() {
         val statements = mutableListOf<String>()
         val database = recordingDatabase(statements)

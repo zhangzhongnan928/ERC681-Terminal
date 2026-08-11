@@ -157,8 +157,8 @@ class CheckoutScreenTest {
             .assertIsEnabled()
             .performClick()
         composeRule.onNodeWithText(
-            "AUD · Base Sepolia\nVault 0x4444…4444 · Token 0x5555…5555",
-        ).assertIsDisplayed().performClick()
+            "AUD · Base Sepolia\nVault 0x4444…4444 · Asset 0x5555…5555",
+        ).performScrollTo().assertIsDisplayed().performClick()
 
         composeRule.runOnIdle { assertEquals(second, selected) }
         composeRule.onNodeWithText(

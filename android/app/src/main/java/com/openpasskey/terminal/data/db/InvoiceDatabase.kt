@@ -12,7 +12,7 @@ import com.openpasskey.terminal.data.model.SettlementTransaction
 
 @Database(
     entities = [Invoice::class, SettlementTransaction::class, SettlementEvent::class],
-    version = 6,
+    version = 8,
     exportSchema = true
 )
 abstract class InvoiceDatabase : RoomDatabase() {
@@ -176,6 +176,41 @@ abstract class InvoiceDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE invoices ADD COLUMN publishedAtBlock INTEGER")
+                database.execSQL("ALTER TABLE invoices ADD COLUMN publishedAtBlockHash TEXT")
+                database.execSQL("ALTER TABLE invoices ADD COLUMN paymentTxHash TEXT")
+                database.execSQL("ALTER TABLE invoices ADD COLUMN paymentPayerAddress TEXT")
+                database.execSQL("ALTER TABLE invoices ADD COLUMN paymentBlockNumber INTEGER")
+                database.execSQL("ALTER TABLE invoices ADD COLUMN paymentBlockHash TEXT")
+                database.execSQL("ALTER TABLE invoices ADD COLUMN paidAt INTEGER")
+                database.execSQL(
+                    "ALTER TABLE invoices ADD COLUMN receiptNumber INTEGER NOT NULL DEFAULT 0"
+                )
+                database.execSQL(
+                    "ALTER TABLE invoices ADD COLUMN receiptAutoPrintEligible INTEGER NOT NULL DEFAULT 0"
+                )
+                database.execSQL("ALTER TABLE invoices ADD COLUMN receiptPrintedAt INTEGER")
+                // Old rows do not have a trustworthy incoming payment hash. They remain visible and
+                // settleable, but must never auto-print a BaseScan link to the sweep transaction.
+                database.execSQL("UPDATE invoices SET receiptAutoPrintEligible = 0")
+            }
+        }
+
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                // Preserve the receipt identity used before merchant profile fields existed.
+                database.execSQL(
+                    "ALTER TABLE invoices ADD COLUMN receiptMerchantName " +
+                        "TEXT NOT NULL DEFAULT 'OPK Terminal'"
+                )
+                database.execSQL(
+                    "ALTER TABLE invoices ADD COLUMN receiptMerchantAbn TEXT NOT NULL DEFAULT ''"
+                )
+            }
+        }
+
         /**
          * The single migration registry used by both the production builder and migration tests.
          * Keeping registration here prevents a tested migration from being omitted at app startup.
@@ -186,6 +221,8 @@ abstract class InvoiceDatabase : RoomDatabase() {
             MIGRATION_3_4,
             MIGRATION_4_5,
             MIGRATION_5_6,
+            MIGRATION_6_7,
+            MIGRATION_7_8,
         )
 
         fun getInstance(context: Context): InvoiceDatabase = INSTANCE ?: synchronized(this) {

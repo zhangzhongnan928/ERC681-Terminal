@@ -22,6 +22,51 @@ interface InvoiceDao {
     @Query("SELECT * FROM invoices ORDER BY createdAt DESC LIMIT :limit")
     fun observeRecent(limit: Int): Flow<List<Invoice>>
 
+    /**
+     * Complete receipt history. This deliberately excludes open, expired, and migrated rows
+     * instead of letting unrelated recent invoices hide older reprintable payments.
+     */
+    @Query(
+        """SELECT * FROM invoices
+           WHERE receiptAutoPrintEligible = 1
+             AND receiptNumber > 0
+             AND firstDetectedBlock IS NOT NULL
+             AND status IN (
+                 'PAID',
+                 'OVERPAID',
+                 'PARTIALLY_SETTLED',
+                 'LATE_PAYMENT_CONFIRMING',
+                 'LATE_PAYMENT_READY',
+                 'SETTLED',
+                 'SETTLEMENT_REVIEW_REQUIRED'
+             )
+           ORDER BY COALESCE(paidAt, createdAt) DESC, receiptNumber DESC, invoiceId DESC"""
+    )
+    fun observeReceiptHistory(): Flow<List<Invoice>>
+
+    /** Durable automatic-print queue. A successful callback removes a row by setting printedAt. */
+    @Query(
+        """SELECT * FROM invoices
+           WHERE receiptAutoPrintEligible = 1
+             AND receiptPrintedAt IS NULL
+             AND status NOT IN ('WAITING', 'PARTIAL', 'CONFIRMING', 'EXPIRED')
+           ORDER BY COALESCE(paidAt, createdAt) ASC, invoiceId ASC"""
+    )
+    fun observePendingAutoReceipts(): Flow<List<Invoice>>
+
+    /**
+     * Complete liveness set for durable print claims. Status is deliberately unrestricted: a
+     * canonical receipt may temporarily return to CONFIRMING and later become printable again.
+     */
+    @Query(
+        """SELECT * FROM invoices
+           WHERE receiptAutoPrintEligible = 1
+             AND receiptNumber > 0
+             AND receiptPrintedAt IS NULL
+           ORDER BY receiptNumber ASC, invoiceId ASC"""
+    )
+    fun observeUnprintedReceiptSnapshots(): Flow<List<Invoice>>
+
     @Query("SELECT * FROM invoices WHERE status IN (:statuses) ORDER BY createdAt ASC")
     suspend fun getByStatuses(statuses: List<InvoiceStatus>): List<Invoice>
 
@@ -123,7 +168,18 @@ interface InvoiceDao {
                firstDetectedBlock = :firstDetectedBlock,
                firstDetectedBlockHash = :firstDetectedBlockHash,
                lastObservedBlock = :lastObservedBlock,
-               confirmedAtBlock = :confirmedAtBlock
+               confirmedAtBlock = :confirmedAtBlock,
+               paymentTxHash = :paymentTxHash,
+               paymentPayerAddress = :paymentPayerAddress,
+               paymentBlockNumber = :paymentBlockNumber,
+               paymentBlockHash = :paymentBlockHash,
+               paidAt = :paidAt,
+               receiptPrintedAt = CASE
+                   WHEN firstDetectedBlock IS :firstDetectedBlock
+                    AND LOWER(firstDetectedBlockHash) IS LOWER(:firstDetectedBlockHash)
+                   THEN receiptPrintedAt
+                   ELSE NULL
+               END
            WHERE invoiceId = :invoiceId
              AND status IN ('WAITING', 'PARTIAL', 'CONFIRMING')"""
     )
@@ -134,7 +190,85 @@ interface InvoiceDao {
         firstDetectedBlock: Long?,
         firstDetectedBlockHash: String?,
         lastObservedBlock: Long?,
-        confirmedAtBlock: Long?
+        confirmedAtBlock: Long?,
+        paymentTxHash: String?,
+        paymentPayerAddress: String?,
+        paymentBlockNumber: Long?,
+        paymentBlockHash: String?,
+        paidAt: Long?,
+    ): Int
+
+    /** Replace incoming-payment proof only while the saved funding cursor and old hash are unchanged. */
+    @Query(
+        """UPDATE invoices
+           SET paymentTxHash = :paymentTxHash,
+               paymentPayerAddress = :paymentPayerAddress,
+               paymentBlockNumber = :paymentBlockNumber,
+               paymentBlockHash = :paymentBlockHash,
+               paidAt = :paidAt,
+               receiptPrintedAt = CASE
+                   WHEN LOWER(paymentTxHash) = LOWER(:paymentTxHash)
+                    AND paymentBlockNumber = :paymentBlockNumber
+                    AND LOWER(paymentBlockHash) = LOWER(:paymentBlockHash)
+                   THEN receiptPrintedAt
+                   ELSE NULL
+               END
+           WHERE invoiceId = :invoiceId
+             AND receiptAutoPrintEligible = 1
+             AND status IN (
+                 'PAID',
+                 'OVERPAID',
+                 'PARTIALLY_SETTLED',
+                 'LATE_PAYMENT_CONFIRMING',
+                 'LATE_PAYMENT_READY',
+                 'SETTLED',
+                 'SETTLEMENT_REVIEW_REQUIRED'
+             )
+             AND firstDetectedBlock = :fundingCursorBlock
+             AND LOWER(firstDetectedBlockHash) = LOWER(:fundingCursorHash)
+             AND (
+                 (paymentTxHash IS NULL AND :expectedPaymentTxHash IS NULL)
+                 OR LOWER(paymentTxHash) = LOWER(:expectedPaymentTxHash)
+             )"""
+    )
+    suspend fun persistPaymentEvidence(
+        invoiceId: String,
+        fundingCursorBlock: Long,
+        fundingCursorHash: String,
+        expectedPaymentTxHash: String?,
+        paymentTxHash: String,
+        paymentPayerAddress: String?,
+        paymentBlockNumber: Long,
+        paymentBlockHash: String,
+        paidAt: Long,
+    ): Int
+
+    @Query(
+        """UPDATE invoices
+           SET receiptPrintedAt = :printedAt
+           WHERE invoiceId = :invoiceId
+             AND receiptAutoPrintEligible = 1
+             AND status IN (
+                 'PAID',
+                 'OVERPAID',
+                 'PARTIALLY_SETTLED',
+                 'LATE_PAYMENT_CONFIRMING',
+                 'LATE_PAYMENT_READY',
+                 'SETTLED',
+                 'SETTLEMENT_REVIEW_REQUIRED'
+             )
+             AND LOWER(paymentTxHash) = LOWER(:expectedPaymentTxHash)
+             AND firstDetectedBlock = :expectedFundingCursorBlock
+             AND LOWER(firstDetectedBlockHash) = LOWER(:expectedFundingCursorHash)
+             AND paidAt IS NOT NULL
+             AND receiptPrintedAt IS NULL"""
+    )
+    suspend fun markReceiptPrinted(
+        invoiceId: String,
+        expectedPaymentTxHash: String,
+        expectedFundingCursorBlock: Long,
+        expectedFundingCursorHash: String,
+        printedAt: Long,
     ): Int
 
     @Query(
@@ -144,7 +278,31 @@ interface InvoiceDao {
                firstDetectedBlock = :firstDetectedBlock,
                firstDetectedBlockHash = :firstDetectedBlockHash,
                lastObservedBlock = :lastObservedBlock,
-               confirmedAtBlock = :confirmedAtBlock
+               confirmedAtBlock = :confirmedAtBlock,
+               paymentTxHash = CASE
+                   WHEN firstDetectedBlock IS :firstDetectedBlock
+                    AND LOWER(firstDetectedBlockHash) IS LOWER(:firstDetectedBlockHash)
+                   THEN paymentTxHash ELSE NULL END,
+               paymentPayerAddress = CASE
+                   WHEN firstDetectedBlock IS :firstDetectedBlock
+                    AND LOWER(firstDetectedBlockHash) IS LOWER(:firstDetectedBlockHash)
+                   THEN paymentPayerAddress ELSE NULL END,
+               paymentBlockNumber = CASE
+                   WHEN firstDetectedBlock IS :firstDetectedBlock
+                    AND LOWER(firstDetectedBlockHash) IS LOWER(:firstDetectedBlockHash)
+                   THEN paymentBlockNumber ELSE NULL END,
+               paymentBlockHash = CASE
+                   WHEN firstDetectedBlock IS :firstDetectedBlock
+                    AND LOWER(firstDetectedBlockHash) IS LOWER(:firstDetectedBlockHash)
+                   THEN paymentBlockHash ELSE NULL END,
+               paidAt = CASE
+                   WHEN firstDetectedBlock IS :firstDetectedBlock
+                    AND LOWER(firstDetectedBlockHash) IS LOWER(:firstDetectedBlockHash)
+                   THEN paidAt ELSE NULL END,
+               receiptPrintedAt = CASE
+                   WHEN firstDetectedBlock IS :firstDetectedBlock
+                    AND LOWER(firstDetectedBlockHash) IS LOWER(:firstDetectedBlockHash)
+                   THEN receiptPrintedAt ELSE NULL END
            WHERE invoiceId = :invoiceId
              AND status = 'EXPIRED'"""
     )
@@ -165,7 +323,31 @@ interface InvoiceDao {
                firstDetectedBlock = :firstDetectedBlock,
                firstDetectedBlockHash = :firstDetectedBlockHash,
                lastObservedBlock = :lastObservedBlock,
-               confirmedAtBlock = :confirmedAtBlock
+               confirmedAtBlock = :confirmedAtBlock,
+               paymentTxHash = CASE
+                   WHEN firstDetectedBlock IS :firstDetectedBlock
+                    AND LOWER(firstDetectedBlockHash) IS LOWER(:firstDetectedBlockHash)
+                   THEN paymentTxHash ELSE NULL END,
+               paymentPayerAddress = CASE
+                   WHEN firstDetectedBlock IS :firstDetectedBlock
+                    AND LOWER(firstDetectedBlockHash) IS LOWER(:firstDetectedBlockHash)
+                   THEN paymentPayerAddress ELSE NULL END,
+               paymentBlockNumber = CASE
+                   WHEN firstDetectedBlock IS :firstDetectedBlock
+                    AND LOWER(firstDetectedBlockHash) IS LOWER(:firstDetectedBlockHash)
+                   THEN paymentBlockNumber ELSE NULL END,
+               paymentBlockHash = CASE
+                   WHEN firstDetectedBlock IS :firstDetectedBlock
+                    AND LOWER(firstDetectedBlockHash) IS LOWER(:firstDetectedBlockHash)
+                   THEN paymentBlockHash ELSE NULL END,
+               paidAt = CASE
+                   WHEN firstDetectedBlock IS :firstDetectedBlock
+                    AND LOWER(firstDetectedBlockHash) IS LOWER(:firstDetectedBlockHash)
+                   THEN paidAt ELSE NULL END,
+               receiptPrintedAt = CASE
+                   WHEN firstDetectedBlock IS :firstDetectedBlock
+                    AND LOWER(firstDetectedBlockHash) IS LOWER(:firstDetectedBlockHash)
+                   THEN receiptPrintedAt ELSE NULL END
            WHERE invoiceId = :invoiceId
              AND status = :sourceStatus
              AND settlementId IS NULL"""

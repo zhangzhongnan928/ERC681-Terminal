@@ -37,7 +37,7 @@ used only for configuration and contract calls; it never appears in the native c
 QR.
 
 Confirmation depth is deliberately not a v1 QR field. The first route on an EVM network starts at
-that network's compiled default (one block on Base Sepolia). After provisioning, a merchant
+that network's compiled default (one block on Base Mainnet and Base Sepolia). After provisioning, a merchant
 administrator can choose a value from that network's compiled minimum through 64 in the terminal's
 PIN-protected Admin/setup controls. All profiles on the same chain share that network policy, and a
 new profile on an already configured chain inherits its current value. The value is snapshotted into
@@ -52,19 +52,23 @@ Swift and Kotlin catalogs all enforce a maximum of 32 profiles per terminal.
 
 ## Supported deployment
 
-The native apps enable only Base Sepolia (`84532`) in this release. They own an immutable per-chain
-profile containing the default RPC endpoint, network name, protocol version, factory, receiver
+The native apps enable Base Mainnet (`8453`) and Base Sepolia (`84532`) in this release. Base
+Mainnet is the default for a fresh, unprovisioned app; Base Sepolia is an explicit test-network
+choice in protected Advanced manual setup. An existing provisioned profile is never rewritten or
+translated to another chain because its vault, asset, operator authorization, and invoice history
+are chain-specific. The apps own an immutable per-chain profile containing the default RPC endpoint, network name, protocol version, factory, receiver
 implementation, vault runtime hash, CREATE2 vector, testnet flag, native-currency metadata,
 minimum/default confirmation policy, and gas-reserve policy. Persisted settings are never a source
-of those trust anchors or minimums. Base Sepolia's compiled confirmation minimum and fresh-network
-default are both one block. The PIN-protected merchant control can select any allowed value but may
-never reduce a network below the compiled floor. Base Mainnet (`8453`) and all other chains are
-rejected before contacting an RPC endpoint. A published Base Mainnet OPK Protocol 1.6 Route A
-deployment exists, but Mainnet remains disabled until an explicit product decision ships its
-reviewed operational RPC, finality, native-currency, gas-reserve, deployment-pin, and CREATE2
-policy. The checked-in enabled cross-platform constants are in
+of those trust anchors or minimums. Both enabled Base networks have a one-block compiled minimum
+and fresh-network default. The PIN-protected merchant control can select any allowed value but may
+never reduce a network below the compiled floor. Every other chain is rejected before contacting
+an RPC endpoint. The checked-in enabled cross-platform constants are in
 `conformance/opk-terminal-networks-v1.json`; the reusable SDK payment-profile catalogs remain
 EVM-generic.
+
+The compiled `https://mainnet.base.org` and `https://sepolia.base.org` trust endpoints are public
+and rate-limited. A sustained production deployment should use an approved HTTPS operational RPC
+while retaining the compiled endpoint for independent chain and deployment provenance checks.
 
 The terminal reads the scanned vault's factory, the pinned factory's implementation, and
 payment-asset whitelist membership. For an ERC-20 it also reads contract code, decimals, and
@@ -85,8 +89,9 @@ operational RPC is independently
 chain-checked for current EOA authorization, exact balances, simulation, and broadcast.
 
 Receiver derivation uses the existing CREATE2 formula, but a receiver commits to the factory and
-receiver implementation. This release consumes the published Base Sepolia Route A constants and
-matching 1.6 CREATE2 vector, so its receiver addresses differ from the previous stack. Any future
+receiver implementation. This release consumes the published Base Mainnet and Base Sepolia Route A
+constants and their matching 1.6 CREATE2 vectors, so receiver addresses differ by network and from
+the previous stack. Any future
 fresh stack must likewise publish and ship new per-chain constants and a matching vector before it
 can be enabled. Address preservation applies only to a beacon upgrade of the same stack.
 
@@ -106,7 +111,7 @@ the selected payment profile:
   required native capability validate;
 - the EOA is that profile's vault owner or an authorized operator; and
 - its native balance on that profile's chain meets the compiled network reserve
-  (`100000000000000` wei, or `0.0001 ETH`, on Base Sepolia); and
+  (`100000000000000` wei, or `0.0001 ETH`, on Base Mainnet and Base Sepolia); and
 - the profile's confirmation depth meets that network's compiled minimum.
 
 The same device EOA can be authorized by multiple vaults and has the same address on every EVM

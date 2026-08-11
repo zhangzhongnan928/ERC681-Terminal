@@ -235,7 +235,18 @@ class TerminalLifecycleGateTest {
             },
         )
 
-        assertEquals(balances(BigInteger.ZERO, BigInteger.ZERO), reader.read(OPERATOR))
+        assertEquals(
+            KnownChainPolicy.enabledProfiles().map { enabled ->
+                OperatorNativeBalances(
+                    networkName = enabled.networkName,
+                    chainId = enabled.chainId,
+                    nativeCurrencySymbol = enabled.nativeCurrencySymbol,
+                    latest = BigInteger.ZERO,
+                    pending = BigInteger.ZERO,
+                )
+            },
+            reader.read(OPERATOR),
+        )
         assertEquals(
             KnownChainPolicy.enabledProfiles().map { it.rpcUrl }.toSet(),
             openedUrls.toSet(),

@@ -62,20 +62,20 @@ physical-device test before release; manual entry remains available when camera 
 
 ## Configuration and safety
 
-The sample defaults to the published Base Sepolia OPK Protocol 1.6 Route A deployment trust
-anchors:
+Fresh, cleared, and recovered-unreadable setup defaults to the published Base Mainnet OPK Protocol
+1.6 Route A deployment trust anchors:
 
-- Chain ID: `84532`
-- Factory: `0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f`
-- Receiver implementation: `0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18`
-- Deployed vault-proxy runtime hash: `0x32ad6b6076f449fbc39e115afc2645c65071280af2d461dc315544ac0a1d7e58`
+- Chain ID: `8453`
+- Factory: `0x5418ab1790eaf96a20e26146c5b7765cb99328da`
+- Receiver implementation: `0xe6393f6176865cc62cd08d8b8f0c38d35af55254`
+- Deployed vault-proxy runtime hash: `0x8c3a56b5606e44613d50c898acf67a3689afc478b47e9a38326699b0df111cbd`
 - CREATE2 example vault: `0x1111111111111111111111111111111111111111`
-- AUD token: `0x7ffba642bc902880a737cb1c18a4e9540879e211`, 18 decimals
 - Native asset identifier: `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` (`ETH`, 18 decimals)
 
-The proxy hash is over exact on-chain bytecode with the Base Sepolia beacon immutable embedded;
-the zero-immutable artifact hash emitted by the upstream browser deployer is not valid for raw
-`eth_getCode` verification.
+The proxy hash is over exact on-chain bytecode with the network's beacon immutable embedded. The
+zero-immutable artifact hash emitted by the upstream browser deployer is not valid for raw
+`eth_getCode` verification. Base Sepolia remains available as an explicit testnet choice in
+protected Advanced manual setup and retains its own independent pins and CREATE2 vector.
 
 The example vault is a deterministic off-chain vector, not a deployed merchant vault. The app
 remains unprovisioned until a portal QR identifies a compatible live vault and whitelisted payment
@@ -84,13 +84,12 @@ asset that pass the complete on-chain validation flow. The shipped profile uses 
 `NATIVE_ASSET()` with the exact sentinel and whitelists it; the whitelist read alone is not the
 capability proof.
 
-Base Sepolia is the only network enabled in the production app in this release. The Swift
-payment-profile catalog remains EVM-generic, but Base Mainnet (`8453`) and other chains are rejected
-before RPC use. Mainnet has a published OPK Protocol 1.6 Route A deployment but remains disabled
-pending explicit product enablement, a reviewed operational RPC policy, and addition of its
-deployment pins, CREATE2 vector, finality policy, native-currency metadata, and operator gas reserve
-to the immutable app registry. Multiple
-vault/payment-asset profiles
+Base Mainnet (`8453`) and Base Sepolia (`84532`) are enabled in this release. The Swift
+payment-profile catalog remains EVM-generic, but every other chain is rejected before RPC use.
+Existing provisioned profiles and immutable invoice history are never translated between chains.
+The compiled public Base RPC endpoints establish network identity but are rate-limited and are not
+production-capacity guarantees, so a reviewed operational provider should be provisioned for live
+merchant volume. Multiple vault/payment-asset profiles
 can coexist, while one selected profile supplies the exact configuration snapshot saved with each
 invoice and validated before presenting a QR. RPC
 URLs must use HTTPS, except loopback HTTP for local development, and embedded URL credentials and
@@ -127,8 +126,7 @@ is the terminal identity supplied as `terminalIdentifier` for every new invoice.
 authorization and native-token gas funding are checked separately before settlement; they are not
 inputs to invoice or receiver derivation. Readiness is refreshed for the selected profile whenever
 the merchant switches currency/network. The same EOA is authorized per vault and funded per chain
-to that network's compiled minimum reserve (`0.0001 ETH` on Base Sepolia; future enabled networks
-may use a different native currency, decimals, and reserve).
+to that network's compiled minimum reserve (`0.0001 ETH` on Base Mainnet and Base Sepolia).
 Destructive reset checks native balances on every network supported by the app, including a network
 whose last local profile was removed. Funded and unreachable-network reset failures name the
 network and chain ID. The full operator address remains available in Settings with copy and

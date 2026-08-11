@@ -1,18 +1,20 @@
 package com.openpasskey.terminal.ui.demo
 
+import com.openpasskey.erc681.Erc681Codec
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ReviewerDemoContractTest {
     @Test
-    fun safetyLabelsAndSampleUriAreExplicit() {
+    fun safetyLabelsAndNonPaymentMarkerAreExplicit() {
         assertEquals("OFFLINE DEMO", ReviewerDemoCopy.DEMO_LABEL)
-        assertEquals("BASE SEPOLIA TESTNET", ReviewerDemoCopy.NETWORK_LABEL)
+        assertEquals("BASE MAINNET FORMAT", ReviewerDemoCopy.NETWORK_LABEL)
         assertEquals("NO REAL FUNDS", ReviewerDemoCopy.FUNDS_LABEL)
         assertEquals(
-            "OFFLINE DEMO · BASE SEPOLIA TESTNET · SIMULATED · NO NETWORK · NO REAL FUNDS",
+            "OFFLINE DEMO · BASE MAINNET FORMAT · SIMULATED · NO NETWORK · NO REAL FUNDS",
             ReviewerDemoCopy.BANNER_LABEL,
         )
         assertTrue(ReviewerDemoCopy.SAFETY_EXPLANATION.startsWith("Offline product tour."))
@@ -21,10 +23,12 @@ class ReviewerDemoContractTest {
         assertEquals("1.00", ReviewerDemoCopy.SAMPLE_AMOUNT)
         assertEquals("USDC", ReviewerDemoCopy.SAMPLE_TOKEN)
         assertEquals(
-            "ethereum:0x1111111111111111111111111111111111111111@84532/transfer" +
-                "?address=0x2222222222222222222222222222222222222222&uint256=1000000",
-            ReviewerDemoCopy.SAMPLE_ERC681_URI,
+            "opk-demo:v1?network=base-mainnet&chainId=8453&simulated=true",
+            ReviewerDemoCopy.SAMPLE_DEMO_MARKER,
         )
+        assertThrows(IllegalArgumentException::class.java) {
+            Erc681Codec.parse(ReviewerDemoCopy.SAMPLE_DEMO_MARKER)
+        }
     }
 
     @Test

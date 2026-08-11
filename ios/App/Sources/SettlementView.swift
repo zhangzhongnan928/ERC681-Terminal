@@ -13,6 +13,13 @@ struct SettlementView: View {
             List {
                 operatorSection
 
+                if let message = model.autoSweepMessage {
+                    Section("Automatic sweep") {
+                        Label(message, systemImage: "arrow.triangle.2.circlepath")
+                            .font(.footnote)
+                    }
+                }
+
                 if groups.isEmpty {
                     Section {
                         ContentUnavailableView(

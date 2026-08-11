@@ -23,6 +23,7 @@ From `android/`:
 
 ```sh
 ./gradlew --no-daemon --rerun-tasks \
+  :verifyIminPrinterArtifact \
   :app:lintRelease \
   :app:bundleRelease \
   -PopkPlaySigning=true

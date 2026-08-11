@@ -20,16 +20,19 @@ struct AppPaymentProfile: Codable, Equatable, Identifiable {
     var provisionedOperatorAddress: String?
 
     init(
-        rpcURL: String = "https://sepolia.base.org",
-        chainID: String = "84532",
-        protocolVersion: String = OPKProtocolVersion.v1_6.rawValue,
-        factory: String = "0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f",
-        receiverImplementation: String = "0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18",
-        vault: String = "0x1111111111111111111111111111111111111111",
-        tokenAddress: String = "0x7ffba642bc902880a737cb1c18a4e9540879e211",
-        tokenSymbol: String = "AUD",
-        tokenDecimals: String = "18",
-        confirmationBlocks: String = "1",
+        rpcURL: String = TerminalKnownChainProfile.baseMainnet.rpcEndpoint.absoluteString,
+        chainID: String = String(TerminalKnownChainProfile.baseMainnet.chainID),
+        protocolVersion: String = TerminalKnownChainProfile.baseMainnet.protocolVersion.rawValue,
+        factory: String = TerminalKnownChainProfile.baseMainnet.factory.hex,
+        receiverImplementation: String = TerminalKnownChainProfile.baseMainnet
+            .receiverImplementation.hex,
+        vault: String = TerminalKnownChainProfile.baseMainnet.create2TestVector.vault.hex,
+        tokenAddress: String = NativeAsset.address.hex,
+        tokenSymbol: String = TerminalKnownChainProfile.baseMainnet.nativeCurrencySymbol,
+        tokenDecimals: String = String(TerminalKnownChainProfile.baseMainnet.nativeCurrencyDecimals),
+        confirmationBlocks: String = String(
+            TerminalKnownChainProfile.baseMainnet.defaultConfirmationBlocks
+        ),
         provisionedOperatorAddress: String? = nil
     ) {
         self.rpcURL = rpcURL
@@ -262,7 +265,12 @@ struct AppSettingsMigrationNotice: Codable, Equatable {
 }
 
 struct AppSettings: Codable, Equatable {
-    private static let schemaVersion = 3
+    private static let schemaVersion = 5
+    // A receipt fingerprint is normally well below the per-entry byte ceiling. Five hundred and
+    // twelve entries keeps the UserDefaults payload bounded while avoiding realistic merchant
+    // churn. Capacity exhaustion disables automation instead of forgetting a dismissal.
+    static let maximumDismissedAutoSweepFingerprintCount = 512
+    private static let maximumAutoSweepFingerprintBytes = 1_024
     static let maximumPaymentProfileCount = TerminalPaymentProfileCatalog.maximumProfileCount
     static let adjustableConfirmationBlockRange = 1...Int(maximumAdjustableConfirmationBlocks)
 
@@ -270,12 +278,20 @@ struct AppSettings: Codable, Equatable {
     var selectedPaymentProfileID: String?
     private var fallbackProfile: AppPaymentProfile
     private(set) var migrationNotice: AppSettingsMigrationNotice?
+    private(set) var merchantReceiptName: String
+    private(set) var merchantReceiptABN: String
+    private(set) var autoSweepEnabled: Bool
+    private(set) var dismissedAutoSweepFingerprints: [String]
 
     init() {
         paymentProfiles = []
         selectedPaymentProfileID = nil
         fallbackProfile = AppPaymentProfile()
         migrationNotice = nil
+        merchantReceiptName = MerchantReceiptProfile.default.name
+        merchantReceiptABN = MerchantReceiptProfile.default.abn
+        autoSweepEnabled = false
+        dismissedAutoSweepFingerprints = []
     }
 
     var selectedPaymentProfile: AppPaymentProfile? {
@@ -285,6 +301,12 @@ struct AppSettings: Codable, Equatable {
 
     var displayedPaymentProfile: AppPaymentProfile {
         selectedPaymentProfile ?? fallbackProfile
+    }
+
+    var merchantReceiptProfile: MerchantReceiptProfile {
+        // Current decoding and every mutation validate before assigning these stored values.
+        (try? MerchantReceiptProfile(name: merchantReceiptName, abn: merchantReceiptABN))
+            ?? .default
     }
 
     /// Read-only compatibility facade for consumers that display the selected network policy.
@@ -432,6 +454,46 @@ struct AppSettings: Codable, Equatable {
         return candidate
     }
 
+    func updatingMerchantReceiptProfile(name: String, abn: String) throws -> AppSettings {
+        let profile = try MerchantReceiptProfile(name: name, abn: abn)
+        var candidate = self
+        candidate.merchantReceiptName = profile.name
+        candidate.merchantReceiptABN = profile.abn
+        return candidate
+    }
+
+    func updatingAutoSweepEnabled(_ enabled: Bool) -> AppSettings {
+        var candidate = self
+        if enabled && !autoSweepEnabled {
+            // Explicitly toggling automation back on is the merchant's opt-in to review payments
+            // they dismissed under the prior enable session.
+            candidate.dismissedAutoSweepFingerprints.removeAll()
+        }
+        candidate.autoSweepEnabled = enabled
+        return candidate
+    }
+
+    func recordingAutoSweepDismissal(_ fingerprint: String) -> AppSettings {
+        var candidate = self
+        guard Self.isValidAutoSweepFingerprint(fingerprint) else {
+            candidate.autoSweepEnabled = false
+            return candidate
+        }
+        guard !candidate.dismissedAutoSweepFingerprints.contains(fingerprint) else {
+            return candidate
+        }
+        guard candidate.dismissedAutoSweepFingerprints.count
+                < Self.maximumDismissedAutoSweepFingerprintCount
+        else {
+            // Never evict a dismissal that may still describe a live paid invoice. Disabling is
+            // the fail-closed state, and explicit re-enable clears the protected session history.
+            candidate.autoSweepEnabled = false
+            return candidate
+        }
+        candidate.dismissedAutoSweepFingerprints.append(fingerprint)
+        return candidate
+    }
+
     func applying(
         _ configuration: TerminalConfiguration,
         boundTo operatorAddress: EthereumAddress
@@ -502,8 +564,9 @@ struct AppSettings: Codable, Equatable {
         var candidate = self
         candidate.paymentProfiles.removeAll()
         candidate.selectedPaymentProfileID = nil
-        candidate.fallbackProfile.provisionedOperatorAddress = nil
+        candidate.fallbackProfile = AppPaymentProfile()
         candidate.migrationNotice = nil
+        candidate.autoSweepEnabled = false
         return candidate
     }
 
@@ -519,6 +582,14 @@ struct AppSettings: Codable, Equatable {
         var rhs = other
         lhs.migrationNotice = nil
         rhs.migrationNotice = nil
+        lhs.merchantReceiptName = MerchantReceiptProfile.default.name
+        rhs.merchantReceiptName = MerchantReceiptProfile.default.name
+        lhs.merchantReceiptABN = ""
+        rhs.merchantReceiptABN = ""
+        lhs.autoSweepEnabled = false
+        rhs.autoSweepEnabled = false
+        lhs.dismissedAutoSweepFingerprints = []
+        rhs.dismissedAutoSweepFingerprints = []
         return lhs == rhs
     }
 
@@ -576,6 +647,10 @@ struct AppSettings: Codable, Equatable {
         case confirmationBlocks
         case fallbackProfile
         case migrationNotice
+        case merchantReceiptName
+        case merchantReceiptABN
+        case autoSweepEnabled
+        case dismissedAutoSweepFingerprints
 
         // v1 flat settings retained for migration and downgrade visibility.
         case rpcURL
@@ -592,8 +667,12 @@ struct AppSettings: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        merchantReceiptName = MerchantReceiptProfile.default.name
+        merchantReceiptABN = ""
+        autoSweepEnabled = false
+        dismissedAutoSweepFingerprints = []
         let storedSchemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion)
-        let isLegacySchema = (storedSchemaVersion ?? 1) < Self.schemaVersion
+        let isLegacyCatalogSchema = (storedSchemaVersion ?? 1) < 3
         let legacyConfirmationBlocks = try container.decodeIfPresent(
             String.self,
             forKey: .confirmationBlocks
@@ -666,7 +745,7 @@ struct AppSettings: Codable, Equatable {
                 ?? Self.defaultConfirmationBlocks(for: fallbackProfile)
         }
 
-        if isLegacySchema {
+        if isLegacyCatalogSchema {
             var adjustedProfileIDs = Set<String>()
             for index in paymentProfiles.indices {
                 if Self.raiseLegacyConfirmationFloor(for: &paymentProfiles[index]) {
@@ -710,7 +789,7 @@ struct AppSettings: Codable, Equatable {
         if paymentProfiles.isEmpty {
             selectedPaymentProfileID = nil
         } else if selectedPaymentProfileID == nil {
-            guard isLegacySchema else {
+            guard isLegacyCatalogSchema else {
                 throw DecodingError.dataCorruptedError(
                     forKey: .selectedPaymentProfileID,
                     in: container,
@@ -727,6 +806,47 @@ struct AppSettings: Codable, Equatable {
         }
         if let selected = selectedPaymentProfile {
             fallbackProfile = selected
+        }
+
+        do {
+            let receiptProfile = try MerchantReceiptProfile(
+                name: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .merchantReceiptName
+                ) ?? MerchantReceiptProfile.default.name,
+                abn: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .merchantReceiptABN
+                ) ?? ""
+            )
+            merchantReceiptName = receiptProfile.name
+            merchantReceiptABN = receiptProfile.abn
+        } catch {
+            throw DecodingError.dataCorruptedError(
+                forKey: .merchantReceiptName,
+                in: container,
+                debugDescription: "Stored merchant receipt profile is invalid"
+            )
+        }
+        autoSweepEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .autoSweepEnabled
+        ) ?? false
+        dismissedAutoSweepFingerprints = try container.decodeIfPresent(
+            [String].self,
+            forKey: .dismissedAutoSweepFingerprints
+        ) ?? []
+        guard dismissedAutoSweepFingerprints.count
+                <= Self.maximumDismissedAutoSweepFingerprintCount,
+              Set(dismissedAutoSweepFingerprints).count
+                == dismissedAutoSweepFingerprints.count,
+              dismissedAutoSweepFingerprints.allSatisfy(Self.isValidAutoSweepFingerprint)
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .dismissedAutoSweepFingerprints,
+                in: container,
+                debugDescription: "Stored auto-sweep dismissal fingerprints are invalid"
+            )
         }
 
         do {
@@ -762,6 +882,13 @@ struct AppSettings: Codable, Equatable {
         try container.encode(confirmationBlocks, forKey: .confirmationBlocks)
         try container.encode(fallbackProfile, forKey: .fallbackProfile)
         try container.encodeIfPresent(migrationNotice, forKey: .migrationNotice)
+        try container.encode(merchantReceiptName, forKey: .merchantReceiptName)
+        try container.encode(merchantReceiptABN, forKey: .merchantReceiptABN)
+        try container.encode(autoSweepEnabled, forKey: .autoSweepEnabled)
+        try container.encode(
+            dismissedAutoSweepFingerprints,
+            forKey: .dismissedAutoSweepFingerprints
+        )
 
         // Keep the selected route visible to older builds while v2 remains forward-migratable.
         let legacy = displayedPaymentProfile
@@ -785,6 +912,14 @@ struct AppSettings: Codable, Equatable {
               let known = TerminalKnownChainProfile.profile(for: chainID)
         else { return "1" }
         return String(known.defaultConfirmationBlocks)
+    }
+
+    private static func isValidAutoSweepFingerprint(_ value: String) -> Bool {
+        !value.isEmpty
+            && value.utf8.count <= maximumAutoSweepFingerprintBytes
+            && value.unicodeScalars.allSatisfy { scalar in
+                (0x20...0x7e).contains(scalar.value)
+            }
     }
 
     private mutating func retainMigrationNotice(forProfileIDs retainedIDs: Set<String>) {

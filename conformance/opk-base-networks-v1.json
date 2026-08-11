@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "rail": "Base public network identity descriptors",
+  "notes": [
+    "These descriptors contain public chain identity and BaseScan metadata only.",
+    "A descriptor is not an OPK deployment trust anchor, production RPC policy, network enablement decision, or application default.",
+    "Applications must select a network explicitly and separately supply reviewed OPK deployment and RPC configuration."
+  ],
+  "networks": [
+    {
+      "chainId": 8453,
+      "networkName": "Base Mainnet",
+      "isTestnet": false,
+      "nativeCurrencySymbol": "ETH",
+      "nativeCurrencyDecimals": 18,
+      "baseScanUrl": "https://basescan.org"
+    },
+    {
+      "chainId": 84532,
+      "networkName": "Base Sepolia",
+      "isTestnet": true,
+      "nativeCurrencySymbol": "ETH",
+      "nativeCurrencyDecimals": 18,
+      "baseScanUrl": "https://sepolia.basescan.org"
+    }
+  ]
+}

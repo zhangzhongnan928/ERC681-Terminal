@@ -70,7 +70,7 @@ class CheckoutValidationEvidence internal constructor(
 class ReadOnlyRpcClient private constructor(
     val config: NetworkConfig,
     private val transport: RpcTransport,
-) : ReadOnlyChainClient {
+) : ReadOnlyChainClient, PaymentEvidenceChainClient {
     @JvmOverloads
     constructor(
         config: NetworkConfig,
@@ -93,6 +93,245 @@ class ReadOnlyRpcClient private constructor(
         require(blockNumber >= 0) { "Block number must not be negative" }
         val result = rpcResult("eth_getBlockByNumber", blockByNumberParams(blockNumber))
         return decodeCanonicalBlockHash(result, blockNumber)
+    }
+
+    override fun paymentAssetBalance(
+        asset: EvmAddress,
+        receiver: EvmAddress,
+        blockNumber: Long,
+    ): BigInteger = tokenBalance(asset, receiver, blockNumber)
+
+    override fun paymentEvidenceBlock(
+        blockNumber: Long,
+        includeDirectNativeTransactions: Boolean,
+    ): PaymentEvidenceBlock? {
+        require(blockNumber >= 0) { "Block number must not be negative" }
+        val params = JsonArray().apply {
+            add(quantityHex(blockNumber))
+            add(includeDirectNativeTransactions)
+        }
+        val result = rpcResult("eth_getBlockByNumber", params)
+        if (result.isJsonNull) return null
+        if (!result.isJsonObject) {
+            throw RpcException("eth_getBlockByNumber result must be an object or null")
+        }
+        val block = result.asJsonObject
+        val identity = decodeCanonicalBlockIdentity(result)
+            ?: throw RpcException("Canonical payment block is unavailable")
+        if (identity.number != blockNumber) {
+            throw RpcException(
+                "eth_getBlockByNumber returned block ${identity.number} for requested block $blockNumber",
+            )
+        }
+        val timestamp = objectQuantity(block, "timestamp", "Payment block timestamp")
+            .toSupportedLong("Payment block timestamp")
+        val transactions = if (includeDirectNativeTransactions) {
+            val value = block.get("transactions")
+                ?: throw RpcException("Full payment block has no transactions")
+            if (!value.isJsonArray) {
+                throw RpcException("Full payment block transactions must be an array")
+            }
+            value.asJsonArray.map { element ->
+                decodeDirectNativePaymentTransaction(element, identity)
+            }
+        } else {
+            emptyList()
+        }
+        return PaymentEvidenceBlock(
+            blockNumber = identity.number,
+            blockHash = identity.hash,
+            blockTimestamp = timestamp,
+            directNativeTransactions = transactions,
+        )
+    }
+
+    override fun incomingErc20Transfers(
+        token: EvmAddress,
+        receiver: EvmAddress,
+        blockNumber: Long,
+    ): List<IncomingErc20Transfer> {
+        require(!token.isZero) { "Token address must not be zero" }
+        require(!NativeAsset.isNative(token)) { "Native assets do not emit ERC-20 Transfer logs" }
+        require(!receiver.isZero) { "Payment receiver must not be zero" }
+        require(blockNumber >= 0) { "Block number must not be negative" }
+        val blockTag = quantityHex(blockNumber)
+        val filter = JsonObject().apply {
+            addProperty("fromBlock", blockTag)
+            addProperty("toBlock", blockTag)
+            addProperty("address", token.value)
+            add("topics", JsonArray().apply {
+                add(TRANSFER_EVENT_TOPIC)
+                add(com.google.gson.JsonNull.INSTANCE)
+                add(addressTopic(receiver))
+            })
+        }
+        val result = rpcResult("eth_getLogs", JsonArray().apply { add(filter) })
+        if (!result.isJsonArray) throw RpcException("eth_getLogs result must be an array")
+        return result.asJsonArray.map { element ->
+            decodeIncomingErc20Transfer(element, token, receiver, blockNumber)
+        }
+    }
+
+    private fun decodeDirectNativePaymentTransaction(
+        element: JsonElement,
+        block: CanonicalBlockIdentity,
+    ): DirectNativePaymentTransaction {
+        if (!element.isJsonObject) {
+            throw RpcException("Full payment block contains a non-transaction result")
+        }
+        val transaction = element.asJsonObject
+        val transactionBlock = objectQuantity(
+            transaction,
+            "blockNumber",
+            "Native payment transaction block number",
+        ).toSupportedLong("Native payment transaction block number")
+        if (transactionBlock != block.number) {
+            throw RpcException("Native payment transaction block number does not match its block")
+        }
+        val transactionBlockHash = objectString(
+            transaction,
+            "blockHash",
+            "Native payment transaction block hash",
+        ).also { requireRpcHash(it, "Native payment transaction block hash") }.lowercase()
+        if (transactionBlockHash != block.hash) {
+            throw RpcException("Native payment transaction block hash does not match its block")
+        }
+        val recipientElement = transaction.get("to")
+        val recipient = when {
+            recipientElement == null || recipientElement.isJsonNull -> null
+            recipientElement.isJsonPrimitive && recipientElement.asJsonPrimitive.isString ->
+                parseRpcAddress(recipientElement.asString, "Native payment recipient")
+            else -> throw RpcException("Native payment recipient must be an address or null")
+        }
+        return DirectNativePaymentTransaction(
+            txHash = objectString(
+                transaction,
+                "hash",
+                "Native payment transaction hash",
+            ).also { requireRpcHash(it, "Native payment transaction hash") }.lowercase(),
+            payer = parseRpcAddress(
+                objectString(transaction, "from", "Native payment payer"),
+                "Native payment payer",
+            ).also {
+                if (it.isZero) throw RpcException("Native payment payer must not be zero")
+            },
+            recipient = recipient,
+            transactionIndex = objectQuantity(
+                transaction,
+                "transactionIndex",
+                "Native payment transaction index",
+            ).toSupportedLong("Native payment transaction index"),
+            value = objectQuantity(transaction, "value", "Native payment transaction value"),
+            blockNumber = block.number,
+            blockHash = block.hash,
+        )
+    }
+
+    private fun decodeIncomingErc20Transfer(
+        element: JsonElement,
+        token: EvmAddress,
+        receiver: EvmAddress,
+        blockNumber: Long,
+    ): IncomingErc20Transfer {
+        if (!element.isJsonObject) throw RpcException("eth_getLogs returned a non-log result")
+        val log = element.asJsonObject
+        val removed = log.get("removed")?.let { removedValue ->
+            if (!removedValue.isJsonPrimitive || !removedValue.asJsonPrimitive.isBoolean) {
+                throw RpcException("ERC-20 payment log removed flag is malformed")
+            }
+            removedValue.asBoolean
+        } ?: false
+        if (removed) throw RpcException("ERC-20 payment log was removed")
+        val logToken = parseRpcAddress(
+            objectString(log, "address", "ERC-20 payment log address"),
+            "ERC-20 payment log address",
+        )
+        if (logToken != token) throw RpcException("ERC-20 payment log came from a different token")
+        val logBlockNumber = objectQuantity(log, "blockNumber", "ERC-20 payment log block")
+            .toSupportedLong("ERC-20 payment log block")
+        if (logBlockNumber != blockNumber) {
+            throw RpcException("ERC-20 payment log block number does not match the requested block")
+        }
+        val blockHash = objectString(log, "blockHash", "ERC-20 payment log block hash")
+            .also { requireRpcHash(it, "ERC-20 payment log block hash") }
+            .lowercase()
+        val topicsElement = log.get("topics")
+            ?: throw RpcException("ERC-20 payment log has no topics")
+        if (!topicsElement.isJsonArray || topicsElement.asJsonArray.size() != 3) {
+            throw RpcException("ERC-20 Transfer log topics are malformed")
+        }
+        val topics = topicsElement.asJsonArray.mapIndexed { index, topic ->
+            if (!topic.isJsonPrimitive || !topic.asJsonPrimitive.isString) {
+                throw RpcException("ERC-20 Transfer topic $index is malformed")
+            }
+            topic.asString
+        }
+        if (!topics[0].equals(TRANSFER_EVENT_TOPIC, ignoreCase = true)) {
+            throw RpcException("ERC-20 payment log has the wrong event signature")
+        }
+        val payer = decodeAddressTopic(topics[1], "ERC-20 Transfer sender topic").also {
+            if (it.isZero) throw RpcException("ERC-20 payment payer must not be zero")
+        }
+        val recipient = decodeAddressTopic(topics[2], "ERC-20 Transfer recipient topic")
+        if (recipient != receiver) throw RpcException("ERC-20 payment log has the wrong receiver")
+        val data = objectString(log, "data", "ERC-20 Transfer amount")
+        val amount = try {
+            BigInteger(1, decodeWord(data, "ERC-20 Transfer amount"))
+        } catch (error: RpcException) {
+            throw error
+        } catch (error: Exception) {
+            throw RpcException("ERC-20 Transfer amount is malformed", error)
+        }
+        return IncomingErc20Transfer(
+            txHash = objectString(log, "transactionHash", "ERC-20 payment transaction hash")
+                .also { requireRpcHash(it, "ERC-20 payment transaction hash") }
+                .lowercase(),
+            token = logToken,
+            payer = payer,
+            recipient = recipient,
+            logIndex = objectQuantity(log, "logIndex", "ERC-20 payment log index")
+                .toSupportedLong("ERC-20 payment log index"),
+            value = amount,
+            blockNumber = logBlockNumber,
+            blockHash = blockHash,
+            removed = false,
+        )
+    }
+
+    private fun objectString(value: JsonObject, name: String, label: String): String {
+        val element = value.get(name)
+        if (element == null || !element.isJsonPrimitive || !element.asJsonPrimitive.isString) {
+            throw RpcException("$label is missing or malformed")
+        }
+        return element.asString
+    }
+
+    private fun objectQuantity(value: JsonObject, name: String, label: String): BigInteger =
+        parseQuantity(objectString(value, name, label), label)
+
+    private fun parseRpcAddress(value: String, label: String): EvmAddress = try {
+        EvmAddress.parse(value)
+    } catch (error: IllegalArgumentException) {
+        throw RpcException("$label is malformed", error)
+    }
+
+    private fun decodeAddressTopic(value: String, label: String): EvmAddress {
+        val word = try {
+            Hex.decode(value, 32)
+        } catch (error: IllegalArgumentException) {
+            throw RpcException("$label is malformed", error)
+        }
+        if (word.copyOfRange(0, 12).any { it != 0.toByte() }) {
+            throw RpcException("$label has non-zero ABI address padding")
+        }
+        return EvmAddress.fromBytes(word.copyOfRange(12, 32))
+    }
+
+    private fun addressTopic(address: EvmAddress): String =
+        "0x" + address.value.substring(2).padStart(64, '0')
+
+    private fun requireRpcHash(value: String, label: String) {
+        if (!PAYMENT_HASH_PATTERN.matches(value)) throw RpcException("$label is malformed")
     }
 
     /**
@@ -1056,6 +1295,9 @@ class ReadOnlyRpcClient private constructor(
         private const val ERC20_NETWORK_VALIDATION_CALL_COUNT = 9
         private const val NATIVE_NETWORK_VALIDATION_CALL_COUNT = 7
         private const val MAX_CONCURRENT_CALL_SET_SIZE = 20
+        private val TRANSFER_EVENT_TOPIC = Hex.encode(
+            Keccak256.digest("Transfer(address,address,uint256)".toByteArray(StandardCharsets.US_ASCII)),
+        )
         private val CHECKOUT_BATCH_EXECUTOR = Executors.newFixedThreadPool(2) { runnable ->
             Thread(runnable, "opk-checkout-rpc").apply { isDaemon = true }
         }
@@ -1126,6 +1368,8 @@ private class HttpUrlConnectionRpcTransport(
     }
 
     companion object {
-        private const val MAX_RESPONSE_BYTES = 1024 * 1024
+        // Full canonical blocks are needed only for direct native-payment attribution and can be
+        // larger than the earlier metadata-only RPC ceiling. Keep a finite defensive bound.
+        private const val MAX_RESPONSE_BYTES = 8 * 1024 * 1024
     }
 }

@@ -7,6 +7,7 @@ import com.openpasskey.erc681.PaymentInvoiceFactory
 import com.openpasskey.erc681.TokenAmount
 import com.openpasskey.terminal.chain.PaymentToken
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
+import com.openpasskey.terminal.chain.MerchantReceiptProfile
 import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.chain.selectedPaymentProfile
 import com.openpasskey.terminal.chain.selectingProfile
@@ -115,6 +116,13 @@ class InvoiceProfileSelectionPolicyTest {
             selectedProfile = capturedProfile,
             operatorAddress = operator,
             createdAt = 1_234,
+            publishedAtBlock = 99,
+            publishedAtBlockHash = "0x${"12".repeat(32)}",
+            receiptNumber = 7,
+            merchantReceiptProfile = MerchantReceiptProfile.fromInput(
+                name = "Blue Brew",
+                abn = "61 695 642 285",
+            ),
         )
         val laterSelection = selectedB.selectingProfile(profileA.id)
 
@@ -131,6 +139,11 @@ class InvoiceProfileSelectionPolicyTest {
         assertEquals(profileB.token.decimals, persisted.tokenDecimals)
         assertEquals(operator.value, persisted.operatorAddress)
         assertEquals("1234567", persisted.expectedAmount)
+        assertEquals(99L, persisted.publishedAtBlock)
+        assertEquals(7L, persisted.receiptNumber)
+        assertEquals("Blue Brew", persisted.receiptMerchantName)
+        assertEquals("61 695 642 285", persisted.receiptMerchantAbn)
+        assertEquals(true, persisted.receiptAutoPrintEligible)
         assertEquals(profileB.chainId, protocolInvoice.request.chainId)
     }
 

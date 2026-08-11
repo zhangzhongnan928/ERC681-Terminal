@@ -1,6 +1,6 @@
 # Google Play — English (Australia)
 
-Release target: OPK Terminal `0.1.12` version code `14`.
+Release target: the already-uploaded OPK Terminal `0.1.12` version code `13`.
 
 ## Product details
 
@@ -67,14 +67,14 @@ First public-store build of OPK Terminal:
 • OpenPasskey provisioning for up to 32 vault/token profiles
 • ERC-681 payment QR display and on-chain confirmation monitoring
 • device-protected, constrained settlement and local history
-• clearly labelled, isolated offline Base Sepolia product tour
 • in-app Privacy Policy and Support links
 
 ## Review access
 
-Paste the completed Google Play section from `../review/reviewer-instructions.md` into App access.
-Mark the app as having restricted functionality because the full flow requires live merchant
-provisioning. Do not submit placeholders or commit credentials to this repository.
+Build 13 has no offline product tour. Paste App access text only after the owner supplies the
+reusable full-access method described in `../review/reviewer-instructions.md`. Mark the app as
+having restricted functionality because the full flow requires live merchant provisioning. Do
+not submit the saved build-14 demo claim, placeholders, or credentials to this repository.
 
 ## Owner decisions before paste
 

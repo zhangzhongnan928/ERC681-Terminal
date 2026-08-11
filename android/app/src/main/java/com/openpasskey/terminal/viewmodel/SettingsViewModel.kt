@@ -10,6 +10,7 @@ import com.openpasskey.terminal.admin.AdminPinStore
 import com.openpasskey.terminal.admin.AdminPinVerification
 import com.openpasskey.terminal.chain.ChainConfig
 import com.openpasskey.terminal.chain.ChainConfigMigrationNotice
+import com.openpasskey.terminal.chain.MerchantReceiptProfile
 import com.openpasskey.terminal.chain.PaymentToken
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.chain.TerminalPaymentProfile
@@ -105,6 +106,11 @@ internal class ReadinessRefreshCallbacks {
 }
 
 data class SettingsState(
+    val merchantReceiptName: String = MerchantReceiptProfile.DEFAULT_NAME,
+    val merchantReceiptAbn: String = "",
+    val savingMerchantReceiptProfile: Boolean = false,
+    val autoSweepEnabled: Boolean = false,
+    val savingAutoSweepPreference: Boolean = false,
     val networkName: String = "",
     val isTestnet: Boolean = false,
     val nativeCurrencySymbol: String = "native currency",
@@ -142,6 +148,37 @@ data class SettingsState(
     val migrationNotice: String? = null,
     val isError: Boolean = false,
 )
+
+internal data class MerchantReceiptProfileInputValidation(
+    val profile: MerchantReceiptProfile?,
+    val nameError: String?,
+    val abnError: String?,
+) {
+    val isValid: Boolean get() = profile != null && nameError == null && abnError == null
+}
+
+/** Applies the domain validator independently so both fields can show actionable errors at once. */
+internal fun validateMerchantReceiptProfileInput(
+    name: String,
+    abn: String,
+): MerchantReceiptProfileInputValidation {
+    val nameError = runCatching {
+        MerchantReceiptProfile.fromInput(name, "")
+    }.exceptionOrNull()?.message
+    val abnError = runCatching {
+        MerchantReceiptProfile.fromInput(MerchantReceiptProfile.DEFAULT_NAME, abn)
+    }.exceptionOrNull()?.message
+    val profile = if (nameError == null && abnError == null) {
+        MerchantReceiptProfile.fromInput(name, abn)
+    } else {
+        null
+    }
+    return MerchantReceiptProfileInputValidation(
+        profile = profile,
+        nameError = nameError,
+        abnError = abnError,
+    )
+}
 
 /**
  * Process-local admin session boundary. Every new unlock attempt receives an epoch, and locking the
@@ -219,6 +256,8 @@ class SettingsViewModel(
     private var refreshGeneration = 0L
     private var provisioningJob: Job? = null
     private var provisioningGeneration = 0L
+    private var merchantReceiptProfileJob: Job? = null
+    private var autoSweepPreferenceJob: Job? = null
     private var walletCreationAuthorizationEpoch: Long? = null
     private var validatedConfiguration: TerminalConfigSnapshot? = null
     private val refreshCompletionCallbacks = ReadinessRefreshCallbacks()
@@ -254,6 +293,10 @@ class SettingsViewModel(
         setupStatusOverride: TerminalSetupStatus? = null,
     ): SettingsState {
         val config = chainConfig.snapshot()
+        val merchantReceiptProfile = runCatching { chainConfig.merchantReceiptProfile() }
+            .getOrNull()
+            ?: MerchantReceiptProfile.DEFAULT
+        val autoSweepEnabled = chainConfig.autoSweepEnabled()
         val wallet = walletStore.snapshot()
         val admin = adminPinStore.snapshot()
         val pairing = wallet.address?.let {
@@ -275,6 +318,11 @@ class SettingsViewModel(
             else -> TerminalSetupStatus.AWAITING_AUTHORIZATION
         }
         return SettingsState(
+            merchantReceiptName = merchantReceiptProfile.name,
+            merchantReceiptAbn = merchantReceiptProfile.abn,
+            savingMerchantReceiptProfile = merchantReceiptProfileJob?.isActive == true,
+            autoSweepEnabled = autoSweepEnabled,
+            savingAutoSweepPreference = autoSweepPreferenceJob?.isActive == true,
             networkName = config.networkName,
             isTestnet = networkPolicy?.isTestnet ?: false,
             nativeCurrencySymbol = networkPolicy?.nativeCurrencySymbol ?: "native currency",
@@ -476,6 +524,13 @@ class SettingsViewModel(
             _state.value = current.copy(message = "Provisioning is already in progress.", isError = true)
             return
         }
+        if (merchantReceiptProfileJob?.isActive == true || autoSweepPreferenceJob?.isActive == true) {
+            _state.value = current.copy(
+                message = "Wait for the current settings change to finish before provisioning.",
+                isError = true,
+            )
+            return
+        }
         val admin = adminPinStore.snapshot()
         if (!admin.configured) {
             _state.value = current.copy(message = "Set the local admin PIN before provisioning.", isError = true)
@@ -557,10 +612,183 @@ class SettingsViewModel(
         provision(payload)
     }
 
+    fun updateMerchantReceiptProfile(name: String, abn: String) {
+        if (_state.value.savingMerchantReceiptProfile ||
+            merchantReceiptProfileJob?.isActive == true
+        ) return
+        if (provisioningJob?.isActive == true) {
+            _state.value = _state.value.copy(
+                message = "Wait for provisioning to finish before changing receipt details.",
+                isError = true,
+            )
+            return
+        }
+        if (autoSweepPreferenceJob?.isActive == true) {
+            _state.value = _state.value.copy(
+                message = "Wait for the auto-sweep setting to finish saving.",
+                isError = true,
+            )
+            return
+        }
+        val validation = validateMerchantReceiptProfileInput(name, abn)
+        val profile = validation.profile
+        if (profile == null) {
+            _state.value = _state.value.copy(
+                message = validation.nameError ?: validation.abnError
+                    ?: "Invalid merchant receipt details",
+                isError = true,
+            )
+            return
+        }
+        val authorizationEpoch = runCatching {
+            requireNotNull(
+                requireAdminAuthorizationEpoch(
+                    adminPinStore.snapshot().configured,
+                    adminSession,
+                    "changing merchant receipt details",
+                ),
+            )
+        }.getOrElse { error ->
+            _state.value = _state.value.copy(message = error.message, isError = true)
+            return
+        }
+        val previousSetupStatus = _state.value.setupStatus
+        _state.value = _state.value.copy(
+            savingMerchantReceiptProfile = true,
+            message = null,
+            isError = false,
+        )
+        merchantReceiptProfileJob = viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    updateMerchantReceiptProfileExclusively(
+                        lifecycleGate = lifecycleGate,
+                        commitWithAuthorization = { commit ->
+                            adminSession.withAuthorization(authorizationEpoch, commit)
+                        },
+                        update = {
+                            chainConfig.updateMerchantReceiptProfile(profile.name, profile.abn)
+                        },
+                    )
+                }
+                adminSession.lock()
+                _state.value = load(
+                    message = "Merchant receipt details saved. New invoices use this profile; " +
+                        "existing receipts keep their original details.",
+                    setupStatusOverride = previousSetupStatus,
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                _state.value = load(
+                    message = error.message ?: "Unable to save merchant receipt details",
+                    isError = true,
+                    setupStatusOverride = previousSetupStatus,
+                )
+            } finally {
+                merchantReceiptProfileJob = null
+                _state.value = _state.value.copy(savingMerchantReceiptProfile = false)
+            }
+        }
+    }
+
+    fun updateAutoSweepEnabled(enabled: Boolean) {
+        if (_state.value.savingAutoSweepPreference || autoSweepPreferenceJob?.isActive == true) {
+            return
+        }
+        if (provisioningJob?.isActive == true) {
+            _state.value = _state.value.copy(
+                message = "Wait for provisioning to finish before changing auto-sweep.",
+                isError = true,
+            )
+            return
+        }
+        if (merchantReceiptProfileJob?.isActive == true) {
+            _state.value = _state.value.copy(
+                message = "Wait for the receipt details to finish saving.",
+                isError = true,
+            )
+            return
+        }
+        if (enabled == chainConfig.autoSweepEnabled()) return
+        val authorizationEpoch = runCatching {
+            requireNotNull(
+                requireAdminAuthorizationEpoch(
+                    adminPinStore.snapshot().configured,
+                    adminSession,
+                    "changing auto-sweep",
+                ),
+            )
+        }.getOrElse { error ->
+            _state.value = _state.value.copy(message = error.message, isError = true)
+            return
+        }
+        val previousSetupStatus = _state.value.setupStatus
+        _state.value = _state.value.copy(
+            savingAutoSweepPreference = true,
+            message = null,
+            isError = false,
+        )
+        autoSweepPreferenceJob = viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    updateAutoSweepPreferenceExclusively(
+                        lifecycleGate = lifecycleGate,
+                        commitWithAuthorization = { commit ->
+                            adminSession.withAuthorization(authorizationEpoch, commit)
+                        },
+                        update = { chainConfig.updateAutoSweepEnabled(enabled) },
+                    )
+                }
+                adminSession.lock()
+                _state.value = load(
+                    message = if (enabled) {
+                        "Auto-sweep enabled. Newly issued invoices with their own incoming " +
+                            "transaction evidence will open the review and device-authenticated " +
+                            "settlement flow after canonical confirmation. Late payments remain " +
+                            "manual."
+                    } else {
+                        "Auto-sweep disabled. Ready payments remain available on the Settle screen."
+                    },
+                    setupStatusOverride = previousSetupStatus,
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                _state.value = load(
+                    message = error.message ?: "Unable to save auto-sweep preference",
+                    isError = true,
+                    setupStatusOverride = previousSetupStatus,
+                )
+            } finally {
+                autoSweepPreferenceJob = null
+                _state.value = _state.value.copy(savingAutoSweepPreference = false)
+            }
+        }
+    }
+
+    /** Synchronizes the Settings toggle after the settlement safety ledger reaches capacity. */
+    fun autoSweepDisabledBySafetyCapacity() {
+        _state.value = _state.value.copy(
+            autoSweepEnabled = false,
+            savingAutoSweepPreference = false,
+            message = "Auto-sweep was turned off because its dismissal history is full. " +
+                "Explicitly re-enable it to start a new review session.",
+            isError = true,
+        )
+    }
+
     fun updateNetworkConfirmationBlocks(chainId: Long, confirmationBlocks: Int) {
         if (provisioningJob?.isActive == true) {
             _state.value = _state.value.copy(
                 message = "Wait for provisioning to finish before changing confirmations.",
+                isError = true,
+            )
+            return
+        }
+        if (merchantReceiptProfileJob?.isActive == true || autoSweepPreferenceJob?.isActive == true) {
+            _state.value = _state.value.copy(
+                message = "Wait for the current settings change to finish before changing confirmations.",
                 isError = true,
             )
             return
@@ -634,6 +862,13 @@ class SettingsViewModel(
         if (provisioningJob?.isActive == true) {
             _state.value = _state.value.copy(
                 message = "Wait for provisioning to finish before removing a payment profile.",
+                isError = true,
+            )
+            return
+        }
+        if (merchantReceiptProfileJob?.isActive == true || autoSweepPreferenceJob?.isActive == true) {
+            _state.value = _state.value.copy(
+                message = "Wait for the current settings change to finish before removing a payment profile.",
                 isError = true,
             )
             return
@@ -882,6 +1117,13 @@ class SettingsViewModel(
             )
             return
         }
+        if (merchantReceiptProfileJob?.isActive == true || autoSweepPreferenceJob?.isActive == true) {
+            _state.value = _state.value.copy(
+                message = "Wait for the current settings change to finish before resetting the wallet.",
+                isError = true,
+            )
+            return
+        }
         val authorizationEpoch = runCatching {
             requireNotNull(
                 requireAdminAuthorizationEpoch(
@@ -910,7 +1152,8 @@ class SettingsViewModel(
                 }
                 adminSession.lock()
                 _state.value = load(
-                    "Operator wallet and provisioning were removed. The local admin PIN remains configured.",
+                    "Operator wallet, provisioning, and auto-sweep preference were removed. " +
+                        "The local admin PIN remains configured.",
                 )
             } catch (error: Exception) {
                 _state.value = load(
@@ -1042,6 +1285,26 @@ internal suspend fun updateNetworkConfirmationBlocksExclusively(
 ) = lifecycleGate.withExclusiveMutation {
     check(commitWithAuthorization { update(chainId, confirmationBlocks) }) {
         "Unable to update network confirmations"
+    }
+}
+
+internal suspend fun updateMerchantReceiptProfileExclusively(
+    lifecycleGate: TerminalLifecycleGate,
+    commitWithAuthorization: ((() -> Boolean) -> Boolean),
+    update: () -> Boolean,
+) = lifecycleGate.withExclusiveMutation {
+    check(commitWithAuthorization(update)) {
+        "Unable to save merchant receipt details"
+    }
+}
+
+internal suspend fun updateAutoSweepPreferenceExclusively(
+    lifecycleGate: TerminalLifecycleGate,
+    commitWithAuthorization: ((() -> Boolean) -> Boolean),
+    update: () -> Boolean,
+) = lifecycleGate.withExclusiveMutation {
+    check(commitWithAuthorization(update)) {
+        "Unable to save auto-sweep preference"
     }
 }
 

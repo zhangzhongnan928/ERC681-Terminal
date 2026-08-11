@@ -68,6 +68,43 @@ class TerminalProvisionerTest {
     }
 
     @Test
+    fun baseMainnetProvisioningUsesPinnedProductionDeploymentAndRpc() = runBlocking {
+        val mainnet = KnownChainPolicy.requireProfile(8453)
+        val reader = FakeReader().apply {
+            remoteChainId = mainnet.chainId
+            factory = mainnet.factory
+            implementation = mainnet.receiverImplementation
+            vaultRuntime = MAINNET_VAULT_RUNTIME.copyOf()
+        }
+        val provisioner = TerminalProvisioner(
+            snapshot = { previous() },
+            compareAndCommit = { _, _ -> true },
+            currentWalletSnapshot = ::wallet,
+            lifecycleGate = TerminalLifecycleGate(),
+            clientFactory = ProvisioningChainReaderFactory { config ->
+                assertEquals("https://mainnet.base.org", config.rpcUrl)
+                reader
+            },
+        )
+
+        val result = provisioner.provision(MAINNET_CANONICAL, wallet()) { commit -> commit() }
+
+        assertEquals("Base Mainnet", result.profile.networkName)
+        assertEquals(8453L, result.profile.chainId)
+        assertEquals(mainnet.factory.value, result.profile.factoryAddress)
+        assertEquals(
+            mainnet.receiverImplementation.value,
+            result.profile.receiverImplementationAddress,
+        )
+        assertEquals(
+            mainnet.vaultRuntimeCodeHash,
+            Numeric.toHexString(org.web3j.crypto.Hash.sha3(MAINNET_VAULT_RUNTIME)),
+        )
+        assertEquals(1, result.profile.confirmationBlocks)
+        assertEquals(1, reader.validationEvidenceCalls)
+    }
+
+    @Test
     fun newProfileUsesKnownNetworkDefaultWithoutLeakingLegacyFallbackFinality() = runBlocking {
         val committed = mutableListOf<TerminalConfigSnapshot>()
         val operational = FakeReader().apply {
@@ -241,7 +278,7 @@ class TerminalProvisionerTest {
         listOf(
             CANONICAL.replace(OPERATOR, "0x" + "22".repeat(20)),
             CANONICAL.replace("chainId=84532", "chainId=1"),
-            CANONICAL.replace("chainId=84532", "chainId=8453"),
+            CANONICAL.replace("chainId=84532", "chainId=10"),
         ).forEach { payload ->
             var clients = 0
             var writes = 0
@@ -644,6 +681,9 @@ class TerminalProvisionerTest {
         const val CANONICAL_NATIVE = "opk-terminal:provision?v=1&chainId=84532&vault=" +
             "0x3333333333333333333333333333333333333333&token=" +
             "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE&operator=$OPERATOR"
+        const val MAINNET_CANONICAL = "opk-terminal:provision?v=1&chainId=8453&vault=" +
+            "0x3333333333333333333333333333333333333333&token=" +
+            "0x7ffba642bc902880a737cb1c18a4e9540879e211&operator=$OPERATOR"
         const val KNOWN_VAULT_RUNTIME_HASH =
             "0x32ad6b6076f449fbc39e115afc2645c65071280af2d461dc315544ac0a1d7e58"
         val CANONICAL_VAULT_RUNTIME: ByteArray = Numeric.hexStringToByteArray(
@@ -658,6 +698,12 @@ class TerminalProvisionerTest {
                 "90fd5b7f50950143dc78ff80b5cdf56436a716933e2b92eb073f4b272dec2e808d8423835460" +
                 "01600160a01b03169056fea26469706673582212202e8cd2852b590f2bda79ba8056dd697cc4" +
                 "fe00ae07dc3e33ae82e1a68109a5aa64736f6c634300081a0033",
+        )
+        val MAINNET_VAULT_RUNTIME: ByteArray = Numeric.hexStringToByteArray(
+            Numeric.toHexString(CANONICAL_VAULT_RUNTIME).replace(
+                "c9c24c87f55c46d42419bc181d427acd1755e46c",
+                "d051ba174636a1bb663559e9c454053a543488ef",
+            ),
         )
         val FACTORY = EvmAddress.parse("0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f")
         val IMPLEMENTATION = EvmAddress.parse("0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18")
