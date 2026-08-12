@@ -193,6 +193,50 @@ class OperatorWalletSweepSelectorGuardTest {
         }
     }
 
+    @Test
+    fun unattendedGuardRequiresExactCanonicalInvoiceAmountsAndToken() {
+        val invoiceId = "0x" + "11".repeat(32)
+        val amount = BigInteger.valueOf(1_000_000)
+        val raw = RawTransaction.createTransaction(
+            NONCE,
+            GAS_PRICE,
+            GAS_LIMIT,
+            VAULT,
+            BigInteger.ZERO,
+            encodedSweepSessions(),
+        )
+        requireAuthorizedSweepSessionsCallData(raw.data, listOf(invoiceId), listOf(amount), TOKEN)
+
+        listOf<() -> Unit>(
+            {
+                requireAuthorizedSweepSessionsCallData(
+                    raw.data,
+                    listOf("0x" + "22".repeat(32)),
+                    listOf(amount),
+                    TOKEN,
+                )
+            },
+            {
+                requireAuthorizedSweepSessionsCallData(
+                    raw.data,
+                    listOf(invoiceId),
+                    listOf(amount + BigInteger.ONE),
+                    TOKEN,
+                )
+            },
+            {
+                requireAuthorizedSweepSessionsCallData(
+                    raw.data,
+                    listOf(invoiceId),
+                    listOf(amount),
+                    "0x5555555555555555555555555555555555555555",
+                )
+            },
+        ).forEach { attempt ->
+            assertThrows(IllegalArgumentException::class.java) { attempt() }
+        }
+    }
+
     private fun encodedSweepSessions(): String = SettlementAbi.encodeSweepSessions(
         listOf(
             SettlementInvoiceIntent(

@@ -73,6 +73,13 @@ developer resources.
   whitelisted payment asset, confirmed locally persisted invoices, and the `sweepSessions`
   selector. There is no arbitrary
   transaction, transfer, approval, payout, refund, deployment, private-key export, or seed import.
+- On Android, unattended auto-sweep is an explicit one-time Admin/setup enrollment. The
+  administrator authenticates with the device once to create a separate locked-device Keystore
+  grant for one exact chain, vault, and operator. Eligible newly issued payments are then
+  canonically revalidated, signed, durably recorded, and broadcast without a per-payment dialog.
+  Device lock, configuration or RPC changes, disabling the option, safety-limit failures, and
+  operator reset revoke or block the grant. Late payments remain manual. Manual settlement keeps
+  its existing review and per-use device authentication.
 - Vault authorization and native-token gas funding are also new-invoice readiness checks. The apps
   freshly validate configuration, owner/operator authorization, and the selected network profile's
   minimum native-gas reserve (`0.0001 ETH` on the shipped Base profiles) before creating each

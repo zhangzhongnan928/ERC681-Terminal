@@ -409,7 +409,7 @@ Outputs:
 - unsigned, minified release APK: `android/app/build/outputs/apk/release/app-release-unsigned.apk`
 - SDK JAR and sources: `android/erc681-sdk/build/libs/`
 - Maven repository: `android/erc681-sdk/build/repository/`
-- Maven coordinate: `com.openpasskey:opk-erc681-sdk:0.3.1`
+- Maven coordinate: `com.openpasskey:opk-erc681-sdk:0.4.0`
 
 Point a terminal project at the local repository and add the dependency:
 
@@ -419,7 +419,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.openpasskey:opk-erc681-sdk:0.3.1")
+    implementation("com.openpasskey:opk-erc681-sdk:0.4.0")
 }
 ```
 
@@ -663,6 +663,14 @@ invoice namespace.
 
 ### Settlement transaction lifecycle
 
+- Android offers an opt-in unattended mode only after a one-time Admin/setup and OS-authenticated
+  enrollment. The grant is bound to one exact chain, vault, and operator and can cover the configured
+  payment assets on that target. Newly issued payments still pass the full canonical preflight,
+  exact-calldata, nonce, fee, balance, endpoint-generation, durable-signature, broadcast-recovery,
+  and `Swept`-event checks below. There is no per-payment prompt while the device remains secure and
+  unlocked. Device lock defers signing; disabling auto-sweep, changing its configuration or RPC,
+  hitting a safety limit, or resetting the operator revokes the grant. Late payments remain manual.
+  Manual settlement continues to require explicit review and fresh device authentication.
 - Group only paid or overpaid invoices, or previously swept invoices with separately confirmed
   positive late value, with the same immutable chain, RPC, deployment, vault, payment-asset
   metadata, and

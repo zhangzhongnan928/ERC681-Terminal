@@ -20,6 +20,8 @@ sealed interface ReceiptRequestResult {
         val message: String,
         /** True only for a cooperative/background or printer-availability retry. */
         val retryAutomatically: Boolean = false,
+        /** True when no printer job ran and a short cooperative retry is safe. */
+        val retryPromptly: Boolean = false,
     ) : ReceiptRequestResult
     data class Failed(
         val message: String,
@@ -51,6 +53,7 @@ class ReceiptCoordinator(
                     AutomaticPaymentEvidenceResult.Deferred -> return@withLock ReceiptRequestResult.Unavailable(
                             message = "Payment transaction details will be retried in the background.",
                             retryAutomatically = true,
+                            retryPromptly = true,
                         )
                     is AutomaticPaymentEvidenceResult.Unsupported -> return@withLock ReceiptRequestResult.Unavailable(
                             "This payment has no supported incoming transaction receipt evidence.",

@@ -111,6 +111,7 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
     var showReset by remember { mutableStateOf(false) }
     var showAdvancedManualSetup by remember { mutableStateOf(false) }
     var showRpcEndpointSettings by remember { mutableStateOf(false) }
+    var showAutoSweepEnrollment by remember { mutableStateOf(false) }
     var profilePendingRemoval by remember { mutableStateOf<TerminalPaymentProfile?>(null) }
     var chainPendingConfirmationEdit by remember { mutableStateOf<Long?>(null) }
     val setupBusy = privilegedSetupBusy(state)
@@ -120,10 +121,53 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
             showProvisioningScanner = false
             showAdvancedManualSetup = false
             showRpcEndpointSettings = false
+            showAutoSweepEnrollment = false
             showReset = false
             profilePendingRemoval = null
             chainPendingConfirmationEdit = null
         }
+    }
+
+    if (showAutoSweepEnrollment) {
+        AlertDialog(
+            onDismissRequest = { showAutoSweepEnrollment = false },
+            title = { Text("Enable unattended auto-sweep?") },
+            text = {
+                Text(
+                    "After one system authentication, each eligible canonically confirmed " +
+                        "payment can spend gas and sign sweepSessions automatically while this " +
+                        "terminal is unlocked. No confirmation screen or device PIN will appear " +
+                        "for each payment. The grant is limited to the current chain, vault, and " +
+                        "operator, zero native value, canonical invoice calldata, and a maximum " +
+                        "signed L2 execution gas cost of 0.01 ETH per sweep. Base may charge an " +
+                        "additional L1 data fee, so 0.01 ETH is not a total fee cap. The locally " +
+                        "calculated gas balance requirement is limited to 0.015 ETH. Configuration " +
+                        "changes revoke the grant. " +
+                        "Late payments remain manual.",
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showAutoSweepEnrollment = false
+                    if (viewModel.prepareAutoSweepEnrollment()) {
+                        if (activity == null) {
+                            viewModel.authenticationFailed("System authentication is unavailable")
+                        } else {
+                            DeviceAuthentication.authenticate(
+                                activity = activity,
+                                title = "Enable unattended auto-sweep",
+                                subtitle = "Approve automatic gas spending for this terminal target",
+                                onAuthenticated = viewModel::enableAutoSweepAuthenticated,
+                                onError = viewModel::authenticationFailed,
+                            )
+                        }
+                    }
+                }) { Text("Authenticate & enable") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAutoSweepEnrollment = false }) { Text("Cancel") }
+            },
+        )
     }
 
     if (showProvisioningScanner) {
@@ -368,7 +412,10 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                         autoSweepEnabled = state.autoSweepEnabled,
                         unlocked = state.adminUnlocked,
                         busy = setupBusy,
-                        onAutoSweepChanged = viewModel::updateAutoSweepEnabled,
+                        onAutoSweepChanged = { enabled ->
+                            if (enabled) showAutoSweepEnrollment = true
+                            else viewModel.updateAutoSweepEnabled(false)
+                        },
                         onConfigureRpcEndpoints = { showRpcEndpointSettings = true },
                     )
                 }
@@ -800,10 +847,11 @@ private fun AdvancedSettingsCard(
                     Text("Auto-sweep confirmed payments")
                     Text(
                         "For a newly issued invoice with its own incoming transaction evidence, " +
-                            "automatically opens settlement review after canonical confirmation. " +
-                            "Late payments remain manual. Every sweep still requires device " +
-                            "authentication, signing safeguards, finality, and matching on-chain " +
-                            "Swept proof.",
+                            "automatically revalidates, signs, and broadcasts after canonical " +
+                            "confirmation. Enabling requires one explicit system authentication; " +
+                            "individual payments do not prompt. Late payments remain manual. " +
+                            "Signing stays bound to the current chain, vault, operator, canonical " +
+                            "invoice calldata, fee cap, finality, and matching on-chain Swept proof.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }

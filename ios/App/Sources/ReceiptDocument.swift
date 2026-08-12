@@ -30,33 +30,20 @@ enum ReceiptFormatter {
         let paid = "Paid: \(total)" + (network.isEmpty ? "" : " (\(network))")
 
         var lines = [String]()
-        lines.append(String(repeating: "=", count: receiptWidth))
         lines.append(contentsOf: wrapped(singleLine(document.merchantName), width: merchantNameWidth)
             .map(centered))
         if let abn = document.merchantABN.map(singleLine), !abn.isEmpty {
             lines.append(centered("ABN \(abn)"))
         }
-        lines.append(String(repeating: "=", count: receiptWidth))
-        lines.append("")
         lines.append(centered("PAYMENT RECEIPT"))
-        lines.append("")
-        lines.append("Date (UTC): \(date)")
-        lines.append("Receipt:  #\(document.receiptNumber)")
-        lines.append("")
-        lines.append(String(repeating: "-", count: receiptWidth))
+        lines.append(contentsOf: twoColumns(left: "Date (UTC):", right: date))
+        lines.append(contentsOf: twoColumns(left: "Receipt:", right: "#\(document.receiptNumber)"))
         lines.append(contentsOf: twoColumns(left: "TOTAL", right: total))
-        lines.append(String(repeating: "-", count: receiptWidth))
-        lines.append("")
         lines.append(contentsOf: fitted(paid))
         lines.append(contentsOf: fitted("Terminal: \(abbreviate(document.terminalAddress))"))
         lines.append(contentsOf: fitted("Tx Hash:  \(abbreviate(document.paymentTransactionHash))"))
-        lines.append("")
-        lines.append(String(repeating: "=", count: receiptWidth))
-        lines.append(centered("Powered by OPK"))
-        lines.append(String(repeating: "=", count: receiptWidth))
-        lines.append("")
+        lines.append(centered("Powered by OpenPasskey"))
         lines.append(centered("Scan for transaction details"))
-        lines.append(document.explorerURL.absoluteString)
         return lines.joined(separator: "\n") + "\n"
     }
 

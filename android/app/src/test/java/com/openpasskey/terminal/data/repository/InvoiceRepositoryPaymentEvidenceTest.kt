@@ -20,12 +20,71 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.mockingDetails
 import org.mockito.Mockito.`when`
 
 class InvoiceRepositoryPaymentEvidenceTest {
+    @Test
+    fun `fresh evidence attestation is exact short lived and consumed once`() {
+        var now = 1_000L
+        val endpointResolver = SwitchingRpcEndpointResolver(ENDPOINT_A)
+        val invoice = invoice()
+        val resolution = endpointResolver.resolveCurrent(invoice.chainId, ENDPOINT_A)
+        val attestations = FreshPaymentEvidenceAttestations(
+            elapsedRealtimeMillis = { now },
+            validityMillis = 100,
+        )
+
+        attestations.record(invoice, resolution)
+        assertTrue(attestations.consumeIfCurrent(invoice, endpointResolver::isCurrent))
+        assertFalse(attestations.consumeIfCurrent(invoice, endpointResolver::isCurrent))
+
+        attestations.record(invoice, resolution)
+        now = 1_101L
+        assertFalse(attestations.consumeIfCurrent(invoice, endpointResolver::isCurrent))
+    }
+
+    @Test
+    fun `fresh evidence attestation rejects endpoint rotation and cursor changes`() {
+        val endpointResolver = SwitchingRpcEndpointResolver(ENDPOINT_A)
+        val invoice = invoice()
+        val attestations = FreshPaymentEvidenceAttestations(elapsedRealtimeMillis = { 1_000L })
+
+        attestations.record(invoice, endpointResolver.resolveCurrent(invoice.chainId, ENDPOINT_A))
+        endpointResolver.switchTo(ENDPOINT_B)
+        assertFalse(attestations.consumeIfCurrent(invoice, endpointResolver::isCurrent))
+
+        attestations.record(invoice, endpointResolver.resolveCurrent(invoice.chainId, ENDPOINT_B))
+        assertFalse(
+            attestations.consumeIfCurrent(
+                invoice.copy(firstDetectedBlockHash = "0x" + "77".repeat(32)),
+                endpointResolver::isCurrent,
+            ),
+        )
+    }
+
+    @Test
+    fun `new repository has no process local fresh evidence shortcut`() = runBlocking {
+        val invoice = invoice().copy(receiptPrintedAt = null)
+        val dao = mock(InvoiceDao::class.java)
+        `when`(dao.getById(invoice.invoiceId)).thenReturn(invoice)
+        var resolverCalls = 0
+
+        val result = repository(
+            dao,
+            PaymentTransactionResolver { _, _ ->
+                resolverCalls += 1
+                evidence()
+            },
+        ).ensurePaymentEvidenceAutomatically(invoice.invoiceId)
+
+        assertTrue(result is AutomaticPaymentEvidenceResult.Available)
+        assertEquals(1, resolverCalls)
+    }
+
     @Test
     fun `stored incoming evidence is resolved again before it can be printed`() = runBlocking {
         val invoice = invoice()
