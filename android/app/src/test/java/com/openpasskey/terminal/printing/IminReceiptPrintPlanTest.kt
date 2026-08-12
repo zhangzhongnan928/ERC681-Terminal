@@ -24,7 +24,7 @@ class IminReceiptPrintPlanTest {
         assertFalse(printedText.contains("\n\n"))
         assertFalse(printedText.contains(document.explorerUrl))
         assertEquals(document.explorerUrl, plan.explorerUrl)
-        assertTrue(plan.finalFeed in 1..64)
+        assertEquals(80, plan.finalFeed)
     }
 
     @Test
