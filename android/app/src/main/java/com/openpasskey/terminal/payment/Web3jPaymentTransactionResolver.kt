@@ -37,13 +37,13 @@ class Web3jPaymentTransactionResolver : PaymentTransactionResolver {
 
     internal companion object {
         // Three nested bounds produce a hard end-to-end envelope with strict headroom below the
-        // five-second background coordinator lease. Socket timeouts bound each blocking
-        // operation; the whole-call transport deadline bounds one HTTP call to the deadline plus
-        // a single further blocked read (a dribbling peer cannot chain reads past it); and the
-        // resolver's budget, checked before every network operation, bounds the sequential sum.
-        // Worst complete pass: 2_800 + (1_250 + 750) = 4_800 ms < 5_000 ms, leaving margin for
-        // request writes, response parsing, and coroutine resumption. BackgroundRpcBudgetTest
-        // pins the strict inequality against the lease constant.
+        // five-second background coordinator lease. Socket timeouts bound each idle wait; the
+        // whole-call watchdog deadline disconnects a call the moment it expires, aborting even a
+        // header- or body-dribbling peer within milliseconds; and the resolver's budget, checked
+        // before every network operation, bounds the sequential sum. Worst complete pass:
+        // 2_800 + 1_250 = 4_050 ms plus millisecond-scale watchdog teardown — well under
+        // 5_000 ms, leaving margin for request writes, response parsing, and coroutine
+        // resumption. BackgroundRpcBudgetTest pins the strict inequality against the lease.
         internal const val EVIDENCE_RPC_CONNECT_TIMEOUT_MILLIS = 500
         internal const val EVIDENCE_RPC_READ_TIMEOUT_MILLIS = 750
         internal const val EVIDENCE_RPC_CALL_TIMEOUT_MILLIS = 1_250

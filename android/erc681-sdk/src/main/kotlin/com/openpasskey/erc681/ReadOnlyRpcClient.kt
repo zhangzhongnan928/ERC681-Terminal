@@ -20,6 +20,8 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadLocalRandom
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 
@@ -1640,10 +1642,13 @@ private class HttpUrlConnectionRpcTransport(
     private val readTimeoutMillis: Int,
     /**
      * Optional whole-call deadline. Socket timeouts bound each blocking operation but not their
-     * sum — a peer releasing one byte per read keeps a response alive indefinitely — so the
-     * deadline is re-checked after connect/headers and between body chunks. One call is
-     * therefore bounded by this deadline plus a single further blocked read. Request-body
-     * writes have no OS-level timeout, but bodies are small enough to fit socket buffers.
+     * sum, and they are idle timeouts: a peer releasing one header or body byte per interval
+     * keeps a call alive indefinitely without ever tripping them. The deadline is therefore
+     * enforced by a watchdog that disconnects the connection when it expires — closing the
+     * underlying socket aborts whichever blocking phase is in progress (connect, header read
+     * inside responseCode, or body read) within milliseconds. Cooperative re-checks between
+     * body chunks remain as a deterministic backstop. Request-body writes have no OS-level
+     * timeout, but bodies are small enough to fit socket buffers.
      */
     private val callTimeoutMillis: Int? = null,
 ) : RpcTransport {
@@ -1657,9 +1662,12 @@ private class HttpUrlConnectionRpcTransport(
         val deadlineNanos = callTimeoutMillis?.let {
             System.nanoTime() + it * NANOS_PER_MILLI
         }
+        val deadlineExpired = AtomicBoolean()
         fun requireCallDeadline() {
-            if (deadlineNanos != null && System.nanoTime() > deadlineNanos) {
-                throw RpcException("RPC HTTP call exceeded its deadline")
+            if (deadlineExpired.get() ||
+                (deadlineNanos != null && System.nanoTime() > deadlineNanos)
+            ) {
+                throw RpcException(CALL_DEADLINE_MESSAGE)
             }
         }
         val body = requestBody.toByteArray(StandardCharsets.UTF_8)
@@ -1673,33 +1681,53 @@ private class HttpUrlConnectionRpcTransport(
             setRequestProperty("Content-Type", "application/json; charset=utf-8")
             setFixedLengthStreamingMode(body.size)
         }
+        val watchdog = callTimeoutMillis?.let { timeout ->
+            CALL_DEADLINE_WATCHDOG.schedule(
+                {
+                    deadlineExpired.set(true)
+                    // Closes the socket, aborting any blocked connect/header/body operation.
+                    runCatching { connection.disconnect() }
+                },
+                timeout.toLong(),
+                TimeUnit.MILLISECONDS,
+            )
+        }
 
-        connection.outputStream.use { it.write(body) }
-        val status = connection.responseCode
-        requireCallDeadline()
-        val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-        if (status == 429) {
-            stream?.close()
-            throw rpcHttpFailure(
-                status = status,
-                retryAfterHeader = connection.getHeaderField("Retry-After"),
-                nowEpochMillis = System.currentTimeMillis(),
-            )
+        try {
+            connection.outputStream.use { it.write(body) }
+            val status = connection.responseCode
+            requireCallDeadline()
+            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+            if (status == 429) {
+                stream?.close()
+                throw rpcHttpFailure(
+                    status = status,
+                    retryAfterHeader = connection.getHeaderField("Retry-After"),
+                    nowEpochMillis = System.currentTimeMillis(),
+                )
+            }
+            val response = stream?.use { input ->
+                readLimitedUtf8(input, ::requireCallDeadline)
+            }.orEmpty()
+            if (status !in 200..299) {
+                throw rpcHttpFailure(
+                    status = status,
+                    retryAfterHeader = connection.getHeaderField("Retry-After"),
+                    nowEpochMillis = System.currentTimeMillis(),
+                )
+            }
+            if (response.isEmpty()) throw RpcException("RPC HTTP response body is empty")
+            // Closing request/response streams returns this connection to Android's process-wide
+            // keep-alive pool. Calling disconnect() here prevented reuse across short RPC phases.
+            return response
+        } catch (error: Exception) {
+            // A watchdog disconnect surfaces as an arbitrary transport IOException from whichever
+            // blocking call it aborted; report the deadline deterministically instead.
+            if (deadlineExpired.get()) throw RpcException(CALL_DEADLINE_MESSAGE)
+            throw error
+        } finally {
+            watchdog?.cancel(false)
         }
-        val response = stream?.use { input ->
-            readLimitedUtf8(input, ::requireCallDeadline)
-        }.orEmpty()
-        if (status !in 200..299) {
-            throw rpcHttpFailure(
-                status = status,
-                retryAfterHeader = connection.getHeaderField("Retry-After"),
-                nowEpochMillis = System.currentTimeMillis(),
-            )
-        }
-        if (response.isEmpty()) throw RpcException("RPC HTTP response body is empty")
-        // Closing request/response streams returns this connection to Android's process-wide
-        // keep-alive pool. Calling disconnect() here prevented reuse across short RPC phases.
-        return response
     }
 
     private fun readLimitedUtf8(input: InputStream, betweenChunks: () -> Unit): String {
@@ -1722,6 +1750,13 @@ private class HttpUrlConnectionRpcTransport(
         // larger than the earlier metadata-only RPC ceiling. Keep a finite defensive bound.
         private const val MAX_RESPONSE_BYTES = 8 * 1024 * 1024
         private const val NANOS_PER_MILLI = 1_000_000L
+        private const val CALL_DEADLINE_MESSAGE = "RPC HTTP call exceeded its deadline"
+
+        // One shared daemon thread arms at most one pending disconnect per in-flight call that
+        // configured a whole-call deadline; completed calls cancel their task in a finally block.
+        private val CALL_DEADLINE_WATCHDOG = Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "opk-rpc-call-deadline").apply { isDaemon = true }
+        }
     }
 }
 

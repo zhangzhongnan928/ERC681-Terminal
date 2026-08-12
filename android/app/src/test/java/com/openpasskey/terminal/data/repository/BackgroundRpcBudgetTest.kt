@@ -9,20 +9,19 @@ class BackgroundRpcBudgetTest {
     @Test
     fun `evidence resolution worst envelope stays strictly below coordinator lease`() {
         // The resolver checks its end-to-end budget before every network operation, and each
-        // HTTP call is bounded by the whole-call transport deadline plus one further blocked
-        // read. The worst complete pass is therefore the budget plus one worst-case call, and it
-        // must sit strictly below the lease to leave headroom for request writes, response
-        // parsing, and coroutine resumption.
-        val worstCallMillis = Web3jPaymentTransactionResolver.EVIDENCE_RPC_CALL_TIMEOUT_MILLIS +
-            Web3jPaymentTransactionResolver.EVIDENCE_RPC_READ_TIMEOUT_MILLIS
-        val worstCaseMillis =
-            Web3jPaymentTransactionResolver.EVIDENCE_TOTAL_BUDGET_MILLIS + worstCallMillis
+        // HTTP call is hard-bounded by the whole-call watchdog deadline, which disconnects the
+        // socket when it expires. The worst complete pass is therefore the budget plus one
+        // deadline-length call, and it must sit strictly below the lease so millisecond-scale
+        // watchdog teardown, request writes, response parsing, and coroutine resumption all have
+        // headroom.
+        val worstCaseMillis = Web3jPaymentTransactionResolver.EVIDENCE_TOTAL_BUDGET_MILLIS +
+            Web3jPaymentTransactionResolver.EVIDENCE_RPC_CALL_TIMEOUT_MILLIS
 
         assertTrue(
             worstCaseMillis < RpcWorkCoordinator.DEFAULT_BACKGROUND_OPERATION_TIMEOUT_MILLIS,
         )
         // A healthy single-read call (connect plus one full read) must fit the call deadline so
-        // the deadline only fires on genuinely stalled or dribbling responses.
+        // the watchdog only fires on genuinely stalled or dribbling responses.
         assertTrue(
             Web3jPaymentTransactionResolver.EVIDENCE_RPC_CONNECT_TIMEOUT_MILLIS +
                 Web3jPaymentTransactionResolver.EVIDENCE_RPC_READ_TIMEOUT_MILLIS <=
