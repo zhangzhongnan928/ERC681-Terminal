@@ -116,11 +116,26 @@ class ReadOnlyRpcClient private constructor(
         includeDirectNativeTransactions: Boolean,
     ): PaymentEvidenceBlock? {
         require(blockNumber >= 0) { "Block number must not be negative" }
-        val params = JsonArray().apply {
-            add(quantityHex(blockNumber))
-            add(includeDirectNativeTransactions)
-        }
-        val result = rpcResult("eth_getBlockByNumber", params)
+        val result = rpcResult(
+            "eth_getBlockByNumber",
+            paymentEvidenceBlockParams(blockNumber, includeDirectNativeTransactions),
+        )
+        return decodePaymentEvidenceBlockResult(result, blockNumber, includeDirectNativeTransactions)
+    }
+
+    private fun paymentEvidenceBlockParams(
+        blockNumber: Long,
+        includeDirectNativeTransactions: Boolean,
+    ): JsonArray = JsonArray().apply {
+        add(quantityHex(blockNumber))
+        add(includeDirectNativeTransactions)
+    }
+
+    private fun decodePaymentEvidenceBlockResult(
+        result: JsonElement,
+        blockNumber: Long,
+        includeDirectNativeTransactions: Boolean,
+    ): PaymentEvidenceBlock? {
         if (result.isJsonNull) return null
         if (!result.isJsonObject) {
             throw RpcException("eth_getBlockByNumber result must be an object or null")
@@ -160,6 +175,18 @@ class ReadOnlyRpcClient private constructor(
         receiver: EvmAddress,
         blockNumber: Long,
     ): List<IncomingErc20Transfer> {
+        val result = rpcResult(
+            "eth_getLogs",
+            incomingErc20TransfersParams(token, receiver, blockNumber),
+        )
+        return decodeIncomingErc20TransfersResult(result, token, receiver, blockNumber)
+    }
+
+    private fun incomingErc20TransfersParams(
+        token: EvmAddress,
+        receiver: EvmAddress,
+        blockNumber: Long,
+    ): JsonArray {
         require(!token.isZero) { "Token address must not be zero" }
         require(!NativeAsset.isNative(token)) { "Native assets do not emit ERC-20 Transfer logs" }
         require(!receiver.isZero) { "Payment receiver must not be zero" }
@@ -175,11 +202,151 @@ class ReadOnlyRpcClient private constructor(
                 add(addressTopic(receiver))
             })
         }
-        val result = rpcResult("eth_getLogs", JsonArray().apply { add(filter) })
+        return JsonArray().apply { add(filter) }
+    }
+
+    private fun decodeIncomingErc20TransfersResult(
+        result: JsonElement,
+        token: EvmAddress,
+        receiver: EvmAddress,
+        blockNumber: Long,
+    ): List<IncomingErc20Transfer> {
         if (!result.isJsonArray) throw RpcException("eth_getLogs result must be an array")
         return result.asJsonArray.map { element ->
             decodeIncomingErc20Transfer(element, token, receiver, blockNumber)
         }
+    }
+
+    /**
+     * Wave 1 of a batched evidence resolution: endpoint identity, both saved anchors, and both
+     * anchor-height balances in one JSON-RPC batch. Anchor hash verification stays with the
+     * resolver; the closing bracket re-reads every anchor fresh via [paymentEvidenceBlockHeaders].
+     */
+    internal fun openPaymentEvidenceContext(
+        asset: EvmAddress,
+        receiver: EvmAddress,
+        publicationBlockNumber: Long,
+        fundingBlockNumber: Long,
+    ): PaymentEvidenceOpenContext {
+        require(publicationBlockNumber >= 0) { "Block number must not be negative" }
+        require(fundingBlockNumber >= 0) { "Block number must not be negative" }
+        val isNative = NativeAsset.isNative(asset)
+        val results = rpcResults(
+            listOf(
+                RpcCall("eth_chainId", JsonArray()),
+                RpcCall(
+                    "eth_getBlockByNumber",
+                    paymentEvidenceBlockParams(publicationBlockNumber, false),
+                ),
+                RpcCall(
+                    "eth_getBlockByNumber",
+                    paymentEvidenceBlockParams(fundingBlockNumber, false),
+                ),
+                assetBalanceCall(asset, receiver, quantityHex(publicationBlockNumber)),
+                assetBalanceCall(asset, receiver, quantityHex(fundingBlockNumber)),
+            ),
+        )
+        return PaymentEvidenceOpenContext(
+            chainId = parseQuantity(resultString(results[0]), "eth_chainId")
+                .toSupportedLong("Chain ID"),
+            publicationBlock = decodePaymentEvidenceBlockResult(
+                results[1],
+                publicationBlockNumber,
+                false,
+            ),
+            fundingBlock = decodePaymentEvidenceBlockResult(results[2], fundingBlockNumber, false),
+            publicationBalance = decodeAssetBalance(results[3], isNative),
+            fundingBalance = decodeAssetBalance(results[4], isNative),
+        )
+    }
+
+    /** Fresh batched balance reads at exact heights; chunks over ten run concurrently. */
+    internal fun paymentAssetBalances(
+        asset: EvmAddress,
+        receiver: EvmAddress,
+        blockNumbers: Collection<Long>,
+    ): Map<Long, BigInteger> {
+        val ordered = blockNumbers.toCollection(LinkedHashSet())
+        require(ordered.isNotEmpty()) { "Balance block set must not be empty" }
+        require(ordered.size <= MAX_CONCURRENT_CALL_SET_SIZE) {
+            "Balance block set must contain at most $MAX_CONCURRENT_CALL_SET_SIZE heights"
+        }
+        ordered.forEach { require(it >= 0) { "Block number must not be negative" } }
+        val isNative = NativeAsset.isNative(asset)
+        val results = rpcResultsChunked(
+            ordered.map { blockNumber -> assetBalanceCall(asset, receiver, quantityHex(blockNumber)) },
+        )
+        return ordered.mapIndexed { index, blockNumber ->
+            blockNumber to decodeAssetBalance(results[index], isNative)
+        }.toMap(LinkedHashMap())
+    }
+
+    /**
+     * Crossing-block reads in one batch: the optional prior-height balance, the canonical crossing
+     * block (with full transactions only for native assets), and receiver-scoped ERC-20 Transfer
+     * logs for token assets.
+     */
+    internal fun paymentCrossingReads(
+        asset: EvmAddress,
+        receiver: EvmAddress,
+        blockNumber: Long,
+        includePriorBalance: Boolean,
+    ): PaymentCrossingReads {
+        require(blockNumber >= 0) { "Block number must not be negative" }
+        val isNative = NativeAsset.isNative(asset)
+        val calls = buildList {
+            if (includePriorBalance) {
+                require(blockNumber > 0) { "Prior balance requires a positive block number" }
+                add(assetBalanceCall(asset, receiver, quantityHex(blockNumber - 1L)))
+            }
+            add(
+                RpcCall(
+                    "eth_getBlockByNumber",
+                    paymentEvidenceBlockParams(blockNumber, isNative),
+                ),
+            )
+            if (!isNative) {
+                add(RpcCall("eth_getLogs", incomingErc20TransfersParams(asset, receiver, blockNumber)))
+            }
+        }
+        val results = rpcResults(calls)
+        var index = 0
+        val priorBalance = if (includePriorBalance) {
+            decodeAssetBalance(results[index++], isNative)
+        } else {
+            null
+        }
+        val block = decodePaymentEvidenceBlockResult(results[index++], blockNumber, isNative)
+        val transfers = if (!isNative) {
+            decodeIncomingErc20TransfersResult(results[index], asset, receiver, blockNumber)
+        } else {
+            null
+        }
+        return PaymentCrossingReads(
+            block = block,
+            erc20Transfers = transfers,
+            priorBalance = priorBalance,
+        )
+    }
+
+    /** Fresh batched canonical header reads used to close the evidence bracket. */
+    internal fun paymentEvidenceBlockHeaders(
+        blockNumbers: Collection<Long>,
+    ): Map<Long, PaymentEvidenceBlock?> {
+        val ordered = blockNumbers.toCollection(LinkedHashSet())
+        require(ordered.isNotEmpty()) { "Header block set must not be empty" }
+        require(ordered.size <= MAX_BATCH_SIZE) {
+            "Header block set must contain at most $MAX_BATCH_SIZE heights"
+        }
+        ordered.forEach { require(it >= 0) { "Block number must not be negative" } }
+        val results = rpcResults(
+            ordered.map { blockNumber ->
+                RpcCall("eth_getBlockByNumber", paymentEvidenceBlockParams(blockNumber, false))
+            },
+        )
+        return ordered.mapIndexed { index, blockNumber ->
+            blockNumber to decodePaymentEvidenceBlockResult(results[index], blockNumber, false)
+        }.toMap(LinkedHashMap())
     }
 
     private fun decodeDirectNativePaymentTransaction(

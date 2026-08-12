@@ -25,9 +25,19 @@ class Web3jPaymentTransactionResolver : PaymentTransactionResolver {
             val request = invoice.toPaymentEvidenceRequestOrNull() ?: return@withContext null
             val client = ReadOnlyRpcClient(
                 invoice.toEvidenceNetworkConfig(resolvedRpcUrl),
+                connectTimeoutMillis = EVIDENCE_RPC_CONNECT_TIMEOUT_MILLIS,
+                readTimeoutMillis = EVIDENCE_RPC_READ_TIMEOUT_MILLIS,
             )
             PaymentEvidenceResolver(client).resolve(request)
         }
+
+    private companion object {
+        // The batched resolver typically completes in four grouped round trips, so a bounded
+        // per-socket budget keeps the whole pass inside the background coordinator's lease while
+        // still tolerating a slow public endpoint on the interactive reprint path.
+        const val EVIDENCE_RPC_CONNECT_TIMEOUT_MILLIS = 1_000
+        const val EVIDENCE_RPC_READ_TIMEOUT_MILLIS = 2_500
+    }
 }
 
 internal fun Invoice.toPaymentEvidenceRequestOrNull(): PaymentEvidenceRequest? {

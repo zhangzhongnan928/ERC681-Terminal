@@ -7,6 +7,7 @@ import com.google.gson.JsonParser
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.erc681.NativeAsset
 import com.openpasskey.terminal.data.model.SettlementFeeMode
+import okhttp3.ConnectionPool
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -891,11 +892,13 @@ private class OwnedRpcEndpoint(
 ) : Closeable {
     override fun close() {
         // No call can still hold this endpoint because the owning client closes it under its
-        // write lock. Tear down every URL-bearing wrapper and transport resource before returning.
+        // write lock. Tear down every URL-bearing wrapper and transport resource before
+        // returning. Pooled sockets are keyed by host only — request URLs, and therefore any
+        // embedded credentials, never outlive the request — so the shared connection pool is
+        // deliberately left warm for the next settlement client.
         httpClient.dispatcher.cancelAll()
         runCatching { web3j.shutdown() }
         web3jScheduler.shutdownNow()
-        httpClient.connectionPool.evictAll()
         runCatching { httpClient.cache?.close() }
         httpClient.dispatcher.executorService.shutdownNow()
     }
@@ -924,7 +927,6 @@ private fun createOwnedRpcEndpoint(rpcUrl: String): OwnedRpcEndpoint {
     } catch (error: Throwable) {
         scheduler.shutdownNow()
         httpClient.dispatcher.cancelAll()
-        httpClient.connectionPool.evictAll()
         runCatching { httpClient.cache?.close() }
         httpClient.dispatcher.executorService.shutdownNow()
         throw error
@@ -936,6 +938,11 @@ internal fun settlementHttpClientBuilder(): OkHttpClient.Builder =
     // Build directly so Web3j cannot install its optional BODY logger, which would include a
     // credential-bearing request URL when an application's SLF4J debug level is enabled.
     OkHttpClient.Builder()
+        // Settlement clients are constructed per operation so credential-bearing URLs never
+        // outlive an endpoint rotation, but TCP+TLS sessions carry no request material and are
+        // shared across constructions to avoid a fresh handshake on every preflight and
+        // recovery step.
+        .connectionPool(SETTLEMENT_CONNECTION_POOL)
         .followRedirects(false)
         .followSslRedirects(false)
         // Provider URLs can contain client credentials. Replace transport exception text at the
@@ -955,6 +962,11 @@ internal fun settlementHttpClientBuilder(): OkHttpClient.Builder =
 private const val SETTLEMENT_RPC_CALL_TIMEOUT_MILLIS = 4_000L
 private const val WEB3J_BLOCK_TIME_MILLIS = 15_000L
 private val SETTLEMENT_TRANSPORT_IDS = AtomicLong()
+private val SETTLEMENT_CONNECTION_POOL = ConnectionPool(
+    5,
+    5,
+    TimeUnit.MINUTES,
+)
 
 private fun isKnownTransactionProviderResponse(message: String?): Boolean =
     message.orEmpty().lowercase().let { value ->

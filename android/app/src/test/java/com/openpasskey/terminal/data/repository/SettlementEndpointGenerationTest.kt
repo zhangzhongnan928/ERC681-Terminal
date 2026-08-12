@@ -92,6 +92,45 @@ class SettlementEndpointGenerationTest {
             )
         }
 
+    @Test
+    fun `historical proof is reused across prepares on the same endpoint generation`() =
+        runBlocking {
+            val invoice = confirmedInvoice()
+            val resolver = SwitchingResolver(ENDPOINT_A)
+            val clock = AtomicLong(100_000)
+            val historicalEndpoints = mutableListOf<String>()
+            val repository = SettlementRepository(
+                database = fakeDatabase(invoice),
+                walletAccess = ReadyWallet,
+                chainConfigSnapshot = ::unprovisionedConfig,
+                lifecycleGate = TerminalLifecycleGate(),
+                rpcWorkCoordinator = RpcWorkCoordinator(),
+                rpcEndpointResolver = resolver,
+                clientFactory = { preflightClient { } },
+                gson = Gson(),
+                elapsedRealtimeMillis = clock::get,
+                historicalSnapshotValidationOverride = { _, endpoint ->
+                    historicalEndpoints += endpoint
+                },
+            )
+
+            val reviewed = repository.prepare(listOf(invoice.invoiceId))
+            // Far beyond the historical TTL: generation identity, not wall-clock age, bounds
+            // reuse of the immutable-pin validation within one process.
+            clock.set(500_000)
+            val again = repository.prepare(listOf(invoice.invoiceId))
+
+            assertEquals(listOf(ENDPOINT_A), historicalEndpoints)
+            assertEquals(reviewed.rpcEndpointGeneration, again.rpcEndpointGeneration)
+            assertEquals(500_000L, again.historicalProofAtElapsedRealtimeMillis)
+
+            resolver.switchTo(ENDPOINT_B)
+            val rotated = repository.prepare(listOf(invoice.invoiceId))
+
+            assertEquals(listOf(ENDPOINT_A, ENDPOINT_B), historicalEndpoints)
+            assertEquals(1L, rotated.rpcEndpointGeneration)
+        }
+
     private fun preflightClient(onPreflight: (Boolean) -> Unit): SettlementChainClient =
         proxy { method, arguments ->
             when (method.name) {

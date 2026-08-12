@@ -206,6 +206,28 @@ class SettlementRepository internal constructor(
     private val settlementDao = database.settlementDao()
     private val eventDao = database.settlementEventDao()
 
+    /** Immutable-pin validations proven in this process, keyed by serving endpoint generation. */
+    private val validatedHistoricalProofs =
+        java.util.Collections.synchronizedSet(linkedSetOf<HistoricalProofKey>())
+
+    private data class HistoricalProofKey(
+        val rpcEndpointGeneration: Long,
+        val fingerprint: String,
+    )
+
+    private fun rememberValidatedHistoricalProof(key: HistoricalProofKey) {
+        synchronized(validatedHistoricalProofs) {
+            if (validatedHistoricalProofs.size >= MAX_VALIDATED_HISTORICAL_PROOFS &&
+                key !in validatedHistoricalProofs
+            ) {
+                val iterator = validatedHistoricalProofs.iterator()
+                iterator.next()
+                iterator.remove()
+            }
+            validatedHistoricalProofs.add(key)
+        }
+    }
+
     fun observeReadyInvoices(): Flow<List<Invoice>> = invoiceDao.observeReadyForSettlement()
     fun observeRecentTransactions(limit: Int = 50): Flow<List<SettlementTransaction>> =
         settlementDao.observeRecent(limit)
@@ -278,6 +300,11 @@ class SettlementRepository internal constructor(
      * Full unattended path used only after one-time administrator enrollment. It repeats every
      * live canonical/configuration/fee check, persists SIGNED bytes before the sole broadcast,
      * and never weakens the separate manual authentication path above.
+     *
+     * Unlike the manual path there is no authentication prompt between revalidation and signing:
+     * the submission mutex is held from the [prepareInternal] preflight through key use, so that
+     * one preflight is the live safety core and a second identical pass would re-prove state that
+     * cannot have changed.
      */
     suspend fun submitAutomatically(reviewed: PreparedSettlement): SettlementTransaction =
         withContext(Dispatchers.IO) {
@@ -298,9 +325,8 @@ class SettlementRepository internal constructor(
                         ),
                     ) { "Automatic settlement fee increased by more than 20%; retrying later" }
                     requireNoActiveOperatorTransaction(revalidated)
-                    val fresh = requirePreparedBalancesStillExact(revalidated)
                     signPersistAndBroadcast(
-                        fresh = fresh,
+                        fresh = revalidated,
                         authenticatedAtElapsedRealtimeMillis = null,
                         automatic = true,
                     )
@@ -434,6 +460,43 @@ class SettlementRepository internal constructor(
         }
     }
 
+    /**
+     * Drives one transaction's durable recovery to a terminal state on a fast bounded cadence.
+     * Each step is the same cooperative background unit as [recoverPending] — endpoint budget
+     * first, then submission serialization — so cashier work always wins and no lock is held
+     * across a poll delay. Returns the latest durable state once the transaction leaves
+     * [ACTIVE_STATUSES] or the attempt budget is exhausted; the scheduled recovery loop remains
+     * the fallback for anything still active afterwards.
+     */
+    suspend fun driveTransactionRecovery(
+        id: String,
+        maxAttempts: Int = FAST_RECOVERY_MAX_ATTEMPTS,
+        intervalMillis: Long = FAST_RECOVERY_INTERVAL_MILLIS,
+    ): SettlementTransaction? = withContext(Dispatchers.IO) {
+        require(maxAttempts > 0) { "Recovery attempt budget must be positive" }
+        require(intervalMillis > 0) { "Recovery interval must be positive" }
+        var latest = settlementDao.getById(id) ?: return@withContext null
+        repeat(maxAttempts) { attempt ->
+            if (latest.status !in ACTIVE_STATUSES) return@withContext latest
+            val stepped = rpcWorkCoordinator.withBackgroundOperation {
+                try {
+                    submissionMutex.withLock { recoverOneBackgroundStep(id) }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    recordRecoverableError(latest, error)
+                    settlementDao.getById(id) ?: latest
+                }
+            }
+            if (stepped != null) {
+                latest = stepped
+                if (latest.status !in ACTIVE_STATUSES) return@withContext latest
+            }
+            if (attempt < maxAttempts - 1) delay(intervalMillis)
+        }
+        latest
+    }
+
     private suspend fun prepareInternal(
         invoiceIds: List<String>,
         reusableHistoricalProof: PreparedSettlement? = null,
@@ -473,13 +536,22 @@ class SettlementRepository internal constructor(
                     HISTORICAL_PROOF_TTL_MILLIS,
                 )
         } == true
-        val historicalProofAt = if (reusableProofIsFresh) {
-            requireNotNull(reusableHistoricalProof).historicalProofAtElapsedRealtimeMillis
-        } else {
-            historicalSnapshotValidationOverride?.invoke(first, endpointResolution.endpoint)
-                ?: validateHistoricalSettlementSnapshot(first, endpointResolution.endpoint)
-            proofNow
+        val proofCacheKey = HistoricalProofKey(endpointResolution.generation, proofFingerprint)
+        val historicalProofAt = when {
+            reusableProofIsFresh ->
+                requireNotNull(reusableHistoricalProof).historicalProofAtElapsedRealtimeMillis
+            // Everything the historical pass re-reads is immutable pinned deployment state, so
+            // one successful validation stays authoritative for the endpoint generation that
+            // served it. An admin endpoint rotation bumps the generation and forces a fresh pass
+            // through the replacement endpoint before any further key use.
+            proofCacheKey in validatedHistoricalProofs -> proofNow
+            else -> {
+                historicalSnapshotValidationOverride?.invoke(first, endpointResolution.endpoint)
+                    ?: validateHistoricalSettlementSnapshot(first, endpointResolution.endpoint)
+                proofNow
+            }
         }
+        rememberValidatedHistoricalProof(proofCacheKey)
         val wallet = walletAccess.snapshot()
         require(wallet.availability == OperatorWalletAvailability.READY) {
             wallet.error ?: "Create the terminal operator wallet first"
@@ -1432,6 +1504,11 @@ class SettlementRepository internal constructor(
         private const val RECEIPT_POLL_MILLIS = 3_000L
         private const val RECEIPT_POLL_ATTEMPTS = 8
         private const val CONFIRMATION_POLL_ATTEMPTS = 20
+        // Post-broadcast drive: one cooperative background step per interval keeps the terminal
+        // transition near chain finality (~two Base blocks) without holding any interactive lock.
+        internal const val FAST_RECOVERY_MAX_ATTEMPTS = 20
+        internal const val FAST_RECOVERY_INTERVAL_MILLIS = 3_000L
+        private const val MAX_VALIDATED_HISTORICAL_PROOFS = 32
         private const val HISTORICAL_RPC_CONNECT_TIMEOUT_MILLIS = 2_500
         private const val HISTORICAL_RPC_READ_TIMEOUT_MILLIS = 4_000
         internal const val HISTORICAL_PROOF_TTL_MILLIS = 60_000L

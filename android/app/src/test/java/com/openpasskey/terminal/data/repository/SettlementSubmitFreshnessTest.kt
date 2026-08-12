@@ -48,9 +48,12 @@ class SettlementSubmitFreshnessTest {
                 "settlementPreflight" -> {
                     preflightCalls += 1
                     assertEquals(false, arguments?.get(1))
-                    if (preflightCalls == 2) monotonicClock.set(EXPIRED_AFTER_AUTOMATIC_PREFLIGHT)
+                    // The submission mutex is held from this single live revalidation through key
+                    // use; crossing the proof TTL inside it must still refuse unattended signing.
+                    monotonicClock.set(EXPIRED_AFTER_AUTOMATIC_PREFLIGHT)
                     preflightSnapshot()
                 }
+                "estimateGas" -> GAS_LIMIT
                 "close" -> Unit
                 else -> error("Automatic submit unexpectedly called settlement RPC ${method.name}")
             }
@@ -71,7 +74,7 @@ class SettlementSubmitFreshnessTest {
         }
 
         assertTrue(error.message.orEmpty(), error.message.orEmpty().contains("expired"))
-        assertEquals(2, preflightCalls)
+        assertEquals(1, preflightCalls)
         assertEquals(0, wallet.automaticSignerActivations)
         assertEquals(0, wallet.signerActivations)
         assertEquals(0, persistence.settlementInserts)
@@ -438,6 +441,7 @@ class SettlementSubmitFreshnessTest {
         const val INITIAL_NOW = 100_000L
         const val EXPIRED_AFTER_PREFLIGHT = 110_001L
         const val EXPIRED_AFTER_AUTOMATIC_PREFLIGHT = 160_001L
+        val GAS_LIMIT: BigInteger = BigInteger.valueOf(100_000)
         val LIVE_NATIVE_BALANCE: BigInteger = BigInteger("200000000000000")
     }
 }
