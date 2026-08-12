@@ -51,6 +51,28 @@ class PaymentEvidenceBatchedRpcTest {
     }
 
     @Test
+    fun `resolution aborts between waves once its end-to-end budget is exhausted`() {
+        var nowMillis = 0L
+        val rpc = ScriptedRpc()
+        val client = ReadOnlyRpcClient.forTest(CONFIG) { body ->
+            nowMillis += 2_000
+            rpc.execute(body)
+        }
+        val resolver = PaymentEvidenceResolver(
+            chain = client,
+            totalBudgetMillis = 3_000,
+            elapsedMillis = { nowMillis },
+        )
+
+        val error = assertFailsWith<RpcException> { resolver.resolve(request()) }
+
+        assertEquals("Payment evidence resolution exceeded its time budget", error.message)
+        // The opening wave (2s) fit the budget and the prefetch pre-check at 2s passed; the
+        // crossing-read pre-check at 4s crossed the 3s deadline before any further socket use.
+        assertEquals(2, rpc.httpPosts)
+    }
+
+    @Test
     fun `midpoint prefetch covers every height the bounded search visits`() {
         for (last in 2L..16L) {
             val midpoints = balanceCrossingMidpoints(1L, last, 4)

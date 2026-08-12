@@ -206,28 +206,6 @@ class SettlementRepository internal constructor(
     private val settlementDao = database.settlementDao()
     private val eventDao = database.settlementEventDao()
 
-    /** Immutable-pin validations proven in this process, keyed by serving endpoint generation. */
-    private val validatedHistoricalProofs =
-        java.util.Collections.synchronizedSet(linkedSetOf<HistoricalProofKey>())
-
-    private data class HistoricalProofKey(
-        val rpcEndpointGeneration: Long,
-        val fingerprint: String,
-    )
-
-    private fun rememberValidatedHistoricalProof(key: HistoricalProofKey) {
-        synchronized(validatedHistoricalProofs) {
-            if (validatedHistoricalProofs.size >= MAX_VALIDATED_HISTORICAL_PROOFS &&
-                key !in validatedHistoricalProofs
-            ) {
-                val iterator = validatedHistoricalProofs.iterator()
-                iterator.next()
-                iterator.remove()
-            }
-            validatedHistoricalProofs.add(key)
-        }
-    }
-
     fun observeReadyInvoices(): Flow<List<Invoice>> = invoiceDao.observeReadyForSettlement()
     fun observeRecentTransactions(limit: Int = 50): Flow<List<SettlementTransaction>> =
         settlementDao.observeRecent(limit)
@@ -536,22 +514,13 @@ class SettlementRepository internal constructor(
                     HISTORICAL_PROOF_TTL_MILLIS,
                 )
         } == true
-        val proofCacheKey = HistoricalProofKey(endpointResolution.generation, proofFingerprint)
-        val historicalProofAt = when {
-            reusableProofIsFresh ->
-                requireNotNull(reusableHistoricalProof).historicalProofAtElapsedRealtimeMillis
-            // Everything the historical pass re-reads is immutable pinned deployment state, so
-            // one successful validation stays authoritative for the endpoint generation that
-            // served it. An admin endpoint rotation bumps the generation and forces a fresh pass
-            // through the replacement endpoint before any further key use.
-            proofCacheKey in validatedHistoricalProofs -> proofNow
-            else -> {
-                historicalSnapshotValidationOverride?.invoke(first, endpointResolution.endpoint)
-                    ?: validateHistoricalSettlementSnapshot(first, endpointResolution.endpoint)
-                proofNow
-            }
+        val historicalProofAt = if (reusableProofIsFresh) {
+            requireNotNull(reusableHistoricalProof).historicalProofAtElapsedRealtimeMillis
+        } else {
+            historicalSnapshotValidationOverride?.invoke(first, endpointResolution.endpoint)
+                ?: validateHistoricalSettlementSnapshot(first, endpointResolution.endpoint)
+            proofNow
         }
-        rememberValidatedHistoricalProof(proofCacheKey)
         val wallet = walletAccess.snapshot()
         require(wallet.availability == OperatorWalletAvailability.READY) {
             wallet.error ?: "Create the terminal operator wallet first"
@@ -1508,7 +1477,6 @@ class SettlementRepository internal constructor(
         // transition near chain finality (~two Base blocks) without holding any interactive lock.
         internal const val FAST_RECOVERY_MAX_ATTEMPTS = 20
         internal const val FAST_RECOVERY_INTERVAL_MILLIS = 3_000L
-        private const val MAX_VALIDATED_HISTORICAL_PROOFS = 32
         private const val HISTORICAL_RPC_CONNECT_TIMEOUT_MILLIS = 2_500
         private const val HISTORICAL_RPC_READ_TIMEOUT_MILLIS = 4_000
         internal const val HISTORICAL_PROOF_TTL_MILLIS = 60_000L

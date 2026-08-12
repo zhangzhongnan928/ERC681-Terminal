@@ -28,15 +28,20 @@ class Web3jPaymentTransactionResolver : PaymentTransactionResolver {
                 connectTimeoutMillis = EVIDENCE_RPC_CONNECT_TIMEOUT_MILLIS,
                 readTimeoutMillis = EVIDENCE_RPC_READ_TIMEOUT_MILLIS,
             )
-            PaymentEvidenceResolver(client).resolve(request)
+            PaymentEvidenceResolver(
+                chain = client,
+                totalBudgetMillis = EVIDENCE_TOTAL_BUDGET_MILLIS,
+            ).resolve(request)
         }
 
-    private companion object {
-        // The batched resolver typically completes in four grouped round trips, so a bounded
-        // per-socket budget keeps the whole pass inside the background coordinator's lease while
-        // still tolerating a slow public endpoint on the interactive reprint path.
-        const val EVIDENCE_RPC_CONNECT_TIMEOUT_MILLIS = 1_000
-        const val EVIDENCE_RPC_READ_TIMEOUT_MILLIS = 2_500
+    internal companion object {
+        // Socket timeouts bound each HTTP operation and the resolver's end-to-end budget bounds
+        // their sequential sum, so the worst complete pass is the budget plus one worst-case
+        // socket: 3_500 + (500 + 1_000) = 5_000 ms — never past the background coordinator
+        // lease. BackgroundRpcBudgetTest pins this inequality against the lease constant.
+        internal const val EVIDENCE_RPC_CONNECT_TIMEOUT_MILLIS = 500
+        internal const val EVIDENCE_RPC_READ_TIMEOUT_MILLIS = 1_000
+        internal const val EVIDENCE_TOTAL_BUDGET_MILLIS = 3_500L
     }
 }
 

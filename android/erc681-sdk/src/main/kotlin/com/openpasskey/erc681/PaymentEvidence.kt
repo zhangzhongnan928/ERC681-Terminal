@@ -186,8 +186,28 @@ internal class PaymentCrossingReads(
  */
 class PaymentEvidenceResolver(
     private val chain: PaymentEvidenceChainClient,
+    /**
+     * Optional end-to-end wall-clock budget for one [resolve] pass. Socket timeouts bound each
+     * network operation; this bounds their sequential sum, so a caller running inside a
+     * cooperative deadline (such as the terminal's background RPC lease) can size the two
+     * together: budget plus one worst-case socket never exceeds the lease.
+     */
+    private val totalBudgetMillis: Long? = null,
+    private val elapsedMillis: () -> Long = { System.nanoTime() / NANOS_PER_MILLI },
 ) {
+    init {
+        require(totalBudgetMillis == null || totalBudgetMillis > 0) {
+            "Evidence resolution budget must be positive"
+        }
+    }
+
     fun resolve(request: PaymentEvidenceRequest): PaymentTransactionEvidence? {
+        val deadlineMillis = totalBudgetMillis?.let { Math.addExact(elapsedMillis(), it) }
+        fun requireBudget() {
+            if (deadlineMillis != null && elapsedMillis() > deadlineMillis) {
+                throw RpcException("Payment evidence resolution exceeded its time budget")
+            }
+        }
         val batched = chain as? ReadOnlyRpcClient
         val balanceCache = mutableMapOf<Long, BigInteger>()
         fun recordBalance(blockNumber: Long, value: BigInteger): BigInteger {
@@ -197,10 +217,13 @@ class PaymentEvidenceResolver(
             balanceCache[blockNumber] = value
             return value
         }
-        fun balanceAt(blockNumber: Long): BigInteger = balanceCache[blockNumber] ?: recordBalance(
-            blockNumber,
-            chain.paymentAssetBalance(request.asset, request.receiver, blockNumber),
-        )
+        fun balanceAt(blockNumber: Long): BigInteger = balanceCache[blockNumber] ?: run {
+            requireBudget()
+            recordBalance(
+                blockNumber,
+                chain.paymentAssetBalance(request.asset, request.receiver, blockNumber),
+            )
+        }
 
         if (batched != null) {
             val context = batched.openPaymentEvidenceContext(
@@ -248,6 +271,7 @@ class PaymentEvidenceResolver(
                 levels = BALANCE_PREFETCH_LEVELS,
             ).filterNot(balanceCache::containsKey)
             if (prefetch.isNotEmpty()) {
+                requireBudget()
                 batched.paymentAssetBalances(request.asset, request.receiver, prefetch)
                     .forEach { (blockNumber, value) -> recordBalance(blockNumber, value) }
             }
@@ -263,6 +287,7 @@ class PaymentEvidenceResolver(
         val crossingBlock: PaymentEvidenceBlock
         val erc20Transfers: List<IncomingErc20Transfer>
         if (batched != null) {
+            requireBudget()
             val reads = batched.paymentCrossingReads(
                 asset = request.asset,
                 receiver = request.receiver,
@@ -276,6 +301,7 @@ class PaymentEvidenceResolver(
             erc20Transfers = reads.erc20Transfers.orEmpty()
         } else {
             priorBalance = balanceAt(crossingBlockNumber - 1L)
+            requireBudget()
             crossingBlock = chain.paymentEvidenceBlock(
                 crossingBlockNumber,
                 includeDirectNativeTransactions = isNative,
@@ -306,6 +332,7 @@ class PaymentEvidenceResolver(
             val transfers = if (batched != null) {
                 erc20Transfers
             } else {
+                requireBudget()
                 chain.incomingErc20Transfers(
                     token = request.asset,
                     receiver = request.receiver,
@@ -323,6 +350,7 @@ class PaymentEvidenceResolver(
         } ?: return null
 
         // Close the canonical bracket only after all balance, block, and log reads complete.
+        requireBudget()
         if (batched != null) {
             val closingNumbers = linkedSetOf(
                 crossingBlock.blockNumber,
@@ -390,6 +418,7 @@ class PaymentEvidenceResolver(
     private companion object {
         /** Four warmed levels cover crossings inside a 16-block window with one batch. */
         private const val BALANCE_PREFETCH_LEVELS = 4
+        private const val NANOS_PER_MILLI = 1_000_000L
     }
 
     private fun selectErc20Transfer(
