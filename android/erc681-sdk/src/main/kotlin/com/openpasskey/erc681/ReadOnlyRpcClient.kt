@@ -14,10 +14,14 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
+import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.max
 
 data class OperatorReadiness(
     val listedOperator: Boolean,
@@ -70,6 +74,8 @@ class CheckoutValidationEvidence internal constructor(
 class ReadOnlyRpcClient private constructor(
     val config: NetworkConfig,
     private val transport: RpcTransport,
+    private val retrySleep: (Long) -> Unit,
+    private val retryJitterMillis: () -> Long,
 ) : ReadOnlyChainClient, PaymentEvidenceChainClient {
     @JvmOverloads
     constructor(
@@ -83,6 +89,10 @@ class ReadOnlyRpcClient private constructor(
             checkedTimeout(connectTimeoutMillis),
             checkedTimeout(readTimeoutMillis),
         ),
+        retrySleep = { delayMillis -> Thread.sleep(delayMillis) },
+        retryJitterMillis = {
+            ThreadLocalRandom.current().nextLong(MAX_RETRY_JITTER_MILLIS + 1)
+        },
     )
 
     override fun chainId(): Long = rpcQuantity("eth_chainId").toSupportedLong("Chain ID")
@@ -640,7 +650,11 @@ class ReadOnlyRpcClient private constructor(
     }
 
     /** Fixed, read-only readiness bundle used by terminals after a successful network validation. */
-    fun operatorReadiness(operator: EvmAddress): OperatorReadiness {
+    fun operatorReadiness(operator: EvmAddress): OperatorReadiness =
+        operatorReadiness(operator, retryOnThrottle = false)
+
+    /** Fixed readiness bundle with an explicit, bounded throttle-retry policy. */
+    fun operatorReadiness(operator: EvmAddress, retryOnThrottle: Boolean): OperatorReadiness {
         require(!operator.isZero) { "Operator address must not be zero" }
         val results = rpcResults(
             listOf(
@@ -655,6 +669,7 @@ class ReadOnlyRpcClient private constructor(
                 }),
             ),
             toleratedErrorIndices = setOf(1),
+            retryOnThrottle = retryOnThrottle,
         )
         val listed = decodeBooleanWord(resultString(results[0]), "isOperator result")
         return OperatorReadiness(
@@ -693,7 +708,25 @@ class ReadOnlyRpcClient private constructor(
         token: EvmAddress,
         expectedDecimals: Int? = null,
         expectedSymbol: String? = null,
-    ): NetworkValidation = validateWithEvidence(token, expectedDecimals, expectedSymbol).validation
+    ): NetworkValidation = validateWithEvidenceInternal(
+        token,
+        expectedDecimals,
+        expectedSymbol,
+        retryOnThrottle = false,
+    ).validation
+
+    /** Validation with an explicit, bounded throttle-retry policy. */
+    fun validate(
+        token: EvmAddress,
+        expectedDecimals: Int?,
+        expectedSymbol: String?,
+        retryOnThrottle: Boolean,
+    ): NetworkValidation = validateWithEvidenceInternal(
+        token,
+        expectedDecimals,
+        expectedSymbol,
+        retryOnThrottle,
+    ).validation
 
     /**
      * Performs the same validation as [validate] while retaining the vault runtime bytes already
@@ -704,6 +737,31 @@ class ReadOnlyRpcClient private constructor(
         token: EvmAddress,
         expectedDecimals: Int? = null,
         expectedSymbol: String? = null,
+    ): NetworkValidationEvidence = validateWithEvidenceInternal(
+        token,
+        expectedDecimals,
+        expectedSymbol,
+        retryOnThrottle = false,
+    )
+
+    /** Evidence-producing validation with an explicit, bounded throttle-retry policy. */
+    fun validateWithEvidence(
+        token: EvmAddress,
+        expectedDecimals: Int?,
+        expectedSymbol: String?,
+        retryOnThrottle: Boolean,
+    ): NetworkValidationEvidence = validateWithEvidenceInternal(
+        token,
+        expectedDecimals,
+        expectedSymbol,
+        retryOnThrottle,
+    )
+
+    private fun validateWithEvidenceInternal(
+        token: EvmAddress,
+        expectedDecimals: Int?,
+        expectedSymbol: String?,
+        retryOnThrottle: Boolean,
     ): NetworkValidationEvidence {
         require(!token.isZero) { "Token address must not be zero" }
         require(expectedDecimals == null || expectedDecimals in 0..255) {
@@ -716,6 +774,7 @@ class ReadOnlyRpcClient private constructor(
                 RpcCall("eth_chainId", JsonArray()),
                 RpcCall("eth_getBlockByNumber", blockByTagParams(LATEST_BLOCK)),
             ),
+            retryOnThrottle = retryOnThrottle,
         )
         val remoteChainId = parseQuantity(resultString(anchor[0]), "eth_chainId")
             .toSupportedLong("Chain ID")
@@ -731,6 +790,7 @@ class ReadOnlyRpcClient private constructor(
         // token code/metadata reads for the mandatory NATIVE_ASSET() capability proof.
         val results = rpcResults(
             networkValidationCalls(token, quantityHex(anchoredHead.number)),
+            retryOnThrottle = retryOnThrottle,
         )
         val evidence = decodeNetworkValidation(
             token = token,
@@ -746,6 +806,7 @@ class ReadOnlyRpcClient private constructor(
             rpcResult(
                 "eth_getBlockByNumber",
                 blockByNumberParams(anchoredHead.number),
+                retryOnThrottle = retryOnThrottle,
             ),
             anchoredHead.number,
         ) ?: throw RpcException(
@@ -994,12 +1055,19 @@ class ReadOnlyRpcClient private constructor(
         return result.asString
     }
 
-    private fun rpcResult(method: String, params: JsonArray): JsonElement =
-        rpcResults(listOf(RpcCall(method, params))).single()
+    private fun rpcResult(
+        method: String,
+        params: JsonArray,
+        retryOnThrottle: Boolean = false,
+    ): JsonElement = rpcResults(
+        listOf(RpcCall(method, params)),
+        retryOnThrottle = retryOnThrottle,
+    ).single()
 
     private fun rpcResults(
         calls: List<RpcCall>,
         toleratedErrorIndices: Set<Int> = emptySet(),
+        retryOnThrottle: Boolean = false,
     ): List<JsonElement> {
         require(calls.isNotEmpty()) { "JSON-RPC batch must not be empty" }
         require(calls.size <= MAX_BATCH_SIZE) {
@@ -1022,12 +1090,40 @@ class ReadOnlyRpcClient private constructor(
         } else {
             JsonArray().apply { requests.forEach { add(it.second) } }.toString()
         }
+
+        var retryCount = 0
+        while (true) {
+            try {
+                return executeRpcResults(requests, requestBody, toleratedErrorIndices)
+            } catch (error: RpcException) {
+                if (
+                    !retryOnThrottle ||
+                    error !is RpcRateLimit ||
+                    retryCount >= MAX_THROTTLE_RETRIES
+                ) {
+                    throw error
+                }
+                // Keep InterruptedException outside all broad transport catches so a coroutine
+                // runInterruptible caller can cancel validation while it is backing off.
+                retrySleep(retryDelayMillis(retryCount, error.retryAfterMillis))
+                retryCount += 1
+            }
+        }
+    }
+
+    private fun executeRpcResults(
+        requests: List<Pair<Long, JsonObject>>,
+        requestBody: String,
+        toleratedErrorIndices: Set<Int>,
+    ): List<JsonElement> {
         val responseText = try {
             transport.execute(requestBody)
         } catch (error: RpcException) {
             throw error
-        } catch (error: Exception) {
-            throw RpcException("JSON-RPC transport failed", error)
+        } catch (_: Exception) {
+            // RPC URLs can carry client credentials. Do not retain the transport exception as a
+            // cause because DNS/TLS errors can include the credential-bearing host or full URL.
+            throw RpcException("JSON-RPC transport failed")
         }
 
         val responseRoot = try {
@@ -1089,6 +1185,9 @@ class ReadOnlyRpcClient private constructor(
             if (error != null) {
                 if (!error.isJsonObject) throw RpcException("JSON-RPC error is not an object")
                 val (code, message) = decodeRpcError(error.asJsonObject)
+                if (isRateLimitRpcError(code, message)) {
+                    throw RpcRateLimitResponseException(code, message)
+                }
                 if (id in toleratedErrorIds) {
                     resultsById[id] = com.google.gson.JsonNull.INSTANCE
                     return@forEach
@@ -1102,6 +1201,19 @@ class ReadOnlyRpcClient private constructor(
         return requests.map { (id, _) ->
             resultsById[id] ?: throw RpcException("JSON-RPC batch response is missing request ID $id")
         }
+    }
+
+    private fun retryDelayMillis(retryCount: Int, retryAfterMillis: Long?): Long {
+        val backoffMillis = if (retryCount == 0) {
+            BASE_RETRY_DELAY_MILLIS
+        } else {
+            BASE_RETRY_DELAY_MILLIS * RETRY_BACKOFF_MULTIPLIER
+        }
+        val providerDelayMillis = retryAfterMillis
+            ?.coerceIn(0L, MAX_RETRY_AFTER_MILLIS)
+            ?: 0L
+        val jitterMillis = retryJitterMillis().coerceIn(0L, MAX_RETRY_JITTER_MILLIS)
+        return max(backoffMillis, providerDelayMillis) + jitterMillis
     }
 
     private fun rpcResultsChunked(
@@ -1172,7 +1284,26 @@ class ReadOnlyRpcClient private constructor(
         internal fun forTest(
             config: NetworkConfig,
             execute: (String) -> String,
-        ): ReadOnlyRpcClient = ReadOnlyRpcClient(config, RpcTransport(execute))
+        ): ReadOnlyRpcClient = ReadOnlyRpcClient(
+            config = config,
+            transport = RpcTransport(execute),
+            retrySleep = {},
+            retryJitterMillis = { 0L },
+        )
+
+        /** Test seam for deterministic retry timing without real sleeps. */
+        @JvmSynthetic
+        internal fun forTest(
+            config: NetworkConfig,
+            retrySleep: (Long) -> Unit,
+            retryJitterMillis: () -> Long,
+            execute: (String) -> String,
+        ): ReadOnlyRpcClient = ReadOnlyRpcClient(
+            config = config,
+            transport = RpcTransport(execute),
+            retrySleep = retrySleep,
+            retryJitterMillis = retryJitterMillis,
+        )
 
         private fun checkedTimeout(value: Int): Int {
             require(value > 0) { "RPC timeout must be greater than zero" }
@@ -1206,6 +1337,9 @@ class ReadOnlyRpcClient private constructor(
                 ?: throw RpcException("JSON-RPC error has an invalid message")
             return code to message
         }
+
+        private fun isRateLimitRpcError(code: Int, message: String): Boolean =
+            (code == -32016 || code == -32005) && RATE_LIMIT_MESSAGE_PATTERN.containsMatchIn(message)
 
         private fun BigInteger.toSupportedLong(label: String): Long {
             if (signum() < 0 || bitLength() > 63) {
@@ -1295,6 +1429,14 @@ class ReadOnlyRpcClient private constructor(
         private const val ERC20_NETWORK_VALIDATION_CALL_COUNT = 9
         private const val NATIVE_NETWORK_VALIDATION_CALL_COUNT = 7
         private const val MAX_CONCURRENT_CALL_SET_SIZE = 20
+        private const val MAX_THROTTLE_RETRIES = 2
+        private const val BASE_RETRY_DELAY_MILLIS = 1_000L
+        private const val RETRY_BACKOFF_MULTIPLIER = 3L
+        private const val MAX_RETRY_JITTER_MILLIS = 250L
+        private val RATE_LIMIT_MESSAGE_PATTERN = Regex(
+            "\\brate[\\s_-]*limit(?:ed|ing)?\\b",
+            RegexOption.IGNORE_CASE,
+        )
         private val TRANSFER_EVENT_TOPIC = Hex.encode(
             Keccak256.digest("Transfer(address,address,uint256)".toByteArray(StandardCharsets.US_ASCII)),
         )
@@ -1343,9 +1485,21 @@ private class HttpUrlConnectionRpcTransport(
         connection.outputStream.use { it.write(body) }
         val status = connection.responseCode
         val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+        if (status == 429) {
+            stream?.close()
+            throw rpcHttpFailure(
+                status = status,
+                retryAfterHeader = connection.getHeaderField("Retry-After"),
+                nowEpochMillis = System.currentTimeMillis(),
+            )
+        }
         val response = stream?.use(::readLimitedUtf8).orEmpty()
         if (status !in 200..299) {
-            throw RpcException("RPC HTTP request failed with status $status")
+            throw rpcHttpFailure(
+                status = status,
+                retryAfterHeader = connection.getHeaderField("Retry-After"),
+                nowEpochMillis = System.currentTimeMillis(),
+            )
         }
         if (response.isEmpty()) throw RpcException("RPC HTTP response body is empty")
         // Closing request/response streams returns this connection to Android's process-wide
@@ -1373,3 +1527,44 @@ private class HttpUrlConnectionRpcTransport(
         private const val MAX_RESPONSE_BYTES = 8 * 1024 * 1024
     }
 }
+
+internal fun rpcHttpFailure(
+    status: Int,
+    retryAfterHeader: String?,
+    nowEpochMillis: Long,
+): RpcException = if (status == 429) {
+    RpcHttpRateLimitException(
+        retryAfterMillis = parseBoundedRetryAfterMillis(retryAfterHeader, nowEpochMillis),
+    )
+} else {
+    RpcException("RPC HTTP request failed with status $status")
+}
+
+internal fun parseBoundedRetryAfterMillis(
+    header: String?,
+    nowEpochMillis: Long,
+): Long? {
+    val value = header?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    if (value.all(Char::isDigit)) {
+        val seconds = value.toLongOrNull() ?: return MAX_RETRY_AFTER_MILLIS
+        return if (seconds >= MAX_RETRY_AFTER_MILLIS / 1_000L) {
+            MAX_RETRY_AFTER_MILLIS
+        } else {
+            seconds * 1_000L
+        }
+    }
+    val targetEpochMillis = try {
+        ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME)
+            .toInstant()
+            .toEpochMilli()
+    } catch (_: Exception) {
+        return null
+    }
+    if (targetEpochMillis <= nowEpochMillis) return 0L
+    val difference = targetEpochMillis - nowEpochMillis
+    return if (difference < 0L) MAX_RETRY_AFTER_MILLIS else {
+        difference.coerceAtMost(MAX_RETRY_AFTER_MILLIS)
+    }
+}
+
+private const val MAX_RETRY_AFTER_MILLIS = 5_000L

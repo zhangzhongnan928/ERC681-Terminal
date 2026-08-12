@@ -63,4 +63,15 @@ class TerminalProvisioningPayloadCodecTest {
             }
         }
     }
+
+    @Test
+    fun provisioningQrCannotSupplyAnRpcEndpoint() {
+        val canonical = fixture.getAsJsonObject("provisioning")["canonical"].asString
+
+        assertThrows(IllegalArgumentException::class.java) {
+            TerminalProvisioningPayloadCodec.parse(
+                "$canonical&rpcUrl=https://attacker.example",
+            )
+        }
+    }
 }

@@ -19,14 +19,20 @@ import org.web3j.protocol.http.HttpService
 import org.web3j.utils.Numeric
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
+import java.io.IOException
 import java.io.InputStream
 import java.math.BigInteger
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
 data class SettlementFeeQuote(
     val mode: SettlementFeeMode,
@@ -147,7 +153,11 @@ data class SettlementPreflightSnapshot(
     val nativeBalance: BigInteger,
 )
 
-class SettlementRpcException(message: String, val rpcCode: Int? = null) : RuntimeException(message)
+class SettlementRpcException(
+    message: String,
+    val rpcCode: Int? = null,
+    val knownTransactionResponse: Boolean = false,
+) : RuntimeException(message)
 
 interface SettlementChainClient : Closeable {
     fun chainId(): Long
@@ -220,65 +230,67 @@ interface SettlementChainClient : Closeable {
 }
 
 class Web3jSettlementChainClient(rpcUrl: String) : SettlementChainClient {
-    private val endpoint = SharedRpcConnections.get(rpcUrl)
-    private val web3j = endpoint.web3j
-    private val batch = endpoint.batch
+    private val lifecycleLock = ReentrantReadWriteLock()
+    private var endpoint: OwnedRpcEndpoint? = createOwnedRpcEndpoint(rpcUrl)
 
-    override fun chainId(): Long {
-        val response = web3j.ethChainId().send()
+    override fun chainId(): Long = withEndpoint { endpoint ->
+        val response = endpoint.web3j.ethChainId().send()
         response.throwIfError("eth_chainId")
-        return response.chainId.toLongExactCompat("chain ID")
+        response.chainId.toLongExactCompat("chain ID")
     }
 
-    override fun nativeBalance(address: String): BigInteger {
-        val response = web3j.ethGetBalance(
+    override fun nativeBalance(address: String): BigInteger = withEndpoint { endpoint ->
+        val response = endpoint.web3j.ethGetBalance(
             EvmAddress.parse(address).value,
             DefaultBlockParameterName.PENDING
         ).send()
         response.throwIfError("eth_getBalance")
-        return response.balance
+        response.balance
     }
 
-    override fun latestNativeBalance(address: String): BigInteger {
-        val response = web3j.ethGetBalance(
+    override fun latestNativeBalance(address: String): BigInteger = withEndpoint { endpoint ->
+        val response = endpoint.web3j.ethGetBalance(
             EvmAddress.parse(address).value,
             DefaultBlockParameterName.LATEST,
         ).send()
         response.throwIfError("eth_getBalance")
-        return response.balance
+        response.balance
     }
 
     override fun tokenBalance(tokenAddress: String, accountAddress: String): BigInteger {
         if (NativeAsset.isNative(EvmAddress.parse(tokenAddress))) {
             return nativeBalance(accountAddress)
         }
-        val response = web3j.ethCall(
-            Transaction.createEthCallTransaction(
-                null,
-                EvmAddress.parse(tokenAddress).value,
-                SettlementAbi.encodeBalanceOf(accountAddress)
-            ),
-            DefaultBlockParameterName.PENDING
-        ).send()
-        response.throwIfError("balanceOf eth_call")
-        return SettlementAbi.decodeUint256Word(response.value)
+        return withEndpoint { endpoint ->
+            val response = endpoint.web3j.ethCall(
+                Transaction.createEthCallTransaction(
+                    null,
+                    EvmAddress.parse(tokenAddress).value,
+                    SettlementAbi.encodeBalanceOf(accountAddress)
+                ),
+                DefaultBlockParameterName.PENDING
+            ).send()
+            response.throwIfError("balanceOf eth_call")
+            SettlementAbi.decodeUint256Word(response.value)
+        }
     }
 
-    override fun isOperator(vaultAddress: String, operatorAddress: String): Boolean {
-        val response = web3j.ethCall(
-            Transaction.createEthCallTransaction(
-                EvmAddress.parse(operatorAddress).value,
-                EvmAddress.parse(vaultAddress).value,
-                SettlementAbi.encodeIsOperator(operatorAddress)
-            ),
-            DefaultBlockParameterName.LATEST
-        ).send()
-        response.throwIfError("isOperator eth_call")
-        return SettlementAbi.decodeIsOperator(response.value)
-    }
+    override fun isOperator(vaultAddress: String, operatorAddress: String): Boolean =
+        withEndpoint { endpoint ->
+            val response = endpoint.web3j.ethCall(
+                Transaction.createEthCallTransaction(
+                    EvmAddress.parse(operatorAddress).value,
+                    EvmAddress.parse(vaultAddress).value,
+                    SettlementAbi.encodeIsOperator(operatorAddress)
+                ),
+                DefaultBlockParameterName.LATEST
+            ).send()
+            response.throwIfError("isOperator eth_call")
+            SettlementAbi.decodeIsOperator(response.value)
+        }
 
-    override fun owner(vaultAddress: String): String {
-        val response = web3j.ethCall(
+    override fun owner(vaultAddress: String): String = withEndpoint { endpoint ->
+        val response = endpoint.web3j.ethCall(
             Transaction.createEthCallTransaction(
                 null,
                 EvmAddress.parse(vaultAddress).value,
@@ -287,28 +299,29 @@ class Web3jSettlementChainClient(rpcUrl: String) : SettlementChainClient {
             DefaultBlockParameterName.LATEST
         ).send()
         response.throwIfError("owner eth_call")
-        return SettlementAbi.decodeOwner(response.value)
+        SettlementAbi.decodeOwner(response.value)
     }
 
-    override fun simulate(fromAddress: String, toAddress: String, callData: String) {
-        val response = web3j.ethCall(
-            Transaction.createEthCallTransaction(
-                EvmAddress.parse(fromAddress).value,
-                EvmAddress.parse(toAddress).value,
-                callData
-            ),
-            DefaultBlockParameterName.PENDING
-        ).send()
-        response.throwIfError("sweepSessions simulation")
-    }
+    override fun simulate(fromAddress: String, toAddress: String, callData: String) =
+        withEndpoint { endpoint ->
+            val response = endpoint.web3j.ethCall(
+                Transaction.createEthCallTransaction(
+                    EvmAddress.parse(fromAddress).value,
+                    EvmAddress.parse(toAddress).value,
+                    callData
+                ),
+                DefaultBlockParameterName.PENDING
+            ).send()
+            response.throwIfError("sweepSessions simulation")
+        }
 
-    override fun pendingNonce(address: String): BigInteger {
-        val response = web3j.ethGetTransactionCount(
+    override fun pendingNonce(address: String): BigInteger = withEndpoint { endpoint ->
+        val response = endpoint.web3j.ethGetTransactionCount(
             EvmAddress.parse(address).value,
             DefaultBlockParameterName.PENDING
         ).send()
         response.throwIfError("eth_getTransactionCount")
-        return response.transactionCount
+        response.transactionCount
     }
 
     override fun estimateGas(
@@ -316,8 +329,8 @@ class Web3jSettlementChainClient(rpcUrl: String) : SettlementChainClient {
         toAddress: String,
         callData: String,
         nonce: BigInteger
-    ): BigInteger {
-        val response = web3j.ethEstimateGas(
+    ): BigInteger = withEndpoint { endpoint ->
+        val response = endpoint.web3j.ethEstimateGas(
             Transaction.createFunctionCallTransaction(
                 EvmAddress.parse(fromAddress).value,
                 nonce,
@@ -330,37 +343,39 @@ class Web3jSettlementChainClient(rpcUrl: String) : SettlementChainClient {
         response.throwIfError("eth_estimateGas")
         require(response.amountUsed.signum() == 1) { "eth_estimateGas returned zero" }
         // A percentage buffer plus a fixed margin handles modest state changes between review/signing.
-        return response.amountUsed.multiply(BigInteger.valueOf(125)).divide(BigInteger.valueOf(100))
+        response.amountUsed.multiply(BigInteger.valueOf(125)).divide(BigInteger.valueOf(100))
             .add(BigInteger.valueOf(15_000))
     }
 
-    override fun feeQuote(): SettlementFeeQuote {
-        val priceResponse = web3j.ethGasPrice().send()
+    override fun feeQuote(): SettlementFeeQuote = withEndpoint { endpoint ->
+        val priceResponse = endpoint.web3j.ethGasPrice().send()
         priceResponse.throwIfError("eth_gasPrice")
-        val blockResponse = web3j.ethGetBlockByNumber(DefaultBlockParameterName.LATEST, false).send()
+        val blockResponse = endpoint.web3j
+            .ethGetBlockByNumber(DefaultBlockParameterName.LATEST, false)
+            .send()
         blockResponse.throwIfError("eth_getBlockByNumber")
         val baseFee = blockResponse.block.baseFeePerGas?.let(Numeric::decodeQuantity)
-        return SettlementFeePolicy.quote(baseFee, priceResponse.gasPrice)
+        SettlementFeePolicy.quote(baseFee, priceResponse.gasPrice)
     }
 
-    override fun sendRawTransaction(signedTransaction: String): String {
-        val response = web3j.ethSendRawTransaction(signedTransaction).send()
+    override fun sendRawTransaction(signedTransaction: String): String = withEndpoint { endpoint ->
+        val response = endpoint.web3j.ethSendRawTransaction(signedTransaction).send()
         response.throwIfError("eth_sendRawTransaction")
-        return response.transactionHash
+        response.transactionHash
             ?: throw SettlementRpcException("eth_sendRawTransaction returned no transaction hash")
     }
 
-    override fun transactionReceipt(txHash: String): SettlementReceipt? {
-        val response = web3j.ethGetTransactionReceipt(txHash).send()
+    override fun transactionReceipt(txHash: String): SettlementReceipt? = withEndpoint { endpoint ->
+        val response = endpoint.web3j.ethGetTransactionReceipt(txHash).send()
         response.throwIfError("eth_getTransactionReceipt")
-        val receipt = response.transactionReceipt.orElse(null) ?: return null
+        val receipt = response.transactionReceipt.orElse(null) ?: return@withEndpoint null
         val status = receipt.status ?: throw SettlementRpcException("Receipt has no execution status")
         val successful = when (status.lowercase()) {
             "0x1", "1" -> true
             "0x0", "0" -> false
-            else -> throw SettlementRpcException("Receipt has invalid execution status $status")
+            else -> throw SettlementRpcException("Receipt has invalid execution status")
         }
-        return SettlementReceipt(
+        SettlementReceipt(
             successful = successful,
             blockNumber = receipt.blockNumber.toLongExactCompat("receipt block number"),
             blockHash = requireNotNull(receipt.blockHash) { "Receipt has no block hash" },
@@ -379,20 +394,20 @@ class Web3jSettlementChainClient(rpcUrl: String) : SettlementChainClient {
         )
     }
 
-    override fun blockNumber(): Long {
-        val response = web3j.ethBlockNumber().send()
+    override fun blockNumber(): Long = withEndpoint { endpoint ->
+        val response = endpoint.web3j.ethBlockNumber().send()
         response.throwIfError("eth_blockNumber")
-        return response.blockNumber.toLongExactCompat("block number")
+        response.blockNumber.toLongExactCompat("block number")
     }
 
-    override fun canonicalBlockHash(blockNumber: Long): String? {
+    override fun canonicalBlockHash(blockNumber: Long): String? = withEndpoint { endpoint ->
         require(blockNumber >= 0) { "Block number cannot be negative" }
-        val response = web3j.ethGetBlockByNumber(
+        val response = endpoint.web3j.ethGetBlockByNumber(
             DefaultBlockParameter.valueOf(BigInteger.valueOf(blockNumber)),
             false,
         ).send()
         response.throwIfError("eth_getBlockByNumber")
-        val block = response.block ?: return null
+        val block = response.block ?: return@withEndpoint null
         val returnedNumber = block.number
             ?: throw SettlementRpcException("eth_getBlockByNumber result has no block number")
         if (returnedNumber != BigInteger.valueOf(blockNumber)) {
@@ -405,57 +420,85 @@ class Web3jSettlementChainClient(rpcUrl: String) : SettlementChainClient {
         if (!BLOCK_HASH_PATTERN.matches(hash)) {
             throw SettlementRpcException("eth_getBlockByNumber returned a malformed block hash")
         }
-        return hash.lowercase()
+        hash.lowercase()
     }
 
-    override fun canonicalBlockHashes(blockNumbers: List<Long>): List<String?> {
-        require(blockNumbers.size <= MAX_BATCH_RECEIVERS) {
-            "Canonical hash batch supports at most $MAX_BATCH_RECEIVERS blocks"
+    override fun canonicalBlockHashes(blockNumbers: List<Long>): List<String?> =
+        withEndpoint { endpoint ->
+            require(blockNumbers.size <= MAX_BATCH_RECEIVERS) {
+                "Canonical hash batch supports at most $MAX_BATCH_RECEIVERS blocks"
+            }
+            if (blockNumbers.isEmpty()) return@withEndpoint emptyList()
+            val results = endpoint.batch.executeChunked(blockNumbers.map { blockNumber ->
+                require(blockNumber >= 0) { "Block number cannot be negative" }
+                SettlementRpcCall(
+                    "eth_getBlockByNumber",
+                    JsonArray().apply {
+                        add(quantityHex(blockNumber))
+                        add(false)
+                    },
+                )
+            })
+            results.mapIndexed { index, result ->
+                decodeBlockHash(result, blockNumbers[index])
+            }
         }
-        if (blockNumbers.isEmpty()) return emptyList()
-        val results = batch.executeChunked(blockNumbers.map { blockNumber ->
-            require(blockNumber >= 0) { "Block number cannot be negative" }
-            SettlementRpcCall(
-                "eth_getBlockByNumber",
-                JsonArray().apply {
-                    add(quantityHex(blockNumber))
-                    add(false)
-                },
-            )
-        })
-        return results.mapIndexed { index, result ->
-            decodeBlockHash(result, blockNumbers[index])
-        }
-    }
 
     override fun settlementRecoverySnapshot(
         txHash: String,
         expectedReceiptBlock: Long,
-    ): SettlementRecoverySnapshot = executeSettlementRecoverySnapshot(
-        batch = batch,
-        txHash = txHash,
-        expectedReceiptBlock = expectedReceiptBlock,
-    )
+    ): SettlementRecoverySnapshot = withEndpoint { endpoint ->
+        executeSettlementRecoverySnapshot(
+            batch = endpoint.batch,
+            txHash = txHash,
+            expectedReceiptBlock = expectedReceiptBlock,
+        )
+    }
 
     override fun settlementPreflight(
         request: SettlementPreflightRequest,
         includeGasEstimate: Boolean,
-    ): SettlementPreflightSnapshot = executeSettlementPreflight(
-        batch = batch,
-        request = request,
-        includeGasEstimate = includeGasEstimate,
-    )
+    ): SettlementPreflightSnapshot = withEndpoint { endpoint ->
+        executeSettlementPreflight(
+            batch = endpoint.batch,
+            request = request,
+            includeGasEstimate = includeGasEstimate,
+        )
+    }
 
     override fun close() {
-        // The process-scoped Web3j/OkHttp transport is intentionally shared across short-lived
-        // client leases so DNS, TLS, and HTTP/2 connections survive between terminal actions.
+        val closing = lifecycleLock.write {
+            val current = endpoint
+            endpoint = null
+            current
+        }
+        closing?.close()
+    }
+
+    private inline fun <T> withEndpoint(block: (OwnedRpcEndpoint) -> T): T = try {
+        lifecycleLock.read {
+            val current = endpoint
+                ?: throw SettlementRpcException("Settlement RPC client is closed")
+            block(current)
+        }
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: SettlementRpcException) {
+        throw error
+    } catch (_: Exception) {
+        // Web3j embeds provider response bodies and request details in several exception types.
+        // Replace them at this boundary without retaining a credential-bearing cause.
+        throw SettlementRpcException("RPC transport failed")
     }
 
     private fun org.web3j.protocol.core.Response<*>.throwIfError(operation: String) {
         if (hasError()) {
+            val code = error.code
             throw SettlementRpcException(
-                "$operation failed: ${error.message ?: "unknown RPC error"}",
-                error.code
+                "$operation failed with JSON-RPC error code $code",
+                rpcCode = code,
+                knownTransactionResponse = operation == "eth_sendRawTransaction" &&
+                    isKnownTransactionProviderResponse(error.message),
             )
         }
     }
@@ -772,9 +815,10 @@ internal class StrictSettlementRpcBatchClient private constructor(
                     throw SettlementRpcException("JSON-RPC error is not an object")
                 }
                 val code = rpcError.asJsonObject.get("code")?.asInt
-                val message = rpcError.asJsonObject.get("message")?.asString
-                    ?: "Unknown RPC error"
-                throw SettlementRpcException("JSON-RPC error ${code ?: 0}: $message", code)
+                throw SettlementRpcException(
+                    "JSON-RPC request failed with error code ${code ?: 0}",
+                    code,
+                )
             }
             resultsById[id] = response.get("result")
                 ?: throw SettlementRpcException("JSON-RPC response is missing result")
@@ -799,7 +843,7 @@ internal class StrictSettlementRpcBatchClient private constructor(
             futures.forEach { it.cancel(true) }
             val cause = error.cause
             if (cause is SettlementRpcException) throw cause
-            throw SettlementRpcException(cause?.message ?: "Settlement JSON-RPC batch failed")
+            throw SettlementRpcException("Settlement JSON-RPC batch failed")
         } catch (error: InterruptedException) {
             futures.forEach { it.cancel(true) }
             Thread.currentThread().interrupt()
@@ -839,31 +883,86 @@ internal class StrictSettlementRpcBatchClient private constructor(
     }
 }
 
-private data class SharedRpcEndpoint(
+private class OwnedRpcEndpoint(
     val web3j: Web3j,
     val batch: StrictSettlementRpcBatchClient,
-)
-
-private object SharedRpcConnections {
-    private val clients = java.util.concurrent.ConcurrentHashMap<String, SharedRpcEndpoint>()
-
-    fun get(rpcUrl: String): SharedRpcEndpoint = clients.computeIfAbsent(rpcUrl) {
-        val httpClient = HttpService.getOkHttpClientBuilder()
-            .followRedirects(false)
-            .followSslRedirects(false)
-            // Hard-cap every synchronous RPC used by both interactive and background settlement.
-            // Each scheduled recovery unit is exactly one call/batch, leaving one second beneath
-            // the coordinator's five-second cashier-priority lease.
-            .callTimeout(SETTLEMENT_RPC_CALL_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
-            .build()
-        SharedRpcEndpoint(
-            web3j = Web3j.build(HttpService(it, httpClient)),
-            batch = StrictSettlementRpcBatchClient(it, httpClient),
-        )
+    private val httpClient: OkHttpClient,
+    private val web3jScheduler: ScheduledExecutorService,
+) : Closeable {
+    override fun close() {
+        // No call can still hold this endpoint because the owning client closes it under its
+        // write lock. Tear down every URL-bearing wrapper and transport resource before returning.
+        httpClient.dispatcher.cancelAll()
+        runCatching { web3j.shutdown() }
+        web3jScheduler.shutdownNow()
+        httpClient.connectionPool.evictAll()
+        runCatching { httpClient.cache?.close() }
+        httpClient.dispatcher.executorService.shutdownNow()
     }
 }
 
+private fun createOwnedRpcEndpoint(rpcUrl: String): OwnedRpcEndpoint {
+    val httpClient = settlementHttpClientBuilder()
+        .build()
+    val scheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(
+            runnable,
+            "opk-settlement-web3j-${SETTLEMENT_TRANSPORT_IDS.incrementAndGet()}",
+        ).apply { isDaemon = true }
+    }
+    return try {
+        OwnedRpcEndpoint(
+            web3j = Web3j.build(
+                HttpService(rpcUrl, httpClient),
+                WEB3J_BLOCK_TIME_MILLIS,
+                scheduler,
+            ),
+            batch = StrictSettlementRpcBatchClient(rpcUrl, httpClient),
+            httpClient = httpClient,
+            web3jScheduler = scheduler,
+        )
+    } catch (error: Throwable) {
+        scheduler.shutdownNow()
+        httpClient.dispatcher.cancelAll()
+        httpClient.connectionPool.evictAll()
+        runCatching { httpClient.cache?.close() }
+        httpClient.dispatcher.executorService.shutdownNow()
+        throw error
+    }
+}
+
+@JvmSynthetic
+internal fun settlementHttpClientBuilder(): OkHttpClient.Builder =
+    // Build directly so Web3j cannot install its optional BODY logger, which would include a
+    // credential-bearing request URL when an application's SLF4J debug level is enabled.
+    OkHttpClient.Builder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        // Provider URLs can contain client credentials. Replace transport exception text at the
+        // connection boundary so host/path/query data cannot reach UI or Room errors.
+        .addInterceptor { chain ->
+            try {
+                chain.proceed(chain.request())
+            } catch (_: IOException) {
+                throw IOException("RPC transport failed")
+            }
+        }
+        // Hard-cap every synchronous RPC used by both interactive and background settlement.
+        // Each scheduled recovery unit is exactly one call/batch, leaving one second beneath the
+        // coordinator's five-second cashier-priority lease.
+        .callTimeout(SETTLEMENT_RPC_CALL_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+
 private const val SETTLEMENT_RPC_CALL_TIMEOUT_MILLIS = 4_000L
+private const val WEB3J_BLOCK_TIME_MILLIS = 15_000L
+private val SETTLEMENT_TRANSPORT_IDS = AtomicLong()
+
+private fun isKnownTransactionProviderResponse(message: String?): Boolean =
+    message.orEmpty().lowercase().let { value ->
+        "already known" in value ||
+            "known transaction" in value ||
+            "already imported" in value ||
+            "nonce too low" in value
+    }
 
 private fun quantityHex(value: Long): String {
     require(value >= 0) { "RPC quantity cannot be negative" }

@@ -3,6 +3,7 @@ package com.openpasskey.terminal.provisioning
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.erc681.NativeAsset
 import com.openpasskey.erc681.NetworkValidation
+import com.openpasskey.erc681.RpcRateLimitResponseException
 import com.openpasskey.terminal.chain.PaymentToken
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.chain.TerminalPaymentProfile
@@ -12,13 +13,19 @@ import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.lifecycle.TerminalResetCoordinator
 import com.openpasskey.terminal.lifecycle.OperatorNativeBalanceReader
 import com.openpasskey.terminal.lifecycle.OperatorNativeBalances
+import com.openpasskey.terminal.rpc.PinnedRpcEndpointVerifier
+import com.openpasskey.terminal.rpc.RpcEndpointOverrideState
+import com.openpasskey.terminal.rpc.RpcEndpointResolver
+import com.openpasskey.terminal.rpc.RpcEndpointSnapshot
 import com.openpasskey.terminal.settlement.OperatorResetGuard
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
 import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -31,19 +38,26 @@ class TerminalProvisionerTest {
     @Test
     fun trustedProvisioningReusesValidationEvidenceWithoutStandaloneVaultCodeRead() = runBlocking {
         val reader = FakeReader()
+        var authorizationCalls = 0
+        var writes = 0
         val provisioner = TerminalProvisioner(
             snapshot = { previous() },
-            compareAndCommit = { _, _ -> true },
+            compareAndCommit = { _, _ -> writes += 1; true },
             currentWalletSnapshot = ::wallet,
             lifecycleGate = TerminalLifecycleGate(),
             clientFactory = ProvisioningChainReaderFactory { reader },
         )
 
-        provisioner.provision(CANONICAL, wallet()) { commit -> commit() }
+        provisioner.provision(CANONICAL, wallet()) { commit ->
+            authorizationCalls += 1
+            commit()
+        }
 
         assertEquals(0, reader.chainIdCalls)
         assertEquals(1, reader.validationEvidenceCalls)
         assertEquals(0, reader.vaultRuntimeCalls)
+        assertEquals(1, authorizationCalls)
+        assertEquals(1, writes)
     }
 
     @Test
@@ -102,6 +116,110 @@ class TerminalProvisionerTest {
         )
         assertEquals(1, result.profile.confirmationBlocks)
         assertEquals(1, reader.validationEvidenceCalls)
+    }
+
+    @Test
+    fun resolvedEndpointIsUsedButNeverCopiedIntoProvisionedProfile() = runBlocking {
+        val managedEndpoint = "https://api.developer.coinbase.com/rpc/v1/base-sepolia/client-key"
+        val opened = mutableListOf<String>()
+        val resolver = object : RpcEndpointResolver {
+            override fun snapshot(chainId: Long) = RpcEndpointSnapshot(
+                chainId,
+                RpcEndpointOverrideState.NOT_CONFIGURED,
+                "Coinbase CDP",
+            )
+
+            override fun resolve(chainId: Long, fallbackUrl: String): String = managedEndpoint
+        }
+        val provisioner = TerminalProvisioner(
+            snapshot = { previous() },
+            compareAndCommit = { _, _ -> true },
+            currentWalletSnapshot = ::wallet,
+            lifecycleGate = TerminalLifecycleGate(),
+            rpcEndpointResolver = resolver,
+            clientFactory = ProvisioningChainReaderFactory { config ->
+                opened += config.rpcUrl
+                FakeReader()
+            },
+        )
+
+        val result = provisioner.provision(CANONICAL, wallet()) { commit -> commit() }
+
+        assertEquals(listOf(managedEndpoint), opened)
+        assertEquals("https://sepolia.base.org", result.profile.rpcUrl)
+        assertFalse(result.configuration.toString().contains("client-key"))
+    }
+
+    @Test
+    fun rpcEndpointVerifierAcceptsConfiguredRouteOnlyWithPinnedEvidence() = runBlocking {
+        val reader = FakeReader()
+        val verifier = PinnedRpcEndpointVerifier(
+            clientFactory = ProvisioningChainReaderFactory { reader },
+        )
+
+        verifier.verify(
+            chainId = 84532,
+            rpcUrl = "https://rpc.example/client-key",
+            currentConfiguration = provisionedPrevious(confirmationBlocks = 7),
+        )
+
+        assertEquals(1, reader.validationEvidenceCalls)
+        assertTrue(reader.closed)
+    }
+
+    @Test
+    fun rpcEndpointVerifierRejectsWrongChainBeforeAnUnprovisionedEndpointCanBeSaved() {
+        val reader = FakeReader().apply { remoteChainId = 8453 }
+        val verifier = PinnedRpcEndpointVerifier(
+            clientFactory = ProvisioningChainReaderFactory { reader },
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                verifier.verify(
+                    chainId = 84532,
+                    rpcUrl = "https://rpc.example/client-key",
+                    currentConfiguration = previous(),
+                )
+            }
+        }
+
+        assertEquals(1, reader.chainIdCalls)
+        assertTrue(reader.closed)
+    }
+
+    @Test
+    fun rpcEndpointVerifierChecksEveryConfiguredRouteOnTheSelectedChain() = runBlocking {
+        val firstConfiguration = provisionedPrevious(confirmationBlocks = 7)
+        val first = firstConfiguration.paymentProfiles.single()
+        val second = first.copy(
+            vaultAddress = "0x5555555555555555555555555555555555555555",
+        )
+        val configuration = firstConfiguration.copy(
+            paymentProfiles = listOf(first, second),
+            selectedProfileId = first.id,
+        )
+        val openedVaults = mutableListOf<EvmAddress>()
+        val readers = mutableListOf<FakeReader>()
+        val verifier = PinnedRpcEndpointVerifier(
+            clientFactory = ProvisioningChainReaderFactory { network ->
+                openedVaults += network.vault
+                FakeReader().apply {
+                    validationVault = network.vault
+                    readers += this
+                }
+            },
+        )
+
+        verifier.verify(
+            chainId = 84532,
+            rpcUrl = "https://rpc.example/client-key",
+            currentConfiguration = configuration,
+        )
+
+        assertEquals(setOf(first.vaultAddress, second.vaultAddress), openedVaults.map { it.value }.toSet())
+        assertEquals(2, readers.size)
+        assertTrue(readers.all { it.validationEvidenceCalls == 1 && it.closed })
     }
 
     @Test
@@ -327,6 +445,38 @@ class TerminalProvisionerTest {
     }
 
     @Test
+    fun exhaustedRateLimitFailurePerformsNoAuthorizationOrConfigurationCommit() {
+        val reader = FakeReader().apply {
+            validationFailure = RpcRateLimitResponseException(
+                rpcCode = -32016,
+                rpcMessage = "over rate limit",
+            )
+        }
+        var authorizationCalls = 0
+        var writes = 0
+        val provisioner = TerminalProvisioner(
+            snapshot = { previous() },
+            compareAndCommit = { _, _ -> writes += 1; true },
+            currentWalletSnapshot = ::wallet,
+            lifecycleGate = TerminalLifecycleGate(),
+            clientFactory = ProvisioningChainReaderFactory { reader },
+        )
+
+        assertThrows(RpcRateLimitResponseException::class.java) {
+            runBlocking {
+                provisioner.provision(CANONICAL, wallet()) { commit ->
+                    authorizationCalls += 1
+                    commit()
+                }
+            }
+        }
+
+        assertEquals(0, authorizationCalls)
+        assertEquals(0, writes)
+        assertTrue(reader.closed)
+    }
+
+    @Test
     fun maliciousVaultGettersCannotBypassPinnedRuntimeCodeHash() {
         val maliciousRuntime = byteArrayOf(0x60, 0x00)
         val reader = FakeReader().apply { vaultRuntime = maliciousRuntime }
@@ -481,9 +631,50 @@ class TerminalProvisionerTest {
         assertTrue(reader.closed)
     }
 
+    @Test
+    fun cancellingProvisioningInterruptsTrustedRpcWaitAndPerformsNoCommit() = runBlocking {
+        val validationStarted = CountDownLatch(1)
+        val validationInterrupted = CountDownLatch(1)
+        val reader = FakeReader().apply {
+            validationHook = {
+                validationStarted.countDown()
+                try {
+                    Thread.sleep(TimeUnit.SECONDS.toMillis(30))
+                } catch (error: InterruptedException) {
+                    validationInterrupted.countDown()
+                    throw error
+                }
+            }
+        }
+        var authorizationCalls = 0
+        var writes = 0
+        val provisioner = TerminalProvisioner(
+            snapshot = { previous() },
+            compareAndCommit = { _, _ -> writes += 1; true },
+            currentWalletSnapshot = ::wallet,
+            lifecycleGate = TerminalLifecycleGate(),
+            clientFactory = ProvisioningChainReaderFactory { reader },
+        )
+        val provisioning = async(Dispatchers.Default) {
+            provisioner.provision(CANONICAL, wallet()) { commit ->
+                authorizationCalls += 1
+                commit()
+            }
+        }
+
+        assertTrue(validationStarted.await(5, TimeUnit.SECONDS))
+        provisioning.cancelAndJoin()
+
+        assertTrue(validationInterrupted.await(5, TimeUnit.SECONDS))
+        assertEquals(0, authorizationCalls)
+        assertEquals(0, writes)
+        assertTrue(reader.closed)
+    }
+
     private class FakeReader : ProvisioningChainReader {
         var remoteChainId = 84532L
         var vaultRuntime = CANONICAL_VAULT_RUNTIME.copyOf()
+        var validationVault = VAULT
         var factory = FACTORY
         var implementation = IMPLEMENTATION
         var whitelisted = true
@@ -539,7 +730,7 @@ class TerminalProvisionerTest {
                 chainId = remoteChainId,
                 factory = factory,
                 receiverImplementation = implementation,
-                vault = VAULT,
+                vault = validationVault,
                 token = token,
                 tokenWhitelisted = whitelisted,
                 tokenDecimals = decimals,
@@ -558,7 +749,7 @@ class TerminalProvisionerTest {
                     chainId = remoteChainId,
                     factory = factory,
                     receiverImplementation = implementation,
-                    vault = VAULT,
+                    vault = validationVault,
                     token = token,
                     tokenWhitelisted = whitelisted,
                     tokenDecimals = decimals,
@@ -581,7 +772,7 @@ class TerminalProvisionerTest {
                     chainId = remoteChainId,
                     factory = factory,
                     receiverImplementation = implementation,
-                    vault = VAULT,
+                    vault = validationVault,
                     token = token,
                     tokenWhitelisted = whitelisted,
                     tokenDecimals = expectedDecimals,
@@ -602,7 +793,7 @@ class TerminalProvisionerTest {
                 chainId = remoteChainId,
                 factory = FACTORY,
                 receiverImplementation = IMPLEMENTATION,
-                vault = VAULT,
+                vault = validationVault,
                 token = token,
                 tokenWhitelisted = true,
                 tokenDecimals = expectedDecimals,

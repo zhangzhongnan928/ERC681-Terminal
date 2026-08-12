@@ -72,6 +72,7 @@ class SettlementProofFreshnessTest {
         fun reusable(now: Long, callData: String = proof.callData) = proof.canReuseGasEstimateFor(
             chainId = proof.chainId,
             rpcUrl = proof.rpcUrl,
+            rpcEndpointGeneration = proof.rpcEndpointGeneration,
             vaultAddress = proof.vaultAddress,
             tokenAddress = proof.tokenAddress,
             operatorAddress = proof.operatorAddress,
@@ -84,6 +85,20 @@ class SettlementProofFreshnessTest {
         assertTrue(reusable(160_000))
         assertFalse(reusable(160_001))
         assertFalse(reusable(120_000, callData = "0xdeadbeef"))
+        assertFalse(
+            proof.canReuseGasEstimateFor(
+                chainId = proof.chainId,
+                rpcUrl = proof.rpcUrl,
+                rpcEndpointGeneration = proof.rpcEndpointGeneration + 1,
+                vaultAddress = proof.vaultAddress,
+                tokenAddress = proof.tokenAddress,
+                operatorAddress = proof.operatorAddress,
+                invoiceIds = proof.invoiceIds,
+                confirmedObservedAmounts = proof.confirmedObservedAmounts,
+                callData = proof.callData,
+                nowElapsedRealtimeMillis = 120_000,
+            ),
+        )
     }
 
     @Test
@@ -111,6 +126,7 @@ class SettlementProofFreshnessTest {
     ): Boolean = canReuseGasEstimateFor(
         chainId = chainId,
         rpcUrl = rpcUrl,
+        rpcEndpointGeneration = rpcEndpointGeneration,
         vaultAddress = vaultAddress,
         tokenAddress = tokenAddress,
         operatorAddress = operatorAddress,
@@ -129,6 +145,7 @@ class SettlementProofFreshnessTest {
         chainId = 84532,
         networkName = "Base Sepolia",
         rpcUrl = "https://sepolia.base.org",
+        rpcEndpointGeneration = 0,
         vaultAddress = "0x" + "11".repeat(20),
         tokenAddress = "0x" + "22".repeat(20),
         tokenSymbol = "AUD",

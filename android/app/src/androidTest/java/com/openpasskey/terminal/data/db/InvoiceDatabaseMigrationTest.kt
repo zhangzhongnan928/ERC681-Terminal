@@ -22,6 +22,116 @@ class InvoiceDatabaseMigrationTest {
     )
 
     @Test
+    fun v8ToV9SanitizesRpcUrlsAndPreservesInvoiceAndSettlementEvidence() {
+        val secretInvoiceRpc = "https://api.developer.coinbase.com/rpc/v1/base/invoice-secret"
+        val secretSettlementRpc = "https://base-sepolia.g.alchemy.com/v2/settlement-secret"
+        val secretSettlementError =
+            "Unable to reach https://settlement-secret.rpc-provider.example/base"
+        helper.createDatabase(TEST_DATABASE_V8_V9, 8).apply {
+            execSQL(
+                """
+                INSERT INTO invoices (
+                    invoiceId, receiver, token, tokenSymbol, expectedAmount, status, createdAt,
+                    chainId, networkName, rpcUrl
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf<Any?>(
+                    INVOICE_ID,
+                    RECEIVER,
+                    TOKEN,
+                    "AUDM",
+                    "1250000",
+                    "PAID",
+                    1_721_000_000L,
+                    8453L,
+                    "Base Mainnet",
+                    secretInvoiceRpc,
+                ),
+            )
+            execSQL(
+                """
+                INSERT INTO settlement_transactions (
+                    id, chainId, networkName, rpcUrl, vaultAddress, tokenAddress, tokenSymbol,
+                    operatorAddress, invoiceIdsJson, expectedAmountsJson, receiverAddressesJson,
+                    requiredConfirmations, callData, nonce, gasLimit, feeMode, maxGasCostWei,
+                    feeReserveWei, requiredBalanceWei, txHash, status, verifiedInvoiceIdsJson,
+                    verifiedEventsJson, createdAt, updatedAt
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf<Any?>(
+                    "settlement-1",
+                    84532L,
+                    "Base Sepolia",
+                    secretSettlementRpc,
+                    "0x4444444444444444444444444444444444444444",
+                    TOKEN,
+                    "AUD",
+                    "0x5555555555555555555555555555555555555555",
+                    "[\"$INVOICE_ID\"]",
+                    "[\"1250000\"]",
+                    "[\"$RECEIVER\"]",
+                    2,
+                    "0x1234",
+                    "7",
+                    "21000",
+                    "EIP1559",
+                    "100000",
+                    "1000",
+                    "101000",
+                    "0x${"66".repeat(32)}",
+                    "SIGNED",
+                    "[]",
+                    "[]",
+                    1_721_000_100L,
+                    1_721_000_101L,
+                ),
+            )
+            execSQL(
+                "UPDATE settlement_transactions SET error = ? WHERE id = 'settlement-1'",
+                arrayOf<Any?>(secretSettlementError),
+            )
+            close()
+        }
+
+        val migrated = helper.runMigrationsAndValidate(
+            TEST_DATABASE_V8_V9,
+            9,
+            true,
+            *InvoiceDatabase.ALL_MIGRATIONS,
+        )
+
+        migrated.query(
+            "SELECT rpcUrl, tokenSymbol, expectedAmount, status, createdAt " +
+                "FROM invoices WHERE invoiceId = ?",
+            arrayOf(INVOICE_ID),
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("https://mainnet.base.org", cursor.getString(0))
+            assertEquals("AUDM", cursor.getString(1))
+            assertEquals("1250000", cursor.getString(2))
+            assertEquals("PAID", cursor.getString(3))
+            assertEquals(1_721_000_000L, cursor.getLong(4))
+        }
+        migrated.query(
+            "SELECT rpcUrl, vaultAddress, txHash, status, createdAt, updatedAt, error " +
+                "FROM settlement_transactions WHERE id = 'settlement-1'",
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("https://sepolia.base.org", cursor.getString(0))
+            assertEquals("0x4444444444444444444444444444444444444444", cursor.getString(1))
+            assertEquals("0x${"66".repeat(32)}", cursor.getString(2))
+            assertEquals("SIGNED", cursor.getString(3))
+            assertEquals(1_721_000_100L, cursor.getLong(4))
+            assertEquals(1_721_000_101L, cursor.getLong(5))
+            assertEquals(
+                "Previous settlement diagnostic removed during secure RPC migration",
+                cursor.getString(6),
+            )
+        }
+        migrated.close()
+    }
+
+    @Test
     fun v5ToV6PreservesExistingInvoiceAndAddsEmptyOperatorSnapshot() {
         helper.createDatabase(TEST_DATABASE, 5).apply {
             execSQL(
@@ -190,6 +300,7 @@ class InvoiceDatabaseMigrationTest {
         const val TEST_DATABASE = "invoice-v5-v6-migration-test"
         const val TEST_DATABASE_V7_V8 = "invoice-v7-v8-merchant-receipt-migration-test"
         const val TEST_DATABASE_V6_V8 = "invoice-v6-v8-receipt-migration-test"
+        const val TEST_DATABASE_V8_V9 = "invoice-v8-v9-rpc-sanitization-migration-test"
         val INVOICE_ID = "0x${"11".repeat(32)}"
         const val RECEIVER = "0x2222222222222222222222222222222222222222"
         const val TOKEN = "0x3333333333333333333333333333333333333333"

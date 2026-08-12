@@ -125,6 +125,23 @@ class StrictSettlementRpcBatchClientTest {
     }
 
     @Test
+    fun `chunk failure never retains provider controlled exception text`() {
+        val secret = "https://provider.example/base/terminal-client-key"
+        val client = StrictSettlementRpcBatchClient.forTest {
+            throw IllegalStateException(secret)
+        }
+        val calls = List(11) { index -> SettlementRpcCall("call-$index", JsonArray()) }
+
+        val error = assertThrows(SettlementRpcException::class.java) {
+            client.executeChunked(calls)
+        }
+
+        assertEquals("JSON-RPC batch response is not valid JSON", error.message)
+        assertFalse(error.toString().contains(secret))
+        assertEquals(null, error.cause)
+    }
+
+    @Test
     fun `protocol maximum settlement preflight preserves three ordered waves`() {
         val operator = "0x" + "11".repeat(20)
         val vault = "0x" + "22".repeat(20)

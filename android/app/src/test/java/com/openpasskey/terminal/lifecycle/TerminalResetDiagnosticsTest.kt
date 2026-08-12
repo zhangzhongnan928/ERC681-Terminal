@@ -5,10 +5,12 @@ import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import com.openpasskey.terminal.settlement.OperatorResetGuard
 import com.openpasskey.terminal.settlement.SettlementChainClient
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.web3j.protocol.exceptions.ClientConnectionException
 import java.lang.reflect.Proxy
 import java.math.BigInteger
 
@@ -52,6 +54,37 @@ class TerminalResetDiagnosticsTest {
         assertTrue(error.message.orEmpty().contains(known.networkName))
         assertTrue(error.message.orEmpty().contains("chain ${known.chainId}"))
         assertFalse(deleted)
+    }
+
+    @Test
+    fun providerResponseCannotExposeCredentialThroughResetFailure() = runBlocking {
+        val known = KnownChainPolicy.defaultProfile()
+        val secret = "terminal-provider-secret"
+        val reader = RpcOperatorNativeBalanceReader(
+            configSnapshot = { unprovisionedSnapshot(known.chainId) },
+            clientFactory = {
+                throw ClientConnectionException(
+                    "Invalid response from https://rpc.example/$secret: echoed body $secret",
+                )
+            },
+        )
+        val coordinator = TerminalResetCoordinator(
+            lifecycleGate = TerminalLifecycleGate(),
+            resetGuard = OperatorResetGuard { false },
+            nativeBalanceReader = reader,
+            clearProvisioning = { true },
+            deleteWallet = {},
+        )
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            runBlocking { coordinator.reset(OPERATOR) { commit -> commit() } }
+        }
+
+        assertTrue(error.message.orEmpty().contains(known.networkName))
+        assertTrue(error.message.orEmpty().contains("chain ${known.chainId}"))
+        assertFalse(error.message.orEmpty().contains(secret))
+        assertFalse(error.message.orEmpty().contains("rpc.example"))
+        assertEquals(null, error.cause)
     }
 
     @Test

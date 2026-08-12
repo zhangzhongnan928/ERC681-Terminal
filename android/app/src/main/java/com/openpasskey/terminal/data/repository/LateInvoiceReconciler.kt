@@ -9,6 +9,7 @@ import com.openpasskey.terminal.data.model.Invoice
 import com.openpasskey.terminal.data.model.InvoiceStatus
 import com.openpasskey.terminal.data.model.SettlementEvent
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
+import com.openpasskey.terminal.rpc.RpcEndpointResolver
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -44,8 +45,12 @@ internal class LateInvoiceReconciler(
     private val invoiceDao: InvoiceDao,
     private val eventDao: SettlementEventDao,
     private val lifecycleGate: TerminalLifecycleGate,
-    private val sampler: LateReceiverSampler = LateReceiverSampler(::sampleReceiverBalance),
+    sampler: LateReceiverSampler? = null,
+    private val rpcEndpointResolver: RpcEndpointResolver = RpcEndpointResolver.PASSTHROUGH,
 ) {
+    private val sampler = sampler ?: LateReceiverSampler { invoice ->
+        sampleReceiverBalance(invoice, rpcEndpointResolver)
+    }
     private val reconciliationMutex = Mutex()
 
     suspend fun reconcileOnce(limit: Int = MAX_CANDIDATES_PER_PASS): Int =
@@ -210,9 +215,14 @@ internal class LateInvoiceReconciler(
             InvoiceStatus.LATE_PAYMENT_READY,
         )
 
-        private fun sampleReceiverBalance(invoice: Invoice): ReceiverBalanceSnapshot {
+        private fun sampleReceiverBalance(
+            invoice: Invoice,
+            rpcEndpointResolver: RpcEndpointResolver,
+        ): ReceiverBalanceSnapshot {
             val client = ReadOnlyRpcClient(
-                invoice.toNetworkConfig(),
+                invoice.toNetworkConfig(
+                    rpcEndpointResolver.resolve(invoice.chainId, invoice.rpcUrl),
+                ),
                 connectTimeoutMillis = RPC_CONNECT_TIMEOUT_MILLIS,
                 readTimeoutMillis = RPC_READ_TIMEOUT_MILLIS,
             )
@@ -231,9 +241,9 @@ internal class LateInvoiceReconciler(
             )
         }
 
-        private fun Invoice.toNetworkConfig() = NetworkConfig(
+        private fun Invoice.toNetworkConfig(resolvedRpcUrl: String) = NetworkConfig(
             chainId = chainId,
-            rpcUrl = rpcUrl,
+            rpcUrl = resolvedRpcUrl,
             factory = EvmAddress.parse(factoryAddress),
             receiverImplementation = EvmAddress.parse(receiverImplementationAddress),
             vault = EvmAddress.parse(vaultAddress),

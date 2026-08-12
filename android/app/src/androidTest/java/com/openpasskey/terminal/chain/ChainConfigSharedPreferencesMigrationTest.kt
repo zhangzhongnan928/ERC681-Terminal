@@ -3,6 +3,7 @@ package com.openpasskey.terminal.chain
 import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.openpasskey.terminal.rpc.RpcEndpointOverrideState
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -22,14 +23,19 @@ class ChainConfigSharedPreferencesMigrationTest {
     private val preferences
         get() = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
+    private val rpcEndpointPreferences
+        get() = context.getSharedPreferences(RPC_ENDPOINT_PREFERENCES_NAME, Context.MODE_PRIVATE)
+
     @Before
     fun clearPreferences() {
         assertTrue(preferences.edit().clear().commit())
+        assertTrue(rpcEndpointPreferences.edit().clear().commit())
     }
 
     @After
     fun cleanUpPreferences() {
         assertTrue(preferences.edit().clear().commit())
+        assertTrue(rpcEndpointPreferences.edit().clear().commit())
     }
 
     @Test
@@ -117,6 +123,165 @@ class ChainConfigSharedPreferencesMigrationTest {
         assertEquals(84532L, reopenedV3.chainId)
         assertEquals("USDC", reopenedV3.paymentTokens.single().symbol)
         assertTrue(reopenedV3.hasCompleteProvisioning())
+    }
+
+    @Test
+    fun credentialBearingLegacyEndpointMovesToKeystoreStoreBeforeCatalogIsSanitized() {
+        val secret = "legacy-terminal-provider-key"
+        val endpoint = "https://base-sepolia.g.alchemy.com/v2/$secret"
+        assertTrue(
+            preferences.edit()
+                .putString(
+                    V2_CONFIG_KEY,
+                    V2_SINGLE_PROFILE_JSON.replace("https://sepolia.base.org", endpoint),
+                )
+                .putBoolean(V2_PROVISIONED_KEY, true)
+                .commit(),
+        )
+
+        val config = ChainConfig(context)
+        val migrated = config.snapshot()
+
+        assertEquals("https://sepolia.base.org", migrated.rpcUrl)
+        assertTrue(
+            migrated.resolvedPaymentProfiles().all { it.rpcUrl == "https://sepolia.base.org" },
+        )
+        assertEquals(endpoint, config.rpcEndpointStore.resolve(84532, "https://sepolia.base.org"))
+        assertEquals(
+            RpcEndpointOverrideState.READY,
+            config.rpcEndpointStore.snapshot(84532).state,
+        )
+        assertEquals(
+            endpoint,
+            ChainConfig(context).rpcEndpointStore.resolve(84532, "https://sepolia.base.org"),
+        )
+        assertFalse(preferences.getString(V3_CONFIG_KEY, null).orEmpty().contains(secret))
+        assertFalse(rpcEndpointPreferences.all.values.joinToString().contains(secret))
+    }
+
+    @Test
+    fun malformedV3EncryptsOneRecoverableEndpointThenScrubsEveryPlaintextRpcSource() {
+        val secret = "malformed-v3-provider-key"
+        val endpoint = "https://base-sepolia.g.alchemy.com/v2/$secret"
+        assertTrue(
+            preferences.edit()
+                .putString(
+                    V3_CONFIG_KEY,
+                    v3CatalogJson(confirmationBlocks = 0)
+                        .replace("https://sepolia.base.org", endpoint),
+                )
+                .putBoolean(V3_PROVISIONED_KEY, true)
+                // This stale catalog must not become a fallback after v3 fails validation.
+                .putString(V2_CONFIG_KEY, V2_SINGLE_PROFILE_JSON)
+                .putBoolean(V2_PROVISIONED_KEY, true)
+                .putString(LEGACY_RPC_URL_KEY, endpoint)
+                .putString(RECEIPT_MERCHANT_NAME_KEY, "Migration Test Merchant")
+                .putBoolean(AUTO_SWEEP_ENABLED_KEY, true)
+                .commit(),
+        )
+
+        val config = ChainConfig(context)
+        val snapshot = config.snapshot()
+
+        assertFalse(snapshot.provisioned)
+        assertTrue(preferences.getBoolean(V3_PROVISIONED_KEY, false))
+        assertFalse(preferences.contains(V3_CONFIG_KEY))
+        assertFalse(preferences.contains(V2_CONFIG_KEY))
+        assertFalse(preferences.contains(LEGACY_RPC_URL_KEY))
+        assertFalse(preferences.all.values.joinToString().contains(secret))
+        assertEquals(endpoint, config.rpcEndpointStore.resolve(84532, "https://sepolia.base.org"))
+        assertEquals(
+            RpcEndpointOverrideState.READY,
+            config.rpcEndpointStore.snapshot(84532).state,
+        )
+        assertEquals("Migration Test Merchant", config.merchantReceiptProfile().name)
+        assertTrue(config.autoSweepEnabled())
+        assertFalse(rpcEndpointPreferences.all.values.joinToString().contains(secret))
+    }
+
+    @Test
+    fun corruptV3StillScrubsPlaintextWhenNoEndpointCanBeRecovered() {
+        val secret = "unparseable-v3-provider-key"
+        val endpoint = "https://provider.invalid/v2/$secret"
+        assertTrue(
+            preferences.edit()
+                .putString(V3_CONFIG_KEY, "{not-json:$endpoint")
+                .putBoolean(V3_PROVISIONED_KEY, true)
+                .putString(RECEIPT_MERCHANT_NAME_KEY, "Keep This Merchant")
+                .commit(),
+        )
+
+        val config = ChainConfig(context)
+
+        assertFalse(config.snapshot().provisioned)
+        assertTrue(preferences.getBoolean(V3_PROVISIONED_KEY, false))
+        assertFalse(preferences.contains(V3_CONFIG_KEY))
+        assertFalse(preferences.all.values.joinToString().contains(secret))
+        assertEquals(
+            RpcEndpointOverrideState.NOT_CONFIGURED,
+            config.rpcEndpointStore.snapshot(84532).state,
+        )
+        assertEquals("Keep This Merchant", config.merchantReceiptProfile().name)
+    }
+
+    @Test
+    fun malformedV2EncryptsOneRecoverableEndpointThenFailsClosedWithoutPlaintext() {
+        val secret = "malformed-v2-provider-key"
+        val endpoint = "https://api.developer.coinbase.com/rpc/v1/base-sepolia/$secret"
+        val malformedV2 = V2_SINGLE_PROFILE_JSON
+            .replace("https://sepolia.base.org", endpoint)
+            .replace("\"confirmationBlocks\": 2", "\"confirmationBlocks\": 0")
+        assertTrue(
+            preferences.edit()
+                .putString(V2_CONFIG_KEY, malformedV2)
+                .putBoolean(V2_PROVISIONED_KEY, true)
+                .putString(RECEIPT_MERCHANT_NAME_KEY, "V2 Merchant")
+                .commit(),
+        )
+
+        val config = ChainConfig(context)
+
+        assertFalse(config.snapshot().provisioned)
+        assertTrue(preferences.getBoolean(V2_PROVISIONED_KEY, false))
+        assertFalse(preferences.contains(V2_CONFIG_KEY))
+        assertFalse(preferences.all.values.joinToString().contains(secret))
+        assertEquals(endpoint, config.rpcEndpointStore.resolve(84532, "https://sepolia.base.org"))
+        assertEquals(
+            RpcEndpointOverrideState.READY,
+            config.rpcEndpointStore.snapshot(84532).state,
+        )
+        assertEquals("V2 Merchant", config.merchantReceiptProfile().name)
+        assertFalse(rpcEndpointPreferences.all.values.joinToString().contains(secret))
+    }
+
+    @Test
+    fun legacyRpcUrlWithoutChainIsScrubbedWithoutGuessingItsNetwork() {
+        val secret = "orphaned-legacy-provider-key"
+        val endpoint = "https://base-mainnet.g.alchemy.com/v2/$secret"
+        assertTrue(
+            preferences.edit()
+                .putString(LEGACY_RPC_URL_KEY, endpoint)
+                .putString(RECEIPT_MERCHANT_NAME_KEY, "Legacy Merchant")
+                .putBoolean(AUTO_SWEEP_ENABLED_KEY, true)
+                .commit(),
+        )
+
+        val config = ChainConfig(context)
+        val snapshot = config.snapshot()
+
+        assertFalse(snapshot.provisioned)
+        assertFalse(preferences.contains(LEGACY_RPC_URL_KEY))
+        assertFalse(preferences.all.values.joinToString().contains(secret))
+        assertEquals(
+            RpcEndpointOverrideState.NOT_CONFIGURED,
+            config.rpcEndpointStore.snapshot(8453).state,
+        )
+        assertEquals(
+            RpcEndpointOverrideState.NOT_CONFIGURED,
+            config.rpcEndpointStore.snapshot(84532).state,
+        )
+        assertEquals("Legacy Merchant", config.merchantReceiptProfile().name)
+        assertTrue(config.autoSweepEnabled())
     }
 
     @Test
@@ -324,10 +489,14 @@ class ChainConfigSharedPreferencesMigrationTest {
 
     private companion object {
         const val PREFERENCES_NAME = "opk_chain_config"
+        const val RPC_ENDPOINT_PREFERENCES_NAME = "opk_rpc_endpoint_secrets_v1"
         const val V2_CONFIG_KEY = "provisioned_config_v2"
         const val V2_PROVISIONED_KEY = "is_provisioned_v2"
         const val V3_CONFIG_KEY = "provisioned_config_v3"
         const val V3_PROVISIONED_KEY = "is_provisioned_v3"
+        const val LEGACY_RPC_URL_KEY = "rpc_url"
+        const val RECEIPT_MERCHANT_NAME_KEY = "receipt_merchant_name"
+        const val AUTO_SWEEP_ENABLED_KEY = "auto_sweep_enabled_v1"
         const val PROFILE_ID =
             "eip155:84532:0x1111111111111111111111111111111111111111:" +
                 "0x7ffba642bc902880a737cb1c18a4e9540879e211"

@@ -5,6 +5,7 @@ import com.openpasskey.terminal.data.model.hasSuccessfulPrimaryPayment
 import com.openpasskey.terminal.data.model.receiptPrintFingerprint
 import com.openpasskey.terminal.data.repository.AutomaticPaymentEvidenceResult
 import com.openpasskey.terminal.data.repository.InvoiceRepository
+import com.openpasskey.terminal.rpc.safeReadRpcFailureMessage
 import java.math.BigDecimal
 import java.time.Clock
 import kotlinx.coroutines.CancellationException
@@ -62,7 +63,10 @@ class ReceiptCoordinator(
             throw error
         } catch (error: Exception) {
             return@withLock ReceiptRequestResult.Unavailable(
-                error.message ?: "Payment transaction details are not available yet.",
+                safeReadRpcFailureMessage(
+                    error,
+                    "Payment transaction details are not available yet.",
+                ),
             )
         } ?: return@withLock ReceiptRequestResult.Unavailable("Payment was not found.")
 

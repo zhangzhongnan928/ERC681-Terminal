@@ -47,8 +47,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.openpasskey.terminal.ios
         PRODUCT_NAME: OPK Terminal
         PRODUCT_MODULE_NAME: OPKTerminalApp
-        MARKETING_VERSION: 0.3.0
-        CURRENT_PROJECT_VERSION: 17
+        MARKETING_VERSION: 0.3.1
+        CURRENT_PROJECT_VERSION: 18
         DEVELOPMENT_TEAM: 3272Q6WG52
         SWIFT_VERSION: 6.0
         SWIFT_STRICT_CONCURRENCY: complete

@@ -90,7 +90,7 @@ developer resources.
   only when cumulative canonical proof covers the original expected amount.
 - Destructive operator-key reset is allowed only before the first payment QR is issued. A published
   receiver remains payable forever, so later administration uses reprovisioning/authorization
-  changes without deleting the key. Before an allowed reset, the shipped trusted RPC must report
+  changes without deleting the key. Before an allowed reset, the active approved RPC must report
   both latest and pending native balances as exactly zero twice; late deposits to the retired,
   previously shared address are still possible and unrecoverable.
 
@@ -98,13 +98,40 @@ The native asset is offered only after a successful vault `NATIVE_ASSET()` read 
 EIP-7528 sentinel and that sentinel is whitelisted. `isPaymentToken(sentinel)` alone is not a
 Protocol 1.6 capability probe. Non-canonical payment forms and all other contract calls fail closed.
 
-## Public RPC performance policy
+## RPC endpoint and performance policy
 
-The shipped apps are designed to operate directly against the compiled public RPC endpoint; they
-do not require a paid provider, proxy, backend, or Multicall deployment. Independent read-only
-calls are grouped into strict JSON-RPC batches of at most 10 items. Larger logical proofs are split
-into bounded chunks that may run concurrently, and each native transport reuses its own persistent
-connection pool. Every required response must contain the exact integer request ID, JSON-RPC
+Android resolves each Base network endpoint in this order: an administrator override encrypted on
+the terminal, then an optional build-managed endpoint. Debug builds alone may use the compiled
+public Base fallback for local development. Configure build
+defaults without committing them by setting `OPK_BASE_MAINNET_RPC_URL` and
+`OPK_BASE_SEPOLIA_RPC_URL` (or Gradle properties `opkBaseMainnetRpcUrl` and
+`opkBaseSepoliaRpcUrl`) before building. Admin/setup also provides a masked text field and a QR
+scanner for replacing or clearing one chain's endpoint. Scanning fills the field only; the app
+requires explicit verification and save. The portal provisioning QR cannot carry an RPC URL.
+A release build may intentionally leave the build-managed values empty so each terminal can receive
+a revocable client endpoint through Admin/setup. In that mode, setup fails closed and requires a
+saved endpoint for the matching Base Mainnet or Base Sepolia portal QR. Release builds reject an
+explicit Base public RPC host and never silently fall back to one. Do not put credential-bearing
+values in a tracked Gradle properties file.
+Saving an administrator override deliberately changes that chain's read trust source. The app
+checks the endpoint's reported chain and compiled OPK deployment pins, but no client can prevent a
+chosen RPC server from fabricating responses. Configure only a provider the merchant trusts.
+
+Provider URLs can contain client credentials and are therefore never copied into the normal chain
+catalog, invoices, settlement history, receipts, logs, or long-lived ViewModel/status state. The
+secure editor holds the submitted value only as ephemeral local UI state. Admin overrides are
+encrypted with an Android Keystore key. BuildConfig values and direct provider credentials remain
+extractable from a sufficiently controlled client, so they must be revocable client credentials,
+never server secrets. Prefer a credential-free OPK gateway URL for fleet builds. A Coinbase CDP Client API Key
+is an acceptable direct-mobile fallback because Coinbase documents that key type for client-side
+use. Do not ship a CDP Secret API Key. For Alchemy, use an OPK gateway instead of a permanent URL
+key. The gateway may authenticate upstream with a short-lived JWT, but the terminal currently
+accepts URL endpoints only, so Alchemy JWT authentication is supported only behind that gateway
+today. Never paste a JWT into the RPC URL field or encode one in its QR code.
+
+Independent read-only calls are grouped into strict JSON-RPC batches of at most 10 items. Larger logical proofs are split
+into bounded chunks that may run concurrently, and each short-lived native transport owns and
+closes its connection pool. Every required response must contain the exact integer request ID, JSON-RPC
 version, and complete result set. Missing, duplicate, unexpected, malformed, failed-required, or
 wrong-block responses fail closed. A narrowly optional compatibility read, such as `owner()` after
 `isOperator` already proved authorization, is handled explicitly rather than weakening the batch.
@@ -136,8 +163,8 @@ long-lived cache. Wall-clock time remains dependent on the public endpoint and n
    the saved publication and funding cursors are available, resolve and conditionally persist the
    direct incoming customer transaction for receipt details; leave it unavailable when the balance
    crossing cannot be attributed safely.
-7. Re-prove even historical invoice snapshots against the shipped chain pins and trusted RPC,
-   verify current operator authorization and exact balances through the operational RPC, then
+7. Re-prove even historical invoice snapshots through the active approved RPC against the shipped
+   chain and deployment pins, verify current operator authorization and exact balances, then
    simulate and estimate a constrained `sweepSessions` transaction. Repeat provenance,
    confirmation-cursor, authorization, exact-balance, and simulation checks immediately before
    activating that historical chain/vault target and signing.
@@ -164,7 +191,7 @@ MOBILE_SDK.md  Integration and deployment guide
 Base Mainnet (`8453`) and Base Sepolia (`84532`) are enabled in the production apps. Fresh
 configuration defaults to Base Mainnet; Base Sepolia remains an explicit testing choice. Their
 immutable pins target the published OPK Protocol 1.6 Route A deployments. A
-provisioning QR chooses an enabled chain but cannot supply or override its RPC trust root, factory,
+provisioning QR chooses an enabled chain but cannot supply or override its RPC endpoint, factory,
 receiver implementation, vault runtime hash, protocol version, CREATE2 vector, finality floor,
 native-currency metadata, or minimum operator gas reserve. The shared pins are recorded in
 `conformance/opk-terminal-networks-v1.json`. The Swift and Kotlin payment-profile
@@ -175,9 +202,11 @@ network within its allowed range. Every profile on the same chain shares that ne
 new profile inherits the existing choice. The value is snapshotted into new invoices and settlement batches, while
 existing invoices retain their original requirement. The strict v1 provisioning QR does not carry
 or override this local policy. Any additional network has the same explicit release gate; arbitrary
-QR-provided network infrastructure remains unsupported. Base's public RPC endpoints are
-rate-limited and are not production-capacity guarantees, so live operators must review their RPC
-provider policy separately from the compiled chain and deployment pins.
+QR-provided network infrastructure remains unsupported. The separate administrator RPC control
+validates a candidate against the selected chain and compiled OPK deployment pins before encrypted
+activation. Base's public RPC endpoints are rate-limited and are not production-capacity
+guarantees, so every production network must have either an encrypted administrator override or an
+optional build-managed endpoint before it can be used.
 
 The current implementation still lacks cross-operator `Swept`-log discovery and same-nonce fee
 replacement/cancellation; see the recovery limits in [MOBILE_SDK.md](./MOBILE_SDK.md) before

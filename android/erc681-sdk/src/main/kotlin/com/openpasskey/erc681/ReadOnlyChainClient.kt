@@ -47,9 +47,32 @@ data class NetworkValidation(
 
 open class RpcException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 
-class RpcResponseException(
+open class RpcResponseException(
     val rpcCode: Int,
+    @Suppress("UNUSED_PARAMETER") rpcMessage: String,
+) : RpcException("JSON-RPC error $rpcCode")
+
+/**
+ * Marker shared by the distinct HTTP and JSON-RPC throttle failures. Callers can classify a
+ * provider throttle without losing the existing [RpcResponseException] JSON-RPC hierarchy.
+ */
+interface RpcRateLimit {
+    /** Provider-requested delay after defensive bounding, when supplied over HTTP. */
+    val retryAfterMillis: Long?
+}
+
+/** A provider JSON-RPC throttle that remains catch-compatible with [RpcResponseException]. */
+class RpcRateLimitResponseException(
+    rpcCode: Int,
     rpcMessage: String,
-) : RpcException("JSON-RPC error $rpcCode: $rpcMessage")
+    override val retryAfterMillis: Long? = null,
+) : RpcResponseException(rpcCode, rpcMessage), RpcRateLimit
+
+/** An HTTP 429 provider throttle. */
+class RpcHttpRateLimitException(
+    override val retryAfterMillis: Long? = null,
+) : RpcException("RPC HTTP request failed with status 429"), RpcRateLimit {
+    val httpStatus: Int = 429
+}
 
 class NetworkConfigurationException(message: String) : RpcException(message)

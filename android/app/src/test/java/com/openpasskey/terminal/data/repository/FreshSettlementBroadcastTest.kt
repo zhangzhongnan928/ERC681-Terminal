@@ -1,6 +1,7 @@
 package com.openpasskey.terminal.data.repository
 
 import com.openpasskey.terminal.settlement.SettlementChainClient
+import com.openpasskey.terminal.settlement.SettlementRpcException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -36,6 +37,44 @@ class FreshSettlementBroadcastTest {
         assertFalse(outcome.accepted)
         assertTrue(outcome.error.orEmpty().contains("different transaction hash"))
         assertEquals(listOf("sendRawTransaction"), calls)
+    }
+
+    @Test
+    fun `credential-bearing transport failure is replaced before reaching durable state`() {
+        val secret = "terminal-client-key"
+        val client = settlementClient(mutableListOf()) {
+            throw RuntimeException("Failed https://$secret.rpc-provider.example/base")
+        }
+
+        val outcome = broadcastFreshSignedTransaction(
+            client,
+            "0xsigned",
+            "0x" + "12".repeat(32),
+        )
+
+        assertFalse(outcome.accepted)
+        assertEquals("Broadcast result unknown", outcome.error)
+        assertFalse(outcome.error.orEmpty().contains(secret))
+    }
+
+    @Test
+    fun `redacted known-transaction classification remains accepted without provider text`() {
+        val client = settlementClient(mutableListOf()) {
+            throw SettlementRpcException(
+                message = "redacted provider response",
+                rpcCode = -32000,
+                knownTransactionResponse = true,
+            )
+        }
+
+        val outcome = broadcastFreshSignedTransaction(
+            client,
+            "0xsigned",
+            "0x" + "12".repeat(32),
+        )
+
+        assertTrue(outcome.accepted)
+        assertNull(outcome.error)
     }
 
     private fun settlementClient(

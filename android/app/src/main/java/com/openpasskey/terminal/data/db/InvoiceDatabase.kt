@@ -12,7 +12,7 @@ import com.openpasskey.terminal.data.model.SettlementTransaction
 
 @Database(
     entities = [Invoice::class, SettlementTransaction::class, SettlementEvent::class],
-    version = 8,
+    version = 9,
     exportSchema = true
 )
 abstract class InvoiceDatabase : RoomDatabase() {
@@ -211,6 +211,22 @@ abstract class InvoiceDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                // Older releases copied operational RPC URLs into immutable snapshots. Provider
+                // keys now live only in the Keystore-encrypted per-chain store. Old provider and
+                // transport exception text could also contain an endpoint, so discard that
+                // non-canonical diagnostic while preserving settlement status and evidence.
+                database.execSQL(sanitizeRpcUrlSql("invoices"))
+                database.execSQL(sanitizeRpcUrlSql("settlement_transactions"))
+                database.execSQL(
+                    "UPDATE settlement_transactions SET error = " +
+                        "'Previous settlement diagnostic removed during secure RPC migration' " +
+                        "WHERE error IS NOT NULL",
+                )
+            }
+        }
+
         /**
          * The single migration registry used by both the production builder and migration tests.
          * Keeping registration here prevents a tested migration from being omitted at app startup.
@@ -223,6 +239,7 @@ abstract class InvoiceDatabase : RoomDatabase() {
             MIGRATION_5_6,
             MIGRATION_6_7,
             MIGRATION_7_8,
+            MIGRATION_8_9,
         )
 
         fun getInstance(context: Context): InvoiceDatabase = INSTANCE ?: synchronized(this) {
@@ -232,5 +249,11 @@ abstract class InvoiceDatabase : RoomDatabase() {
                 "opk_terminal_invoices.db"
             ).addMigrations(*ALL_MIGRATIONS).build().also { INSTANCE = it }
         }
+
+        private fun sanitizeRpcUrlSql(table: String): String =
+            "UPDATE $table SET rpcUrl = CASE chainId " +
+                "WHEN 8453 THEN 'https://mainnet.base.org' " +
+                "WHEN 84532 THEN 'https://sepolia.base.org' " +
+                "ELSE rpcUrl END WHERE chainId IN (8453, 84532)"
     }
 }

@@ -3,6 +3,7 @@ package com.openpasskey.terminal.chain
 import android.content.Context
 import android.content.SharedPreferences
 import com.google.gson.Gson
+import com.google.gson.JsonElement
 import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import com.openpasskey.erc681.EvmAddress
@@ -12,6 +13,7 @@ import com.openpasskey.erc681.PaymentProfile
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import com.openpasskey.terminal.printing.AutomaticReceiptClaimResult
 import com.openpasskey.terminal.printing.AutomaticReceiptClaimStore
+import com.openpasskey.terminal.rpc.RpcEndpointStore
 
 data class PaymentToken(
     val address: String,
@@ -122,7 +124,11 @@ data class ChainConfigMigrationNotice(
 )
 
 /** Non-secret, atomically stored catalog of chain/vault/token payment profiles. */
-class ChainConfig(context: Context) : AutomaticReceiptClaimStore {
+class ChainConfig(
+    context: Context,
+    /** Shared app capability. Resolved credential-bearing URLs must never be persisted. */
+    val rpcEndpointStore: RpcEndpointStore = RpcEndpointStore(context),
+) : AutomaticReceiptClaimStore {
     companion object {
         private const val PREFS_NAME = "opk_chain_config"
         private const val KEY_CONFIG_JSON_V3 = "provisioned_config_v3"
@@ -298,11 +304,21 @@ class ChainConfig(context: Context) : AutomaticReceiptClaimStore {
         // Once v3 exists it is authoritative. A malformed v3 value must fail closed rather than
         // falling back to stale v2 data that may describe a different checkout route.
         if (prefs.getBoolean(KEY_PROVISIONED_V3, false)) {
-            return storedSnapshot(KEY_CONFIG_JSON_V3) ?: unprovisionedSnapshot()
+            val stored = storedSnapshot(KEY_CONFIG_JSON_V3)
+            if (stored != null) {
+                scrubInactivePlaintextRpcMaterial(KEY_CONFIG_JSON_V3)
+                return stored
+            }
+            recoverThenScrubFailedConfiguration(KEY_CONFIG_JSON_V3)
+            return unprovisionedSnapshot()
         }
         if (prefs.getBoolean(KEY_PROVISIONED_V2, false)) {
-            return migrateV2Snapshot() ?: unprovisionedSnapshot()
+            val migrated = migrateV2Snapshot()
+            if (migrated != null) return migrated
+            recoverThenScrubFailedConfiguration(KEY_CONFIG_JSON_V2)
+            return unprovisionedSnapshot()
         }
+        recoverThenScrubLegacyRpcMaterial()
         return unprovisionedSnapshot()
     }
 
@@ -401,7 +417,7 @@ class ChainConfig(context: Context) : AutomaticReceiptClaimStore {
     fun isConfigured(): Boolean = snapshot().let { it.provisioned && it.hasCompleteProvisioning() }
 
     private fun storedSnapshot(jsonKey: String): TerminalConfigSnapshot? {
-        val json = prefs.getString(jsonKey, null) ?: return null
+        val json = prefs.all[jsonKey] as? String ?: return null
         val stored = decodeSnapshot(json) ?: return null
         // v3 is catalog-native. Never reinterpret an empty/corrupt catalog as its flattened
         // downgrade facade, which exists only so older app versions can inspect the selection.
@@ -413,9 +429,12 @@ class ChainConfig(context: Context) : AutomaticReceiptClaimStore {
         val catalog = stored.catalogNormalized()
         val normalized = catalog.normalizingNetworkConfirmationBlocks()
         if (!normalized.hasCompleteProvisioning()) return null
-        if (normalized != catalog) {
+        val secured = runCatching {
+            normalized.protectingRpcEndpointOverrides(rpcEndpointStore)
+        }.getOrNull() ?: return null
+        if (secured != stored || secured != catalog || jsonRequiresRpcCanonicalization(json)) {
             val previousById = catalog.resolvedPaymentProfiles().associateBy { it.id }
-            val adjustedIds = normalized.resolvedPaymentProfiles()
+            val adjustedIds = secured.resolvedPaymentProfiles()
                 .filter { profile ->
                     profile.confirmationBlocks > requireNotNull(previousById[profile.id]).confirmationBlocks
                 }
@@ -423,15 +442,15 @@ class ChainConfig(context: Context) : AutomaticReceiptClaimStore {
             val existingNoticeIds = prefs
                 .getStringSet(KEY_FINALITY_MIGRATION_PROFILE_IDS_V3, null)
                 .orEmpty()
-            val canonical = normalized.canonicalCatalog()
-            if (!persist(
+            val canonical = secured.canonicalCatalog()
+            if (!persistProtected(
                     canonical,
                     existingNoticeIds + adjustedIds,
                 )
             ) return null
             return canonical
         }
-        return normalized
+        return secured
     }
 
     /**
@@ -440,14 +459,17 @@ class ChainConfig(context: Context) : AutomaticReceiptClaimStore {
      * addresses, duplicate routes, unknown chains, and other malformed data still fail closed.
      */
     private fun migrateV2Snapshot(): TerminalConfigSnapshot? {
-        val json = prefs.getString(KEY_CONFIG_JSON_V2, null) ?: return null
+        val json = prefs.all[KEY_CONFIG_JSON_V2] as? String ?: return null
         val stored = decodeSnapshot(json) ?: return null
         if (!stored.provisioned) return null
         val migration = stored.raisingLegacyConfirmationFloors() ?: return null
         if (!migration.snapshot.hasCompleteProvisioning()) return null
         val canonical = migration.snapshot.canonicalCatalog()
-        if (!persist(canonical, migration.adjustedProfileIds)) return null
-        return canonical
+        val secured = runCatching {
+            canonical.protectingRpcEndpointOverrides(rpcEndpointStore)
+        }.getOrNull() ?: return null
+        if (!persistProtected(secured, migration.adjustedProfileIds)) return null
+        return secured
     }
 
     private fun decodeSnapshot(json: String): TerminalConfigSnapshot? = runCatching {
@@ -465,7 +487,116 @@ class ChainConfig(context: Context) : AutomaticReceiptClaimStore {
         stored.copy(paymentProfiles = profiles, selectedProfileId = selected)
     }.getOrNull()
 
+    /**
+     * A malformed catalog cannot be rewritten safely because doing so might accidentally repair
+     * and reactivate a configuration that was supposed to fail closed. Recover only one exact,
+     * supported-chain custom endpoint, encrypt it first, then remove every ordinary-preferences
+     * value capable of retaining an RPC credential. Provisioning flags remain untouched so a
+     * malformed v3 catalog stays authoritative over stale v2 data.
+     */
+    private fun recoverThenScrubFailedConfiguration(configJsonKey: String) {
+        (prefs.all[configJsonKey] as? String)
+            ?.let(::uniquelyRecoverableCustomRpcEndpoint)
+            ?.let { endpoint ->
+                runCatching { rpcEndpointStore.setOverride(endpoint.chainId, endpoint.url) }
+            }
+        scrubInactivePlaintextRpcMaterial(activeConfigJsonKey = null)
+    }
+
+    /** Standalone legacy fields are usable only when both their chain and endpoint are present. */
+    private fun recoverThenScrubLegacyRpcMaterial() {
+        val endpoint = prefs.all[KEY_RPC_URL] as? String
+        val chainId = (prefs.all[KEY_CHAIN_ID] as? Number)?.toLong()
+        val hasVersionedCatalog = prefs.contains(KEY_CONFIG_JSON_V3) ||
+            prefs.contains(KEY_CONFIG_JSON_V2)
+        if (!hasVersionedCatalog && endpoint != null && chainId != null) {
+            val policyUrl = runCatching { KnownChainPolicy.requireProfile(chainId).rpcUrl }.getOrNull()
+            if (policyUrl != null && endpoint != policyUrl) {
+                runCatching { rpcEndpointStore.setOverride(chainId, endpoint) }
+            }
+        }
+        scrubInactivePlaintextRpcMaterial(activeConfigJsonKey = null)
+    }
+
+    /**
+     * Versioned JSON values mix RPC URLs with other provisioning fields, so an inactive or failed
+     * value must be removed as a whole. Independent receipt and operational preferences are left
+     * intact. A valid active v3 catalog already contains only its public policy URL.
+     */
+    private fun scrubInactivePlaintextRpcMaterial(activeConfigJsonKey: String?) {
+        val hasLegacyRpcUrl = prefs.contains(KEY_RPC_URL)
+        val hasInactiveV3 = activeConfigJsonKey != KEY_CONFIG_JSON_V3 &&
+            prefs.contains(KEY_CONFIG_JSON_V3)
+        val hasInactiveV2 = activeConfigJsonKey != KEY_CONFIG_JSON_V2 &&
+            prefs.contains(KEY_CONFIG_JSON_V2)
+        if (!hasLegacyRpcUrl && !hasInactiveV3 && !hasInactiveV2) return
+
+        val editor = prefs.edit().remove(KEY_RPC_URL)
+        if (activeConfigJsonKey != KEY_CONFIG_JSON_V3) editor.remove(KEY_CONFIG_JSON_V3)
+        if (activeConfigJsonKey != KEY_CONFIG_JSON_V2) editor.remove(KEY_CONFIG_JSON_V2)
+        editor.commit()
+    }
+
+    private fun uniquelyRecoverableCustomRpcEndpoint(json: String): RecoverableRpcEndpoint? {
+        val scan = scanRpcEndpointMaterial(json) ?: return null
+        if (scan.hasUnattributedRpcUrl) return null
+        return scan.customCandidates.singleOrNull()
+    }
+
+    private fun jsonRequiresRpcCanonicalization(json: String): Boolean {
+        val scan = scanRpcEndpointMaterial(json) ?: return true
+        return scan.hasUnattributedRpcUrl || scan.customCandidates.isNotEmpty()
+    }
+
+    private fun scanRpcEndpointMaterial(json: String): RpcEndpointMaterialScan? {
+        val root = runCatching { JsonParser.parseString(json) }.getOrNull() ?: return null
+        val candidates = linkedSetOf<RecoverableRpcEndpoint>()
+        var hasUnattributedRpcUrl = false
+
+        fun inspect(element: JsonElement) {
+            when {
+                element.isJsonArray -> element.asJsonArray.forEach(::inspect)
+                element.isJsonObject -> {
+                    val objectValue = element.asJsonObject
+                    if (objectValue.has("rpcUrl")) {
+                        val rpcValue = objectValue.get("rpcUrl")
+                        val chainValue = objectValue.get("chainId")
+                        val rpcUrl = rpcValue
+                            ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }
+                            ?.asString
+                        val chainId = chainValue
+                            ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isNumber }
+                            ?.let { runCatching { it.asLong }.getOrNull() }
+                        val policyUrl = chainId
+                            ?.let { runCatching { KnownChainPolicy.requireProfile(it).rpcUrl }.getOrNull() }
+                        if (rpcUrl == null || chainId == null || policyUrl == null) {
+                            hasUnattributedRpcUrl = true
+                        } else if (rpcUrl != policyUrl) {
+                            candidates += RecoverableRpcEndpoint(chainId, rpcUrl)
+                        }
+                    }
+                    objectValue.entrySet().forEach { (_, child) -> inspect(child) }
+                }
+            }
+        }
+
+        inspect(root)
+        return RpcEndpointMaterialScan(
+            customCandidates = candidates,
+            hasUnattributedRpcUrl = hasUnattributedRpcUrl,
+        )
+    }
+
     private fun persist(
+        snapshot: TerminalConfigSnapshot,
+        adjustedConfirmationProfileIds: Set<String>? = null,
+    ): Boolean {
+        val secured = snapshot.protectingRpcEndpointOverrides(rpcEndpointStore) ?: return false
+        return persistProtected(secured, adjustedConfirmationProfileIds)
+    }
+
+    /** Receives only snapshots already stripped of credential-bearing endpoint overrides. */
+    private fun persistProtected(
         snapshot: TerminalConfigSnapshot,
         adjustedConfirmationProfileIds: Set<String>? = null,
     ): Boolean {
@@ -488,6 +619,16 @@ class ChainConfig(context: Context) : AutomaticReceiptClaimStore {
         return editor.commit()
     }
 }
+
+private data class RecoverableRpcEndpoint(
+    val chainId: Long,
+    val url: String,
+)
+
+private data class RpcEndpointMaterialScan(
+    val customCandidates: Set<RecoverableRpcEndpoint>,
+    val hasUnattributedRpcUrl: Boolean,
+)
 
 fun TerminalConfigSnapshot.resolvedPaymentProfiles(): List<TerminalPaymentProfile> {
     if (paymentProfiles.isNotEmpty()) return paymentProfiles
@@ -626,6 +767,47 @@ fun TerminalConfigSnapshot.removingPaymentProfile(profileId: String): TerminalCo
         ?.takeIf { selected -> remaining.any { it.id == selected } }
         ?: remaining.first().id
     return copy(paymentProfiles = remaining).selectingProfile(nextId)
+}
+
+/**
+ * One-time migration for releases that allowed operational RPC URLs inside the non-secret profile
+ * catalog. Every distinct per-chain override is encrypted first. Only after every write succeeds is
+ * the returned catalog rewritten to the compiled public policy endpoints.
+ *
+ * SharedPreferences cannot atomically commit across two files. Encrypt-first prevents credential
+ * loss; if the later catalog commit fails, the next read repeats this idempotent migration instead
+ * of returning a partially sanitized configuration.
+ */
+internal fun TerminalConfigSnapshot.protectingRpcEndpointOverrides(
+    endpointStore: RpcEndpointStore,
+): TerminalConfigSnapshot? {
+    if (!provisioned) return this
+    val profiles = resolvedPaymentProfiles()
+    if (profiles.isEmpty()) return null
+    val policyUrls = profiles
+        .map { profile -> profile.chainId to KnownChainPolicy.requireProfile(profile.chainId).rpcUrl }
+        .toMap()
+    val overrides = profiles
+        .groupBy(TerminalPaymentProfile::chainId)
+        .mapValues { (chainId, networkProfiles) ->
+            networkProfiles.map(TerminalPaymentProfile::rpcUrl)
+                .filterNot { it == requireNotNull(policyUrls[chainId]) }
+                .distinct()
+        }
+    // The new store deliberately supports one endpoint per chain. Ambiguous historical catalogs
+    // fail closed rather than silently selecting one credential and changing another route.
+    if (overrides.values.any { it.size > 1 }) return null
+    overrides.toSortedMap().forEach { (chainId, endpoints) ->
+        val endpoint = endpoints.singleOrNull() ?: return@forEach
+        val encrypted = runCatching { endpointStore.setOverride(chainId, endpoint) }
+            .getOrDefault(false)
+        if (!encrypted) return null
+    }
+    val sanitizedProfiles = profiles.map { profile ->
+        profile.copy(rpcUrl = requireNotNull(policyUrls[profile.chainId]))
+    }
+    val selectedId = selectedPaymentProfile()?.id ?: return null
+    return copy(paymentProfiles = sanitizedProfiles).selectingProfile(selectedId)
 }
 
 private data class LegacyFinalityMigration(

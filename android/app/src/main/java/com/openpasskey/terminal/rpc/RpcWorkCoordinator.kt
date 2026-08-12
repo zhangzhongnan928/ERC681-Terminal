@@ -50,6 +50,21 @@ class RpcWorkCoordinator(
         }
     }
 
+    /**
+     * Publishes interactive intent, serializes other cashier work, and drains the one possible
+     * already-started background unit before changing a process-wide RPC trust source.
+     */
+    suspend fun <T> withExclusiveInteractiveOperation(block: suspend () -> T): T {
+        interactiveOperations.incrementAndGet()
+        return try {
+            interactiveMutex.withLock {
+                backgroundMutex.withLock { block() }
+            }
+        } finally {
+            releaseInteractiveOperation()
+        }
+    }
+
     /** Keeps background work deferred across UI gaps such as the system authentication prompt. */
     fun reserveInteractiveWindow(): RpcInteractiveReservation {
         interactiveOperations.incrementAndGet()

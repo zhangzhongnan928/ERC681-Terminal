@@ -3,6 +3,7 @@ package com.openpasskey.terminal.lifecycle
 import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.chain.resolvedPaymentProfiles
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
+import com.openpasskey.terminal.rpc.RpcEndpointResolver
 import com.openpasskey.terminal.settlement.OperatorResetGuard
 import com.openpasskey.terminal.settlement.SettlementChainClient
 import com.openpasskey.terminal.settlement.Web3jSettlementChainClient
@@ -22,9 +23,12 @@ fun interface OperatorNativeBalanceReader {
     suspend fun read(operatorAddress: String): List<OperatorNativeBalances>
 }
 
+private class OperatorBalanceReadException(message: String) : IllegalStateException(message)
+
 class RpcOperatorNativeBalanceReader(
     private val configSnapshot: () -> TerminalConfigSnapshot,
     private val clientFactory: (String) -> SettlementChainClient = ::Web3jSettlementChainClient,
+    private val rpcEndpointResolver: RpcEndpointResolver = RpcEndpointResolver.PASSTHROUGH,
 ) : OperatorNativeBalanceReader {
     override suspend fun read(operatorAddress: String): List<OperatorNativeBalances> {
         val config = configSnapshot()
@@ -38,10 +42,16 @@ class RpcOperatorNativeBalanceReader(
         return chainIds.map { chainId ->
             val profile = KnownChainPolicy.requireProfile(chainId)
             try {
-                clientFactory(profile.rpcUrl).use { client ->
+                clientFactory(
+                    rpcEndpointResolver.resolve(profile.chainId, profile.rpcUrl),
+                ).use { client ->
                     val actualChainId = client.chainId()
-                    check(actualChainId == profile.chainId) {
-                        "RPC reported chain $actualChainId instead of ${profile.chainId}"
+                    if (actualChainId != profile.chainId) {
+                        throw OperatorBalanceReadException(
+                            "Unable to verify operator balance on ${profile.networkName} " +
+                                "(chain ${profile.chainId}); reset was cancelled. " +
+                                "RPC reported chain $actualChainId instead of ${profile.chainId}",
+                        )
                     }
                     OperatorNativeBalances(
                         networkName = profile.networkName,
@@ -53,12 +63,12 @@ class RpcOperatorNativeBalanceReader(
                 }
             } catch (error: CancellationException) {
                 throw error
+            } catch (error: OperatorBalanceReadException) {
+                throw error
             } catch (error: Exception) {
-                throw IllegalStateException(
+                throw OperatorBalanceReadException(
                     "Unable to verify operator balance on ${profile.networkName} " +
-                        "(chain ${profile.chainId}); reset was cancelled. " +
-                        (error.message ?: "RPC balance read failed"),
-                    error,
+                        "(chain ${profile.chainId}); reset was cancelled. RPC balance read failed",
                 )
             }
         }
@@ -100,10 +110,14 @@ class TerminalResetCoordinator(
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
+            val safeDetail = if (error is OperatorBalanceReadException) {
+                error.message ?: "Native-balance read failed"
+            } else {
+                "Native-balance read failed"
+            }
             throw IllegalStateException(
                 "Unable to prove that the operator wallet is empty; reset was cancelled. " +
-                    (error.message ?: "Native-balance read failed"),
-                error,
+                    safeDetail,
             )
         }
 }

@@ -13,6 +13,7 @@ import com.openpasskey.terminal.data.repository.PreparedSettlement
 import com.openpasskey.terminal.data.repository.SettlementRepository
 import com.openpasskey.terminal.data.repository.settlementHasRequiredConfirmationDepth
 import com.openpasskey.terminal.rpc.RpcInteractiveReservation
+import com.openpasskey.terminal.rpc.safeReadRpcFailureMessage
 import java.math.BigInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
@@ -276,7 +277,7 @@ class SettlementViewModel(
             } catch (error: Exception) {
                 _state.value = _state.value.copy(
                     preparing = false,
-                    message = error.message ?: "Settlement preflight failed",
+                    message = safeReadRpcFailureMessage(error, "Settlement preflight failed"),
                     isError = true
                 )
             }
@@ -381,7 +382,10 @@ class SettlementViewModel(
                 releaseAuthenticationReservation()
                 _state.value = _state.value.copy(
                     preparingAuthentication = false,
-                    message = error.message ?: "Settlement pre-authentication check failed",
+                    message = safeReadRpcFailureMessage(
+                        error,
+                        "Settlement pre-authentication check failed",
+                    ),
                     isError = true,
                 )
             }
@@ -433,7 +437,7 @@ class SettlementViewModel(
             } catch (error: Exception) {
                 _state.value = _state.value.copy(
                     submitting = false,
-                    message = error.message ?: "Settlement submission failed",
+                    message = safeReadRpcFailureMessage(error, "Settlement submission failed"),
                     isError = true,
                     autoSweepMessage = false,
                 )
@@ -466,7 +470,7 @@ class SettlementViewModel(
         } catch (error: Exception) {
             if (reportError) {
                 _state.value = _state.value.copy(
-                    message = error.message ?: "Settlement recovery failed",
+                    message = safeReadRpcFailureMessage(error, "Settlement recovery failed"),
                     isError = true,
                     autoSweepMessage = false,
                 )
@@ -542,7 +546,7 @@ class SettlementViewModel(
                     _state.value = _state.value.copy(
                         preparing = false,
                         message = "Auto-sweep preparation deferred: " +
-                            (error.message ?: "settlement preflight failed"),
+                            safeReadRpcFailureMessage(error, "settlement preflight failed"),
                         isError = true,
                         autoSweepMessage = true,
                     )
