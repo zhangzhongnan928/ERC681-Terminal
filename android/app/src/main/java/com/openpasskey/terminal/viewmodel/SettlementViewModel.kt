@@ -230,6 +230,8 @@ class SettlementViewModel(
     private val autoSweepRetryAfter = mutableMapOf<String, Long>()
     private var readyInvoicesLoaded = false
     private var recentTransactionsLoaded = false
+    private val activeRecoveryDrives = mutableSetOf<String>()
+    private var startupRecoveryDriven = false
 
     init {
         viewModelScope.launch {
@@ -245,6 +247,15 @@ class SettlementViewModel(
             repository.observeRecentTransactions().collect { transactions ->
                 recentTransactionsLoaded = true
                 _state.value = _state.value.copy(recentTransactions = transactions)
+                if (!startupRecoveryDriven) {
+                    // A broadcast from a previous process has no post-submit drive running yet.
+                    // One bounded burst per active transaction closes that gap; the scheduled
+                    // loop below stays the long-term fallback.
+                    startupRecoveryDriven = true
+                    transactions
+                        .filter { it.status in FAST_RECOVERY_STATUSES }
+                        .forEach { driveRecovery(it.id) }
+                }
                 maybeStartAutoSweep()
             }
         }
@@ -253,6 +264,26 @@ class SettlementViewModel(
                 recoverPending(reportError = false)
                 maybeStartAutoSweep()
                 delay(RECOVERY_INTERVAL_MILLIS)
+            }
+        }
+    }
+
+    /**
+     * Follows a broadcast with a fast bounded recovery burst so the settled state lands near
+     * chain finality instead of waiting for the scheduled recovery tick. One drive per
+     * transaction; every step defers to interactive cashier work inside the repository.
+     */
+    private fun driveRecovery(transactionId: String) {
+        if (!activeRecoveryDrives.add(transactionId)) return
+        viewModelScope.launch {
+            try {
+                repository.driveTransactionRecovery(transactionId)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // The scheduled recovery loop owns anything the burst could not finish.
+            } finally {
+                activeRecoveryDrives.remove(transactionId)
             }
         }
     }
@@ -421,6 +452,7 @@ class SettlementViewModel(
                     userExplicitlyConfirmed = true,
                     authenticatedAtElapsedRealtimeMillis = authenticatedAtElapsedRealtimeMillis,
                 )
+                driveRecovery(transaction.id)
                 _state.value = _state.value.copy(
                     submitting = false,
                     prepared = null,
@@ -528,6 +560,9 @@ class SettlementViewModel(
                     autoSweepMessage = true,
                 )
                 val transaction = repository.submitAutomatically(prepared)
+                // Even a superseded attempt broadcast a real transaction; finality tracking must
+                // not wait for the next scheduled recovery tick.
+                driveRecovery(transaction.id)
                 if (!autoSweepAttemptGate.isCurrent(attemptGeneration)) return@launch
                 _state.value = _state.value.copy(
                     preparing = false,
@@ -618,5 +653,10 @@ class SettlementViewModel(
     private companion object {
         const val RECOVERY_INTERVAL_MILLIS = 60_000L
         const val AUTO_SWEEP_RETRY_DELAY_MILLIS = 60_000L
+        private val FAST_RECOVERY_STATUSES = setOf(
+            SettlementTransactionStatus.SIGNED,
+            SettlementTransactionStatus.SUBMITTED,
+            SettlementTransactionStatus.CONFIRMING,
+        )
     }
 }

@@ -157,32 +157,105 @@ interface PaymentEvidenceChainClient {
     ): List<IncomingErc20Transfer>
 }
 
+/** Wave-1 snapshot of a batched evidence resolution. */
+internal class PaymentEvidenceOpenContext(
+    val chainId: Long,
+    val publicationBlock: PaymentEvidenceBlock?,
+    val fundingBlock: PaymentEvidenceBlock?,
+    val publicationBalance: BigInteger,
+    val fundingBalance: BigInteger,
+)
+
+/** Crossing-block reads of a batched evidence resolution. */
+internal class PaymentCrossingReads(
+    val block: PaymentEvidenceBlock?,
+    /** Null for native assets, which have no Transfer logs. */
+    val erc20Transfers: List<IncomingErc20Transfer>?,
+    /** Null when the prior-height balance was not requested. */
+    val priorBalance: BigInteger?,
+)
+
 /**
  * Deterministically attributes the first direct incoming transaction that crosses the invoice
  * threshold. Payment status remains owned by the canonical balance observer; a null result means
  * that the balance crossing cannot be attributed to a supported direct transaction.
+ *
+ * Production [ReadOnlyRpcClient] instances resolve through grouped JSON-RPC batches — the same
+ * reads in the same trust order, with the closing bracket still re-reading every anchor fresh.
+ * Custom [PaymentEvidenceChainClient] implementations use the sequential compatibility path.
  */
 class PaymentEvidenceResolver(
     private val chain: PaymentEvidenceChainClient,
+    /**
+     * Optional end-to-end wall-clock budget for one [resolve] pass. Socket timeouts bound each
+     * network operation; this bounds their sequential sum, so a caller running inside a
+     * cooperative deadline (such as the terminal's background RPC lease) can size the two
+     * together: budget plus one worst-case socket never exceeds the lease.
+     */
+    private val totalBudgetMillis: Long? = null,
+    private val elapsedMillis: () -> Long = { System.nanoTime() / NANOS_PER_MILLI },
 ) {
+    init {
+        require(totalBudgetMillis == null || totalBudgetMillis > 0) {
+            "Evidence resolution budget must be positive"
+        }
+    }
+
     fun resolve(request: PaymentEvidenceRequest): PaymentTransactionEvidence? {
-        val remoteChainId = chain.chainId()
-        if (remoteChainId != request.chainId) {
-            throw NetworkConfigurationException(
-                "RPC chain ID $remoteChainId does not match payment chain ID ${request.chainId}",
+        val deadlineMillis = totalBudgetMillis?.let { Math.addExact(elapsedMillis(), it) }
+        fun requireBudget() {
+            if (deadlineMillis != null && elapsedMillis() > deadlineMillis) {
+                throw RpcException("Payment evidence resolution exceeded its time budget")
+            }
+        }
+        val batched = chain as? ReadOnlyRpcClient
+        val balanceCache = mutableMapOf<Long, BigInteger>()
+        fun recordBalance(blockNumber: Long, value: BigInteger): BigInteger {
+            if (value.signum() < 0 || value > UINT256_MAX) {
+                throw RpcException("Payment receiver balance is outside uint256")
+            }
+            balanceCache[blockNumber] = value
+            return value
+        }
+        fun balanceAt(blockNumber: Long): BigInteger = balanceCache[blockNumber] ?: run {
+            requireBudget()
+            recordBalance(
+                blockNumber,
+                chain.paymentAssetBalance(request.asset, request.receiver, blockNumber),
             )
         }
+        fun budgetedAnchor(anchor: PaymentConfirmationCursor, label: String): PaymentEvidenceBlock {
+            requireBudget()
+            return requireAnchor(anchor, label)
+        }
 
-        requireAnchor(request.publicationCursor, "publication")
-        requireAnchor(request.fundingCursor, "funding")
-
-        val balanceCache = mutableMapOf<Long, BigInteger>()
-        fun balanceAt(blockNumber: Long): BigInteger = balanceCache.getOrPut(blockNumber) {
-            chain.paymentAssetBalance(request.asset, request.receiver, blockNumber).also {
-                if (it.signum() < 0 || it > UINT256_MAX) {
-                    throw RpcException("Payment receiver balance is outside uint256")
-                }
+        if (batched != null) {
+            val context = batched.openPaymentEvidenceContext(
+                asset = request.asset,
+                receiver = request.receiver,
+                publicationBlockNumber = request.publicationCursor.blockNumber,
+                fundingBlockNumber = request.fundingCursor.blockNumber,
+            )
+            if (context.chainId != request.chainId) {
+                throw NetworkConfigurationException(
+                    "RPC chain ID ${context.chainId} does not match payment chain ID " +
+                        "${request.chainId}",
+                )
             }
+            verifyAnchor(context.publicationBlock, request.publicationCursor, "publication")
+            verifyAnchor(context.fundingBlock, request.fundingCursor, "funding")
+            recordBalance(request.publicationCursor.blockNumber, context.publicationBalance)
+            recordBalance(request.fundingCursor.blockNumber, context.fundingBalance)
+        } else {
+            requireBudget()
+            val remoteChainId = chain.chainId()
+            if (remoteChainId != request.chainId) {
+                throw NetworkConfigurationException(
+                    "RPC chain ID $remoteChainId does not match payment chain ID ${request.chainId}",
+                )
+            }
+            budgetedAnchor(request.publicationCursor, "publication")
+            budgetedAnchor(request.fundingCursor, "funding")
         }
 
         val publicationBalance = balanceAt(request.publicationCursor.blockNumber)
@@ -194,18 +267,52 @@ class PaymentEvidenceResolver(
         } catch (error: ArithmeticException) {
             throw RpcException("Invoice publication block is outside the supported range", error)
         }
+        if (batched != null && firstCandidateBlock < request.fundingCursor.blockNumber) {
+            // Warm the exact heights the unchanged binary search can visit; deeper levels of a
+            // wide range degrade to single reads instead of changing the search semantics.
+            val prefetch = balanceCrossingMidpoints(
+                firstCandidateBlock = firstCandidateBlock,
+                lastCandidateBlock = request.fundingCursor.blockNumber,
+                levels = BALANCE_PREFETCH_LEVELS,
+            ).filterNot(balanceCache::containsKey)
+            if (prefetch.isNotEmpty()) {
+                requireBudget()
+                batched.paymentAssetBalances(request.asset, request.receiver, prefetch)
+                    .forEach { (blockNumber, value) -> recordBalance(blockNumber, value) }
+            }
+        }
         val crossingBlockNumber = findFirstBalanceCrossing(
             firstCandidateBlock = firstCandidateBlock,
             lastCandidateBlock = request.fundingCursor.blockNumber,
             expectedAmount = request.expectedAmount,
             balanceAt = ::balanceAt,
         ) ?: return null
-        val priorBalance = balanceAt(crossingBlockNumber - 1L)
         val isNative = NativeAsset.isNative(request.asset)
-        val crossingBlock = chain.paymentEvidenceBlock(
-            crossingBlockNumber,
-            includeDirectNativeTransactions = isNative,
-        ) ?: throw RpcException("Canonical payment block $crossingBlockNumber is unavailable")
+        val priorBalance: BigInteger
+        val crossingBlock: PaymentEvidenceBlock
+        val erc20Transfers: List<IncomingErc20Transfer>
+        if (batched != null) {
+            requireBudget()
+            val reads = batched.paymentCrossingReads(
+                asset = request.asset,
+                receiver = request.receiver,
+                blockNumber = crossingBlockNumber,
+                includePriorBalance = (crossingBlockNumber - 1L) !in balanceCache,
+            )
+            reads.priorBalance?.let { recordBalance(crossingBlockNumber - 1L, it) }
+            priorBalance = balanceAt(crossingBlockNumber - 1L)
+            crossingBlock = reads.block
+                ?: throw RpcException("Canonical payment block $crossingBlockNumber is unavailable")
+            erc20Transfers = reads.erc20Transfers.orEmpty()
+        } else {
+            priorBalance = balanceAt(crossingBlockNumber - 1L)
+            requireBudget()
+            crossingBlock = chain.paymentEvidenceBlock(
+                crossingBlockNumber,
+                includeDirectNativeTransactions = isNative,
+            ) ?: throw RpcException("Canonical payment block $crossingBlockNumber is unavailable")
+            erc20Transfers = emptyList()
+        }
         if (crossingBlock.blockNumber != crossingBlockNumber) {
             throw RpcException(
                 "RPC returned payment block ${crossingBlock.blockNumber} for requested block " +
@@ -227,11 +334,16 @@ class PaymentEvidenceResolver(
                 expectedAmount = request.expectedAmount,
             )
         } else {
-            val transfers = chain.incomingErc20Transfers(
-                token = request.asset,
-                receiver = request.receiver,
-                blockNumber = crossingBlockNumber,
-            )
+            val transfers = if (batched != null) {
+                erc20Transfers
+            } else {
+                requireBudget()
+                chain.incomingErc20Transfers(
+                    token = request.asset,
+                    receiver = request.receiver,
+                    blockNumber = crossingBlockNumber,
+                )
+            }
             selectErc20Transfer(
                 block = crossingBlock,
                 requestAsset = request.asset,
@@ -243,24 +355,59 @@ class PaymentEvidenceResolver(
         } ?: return null
 
         // Close the canonical bracket only after all balance, block, and log reads complete.
-        val finalPaymentBlock = requireAnchor(
-            PaymentConfirmationCursor(crossingBlock.blockNumber, crossingBlock.blockHash),
-            "payment",
-        )
-        if (finalPaymentBlock.blockTimestamp != crossingBlock.blockTimestamp) {
-            throw RpcException("Canonical payment block timestamp changed during attribution")
+        requireBudget()
+        if (batched != null) {
+            val closingNumbers = linkedSetOf(
+                crossingBlock.blockNumber,
+                request.publicationCursor.blockNumber,
+                request.fundingCursor.blockNumber,
+            )
+            val closing = batched.paymentEvidenceBlockHeaders(closingNumbers)
+            val finalPaymentBlock = verifyAnchor(
+                closing[crossingBlock.blockNumber],
+                PaymentConfirmationCursor(crossingBlock.blockNumber, crossingBlock.blockHash),
+                "payment",
+            )
+            if (finalPaymentBlock.blockTimestamp != crossingBlock.blockTimestamp) {
+                throw RpcException("Canonical payment block timestamp changed during attribution")
+            }
+            verifyAnchor(
+                closing[request.publicationCursor.blockNumber],
+                request.publicationCursor,
+                "publication",
+            )
+            verifyAnchor(
+                closing[request.fundingCursor.blockNumber],
+                request.fundingCursor,
+                "funding",
+            )
+        } else {
+            val finalPaymentBlock = budgetedAnchor(
+                PaymentConfirmationCursor(crossingBlock.blockNumber, crossingBlock.blockHash),
+                "payment",
+            )
+            if (finalPaymentBlock.blockTimestamp != crossingBlock.blockTimestamp) {
+                throw RpcException("Canonical payment block timestamp changed during attribution")
+            }
+            budgetedAnchor(request.publicationCursor, "publication")
+            budgetedAnchor(request.fundingCursor, "funding")
         }
-        requireAnchor(request.publicationCursor, "publication")
-        requireAnchor(request.fundingCursor, "funding")
         return selected
     }
 
     private fun requireAnchor(
         anchor: PaymentConfirmationCursor,
         label: String,
+    ): PaymentEvidenceBlock = verifyAnchor(chain.paymentEvidenceBlock(anchor.blockNumber), anchor, label)
+
+    private fun verifyAnchor(
+        canonical: PaymentEvidenceBlock?,
+        anchor: PaymentConfirmationCursor,
+        label: String,
     ): PaymentEvidenceBlock {
-        val canonical = chain.paymentEvidenceBlock(anchor.blockNumber)
-            ?: throw RpcException("Canonical $label block ${anchor.blockNumber} is unavailable")
+        if (canonical == null) {
+            throw RpcException("Canonical $label block ${anchor.blockNumber} is unavailable")
+        }
         if (canonical.blockNumber != anchor.blockNumber) {
             throw RpcException(
                 "RPC returned canonical $label block ${canonical.blockNumber} for requested block " +
@@ -271,6 +418,12 @@ class PaymentEvidenceResolver(
             throw RpcException("Canonical $label block hash does not match the saved invoice evidence")
         }
         return canonical
+    }
+
+    private companion object {
+        /** Four warmed levels cover crossings inside a 16-block window with one batch. */
+        private const val BALANCE_PREFETCH_LEVELS = 4
+        private const val NANOS_PER_MILLI = 1_000_000L
     }
 
     private fun selectErc20Transfer(
@@ -351,6 +504,31 @@ class PaymentEvidenceResolver(
         // another indirect mechanism. Those paths have no attributable top-level customer tx here.
         return null
     }
+}
+
+/**
+ * Every height [findFirstBalanceCrossing] can visit within its first [levels] bisection steps,
+ * derived by simulating both comparison outcomes. Prefetching these heights cannot change which
+ * blocks the unchanged search reads — only whether each read is served from a warmed cache.
+ */
+internal fun balanceCrossingMidpoints(
+    firstCandidateBlock: Long,
+    lastCandidateBlock: Long,
+    levels: Int,
+): Set<Long> {
+    require(firstCandidateBlock >= 0) { "First candidate block must not be negative" }
+    require(lastCandidateBlock >= firstCandidateBlock) { "Payment block range is invalid" }
+    require(levels in 1..16) { "Prefetch levels are out of range" }
+    val midpoints = linkedSetOf<Long>()
+    fun visit(low: Long, high: Long, depth: Int) {
+        if (depth <= 0 || low >= high) return
+        val middle = low + (high - low) / 2
+        midpoints.add(middle)
+        visit(low, middle, depth - 1)
+        visit(middle + 1, high, depth - 1)
+    }
+    visit(firstCandidateBlock, lastCandidateBlock, levels)
+    return midpoints
 }
 
 internal fun findFirstBalanceCrossing(

@@ -85,6 +85,46 @@ class SettlementBackgroundFinalityTest {
         assertEquals(1, harness.insertEventCalls)
     }
 
+    @Test
+    fun `post broadcast drive advances a submitted transaction to verified without scheduled ticks`() =
+        runBlocking {
+            val harness = RecoveryHarness { FINALITY_TARGET }
+            harness.transaction = confirmingTransaction().copy(
+                status = SettlementTransactionStatus.SUBMITTED,
+                receiptBlock = null,
+            )
+
+            val driven = harness.repository.driveTransactionRecovery(
+                TRANSACTION_ID,
+                maxAttempts = 5,
+                intervalMillis = 1,
+            )
+
+            assertEquals(SettlementTransactionStatus.VERIFIED, requireNotNull(driven).status)
+            assertEquals(SettlementTransactionStatus.VERIFIED, harness.transaction.status)
+            assertEquals(listOf("receipt", "snapshot", "finalHead"), harness.rpcCalls)
+            assertEquals(1, harness.markSettledCalls)
+            assertEquals(1, harness.insertEventCalls)
+        }
+
+    @Test
+    fun `post broadcast drive returns early once the transaction is already terminal`() =
+        runBlocking {
+            val harness = RecoveryHarness { FINALITY_TARGET }
+            harness.transaction = confirmingTransaction().copy(
+                status = SettlementTransactionStatus.VERIFIED,
+            )
+
+            val driven = harness.repository.driveTransactionRecovery(
+                TRANSACTION_ID,
+                maxAttempts = 5,
+                intervalMillis = 1,
+            )
+
+            assertEquals(SettlementTransactionStatus.VERIFIED, requireNotNull(driven).status)
+            assertEquals(emptyList<String>(), harness.rpcCalls)
+        }
+
     private class RecoveryHarness(
         private val finalHead: () -> Long,
     ) {
@@ -142,6 +182,10 @@ class SettlementBackgroundFinalityTest {
                         canonicalReceiptBlockHash = BLOCK_HASH,
                         latestBlockNumber = FINALITY_TARGET,
                     )
+                }
+                "transactionReceipt" -> {
+                    rpcCalls += "receipt"
+                    successfulReceipt()
                 }
                 "blockNumber" -> {
                     finalHeadCalls += 1

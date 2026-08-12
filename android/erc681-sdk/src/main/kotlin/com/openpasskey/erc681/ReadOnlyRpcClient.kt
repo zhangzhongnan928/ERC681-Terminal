@@ -20,6 +20,8 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadLocalRandom
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 
@@ -82,12 +84,15 @@ class ReadOnlyRpcClient private constructor(
         config: NetworkConfig,
         connectTimeoutMillis: Int = DEFAULT_CONNECT_TIMEOUT_MILLIS,
         readTimeoutMillis: Int = DEFAULT_READ_TIMEOUT_MILLIS,
+        /** Optional whole-call transport deadline; socket timeouts bound only each operation. */
+        callTimeoutMillis: Int? = null,
     ) : this(
         config = config,
         transport = HttpUrlConnectionRpcTransport(
             config.rpcUrl,
             checkedTimeout(connectTimeoutMillis),
             checkedTimeout(readTimeoutMillis),
+            callTimeoutMillis?.let(::checkedTimeout),
         ),
         retrySleep = { delayMillis -> Thread.sleep(delayMillis) },
         retryJitterMillis = {
@@ -116,11 +121,26 @@ class ReadOnlyRpcClient private constructor(
         includeDirectNativeTransactions: Boolean,
     ): PaymentEvidenceBlock? {
         require(blockNumber >= 0) { "Block number must not be negative" }
-        val params = JsonArray().apply {
-            add(quantityHex(blockNumber))
-            add(includeDirectNativeTransactions)
-        }
-        val result = rpcResult("eth_getBlockByNumber", params)
+        val result = rpcResult(
+            "eth_getBlockByNumber",
+            paymentEvidenceBlockParams(blockNumber, includeDirectNativeTransactions),
+        )
+        return decodePaymentEvidenceBlockResult(result, blockNumber, includeDirectNativeTransactions)
+    }
+
+    private fun paymentEvidenceBlockParams(
+        blockNumber: Long,
+        includeDirectNativeTransactions: Boolean,
+    ): JsonArray = JsonArray().apply {
+        add(quantityHex(blockNumber))
+        add(includeDirectNativeTransactions)
+    }
+
+    private fun decodePaymentEvidenceBlockResult(
+        result: JsonElement,
+        blockNumber: Long,
+        includeDirectNativeTransactions: Boolean,
+    ): PaymentEvidenceBlock? {
         if (result.isJsonNull) return null
         if (!result.isJsonObject) {
             throw RpcException("eth_getBlockByNumber result must be an object or null")
@@ -160,6 +180,18 @@ class ReadOnlyRpcClient private constructor(
         receiver: EvmAddress,
         blockNumber: Long,
     ): List<IncomingErc20Transfer> {
+        val result = rpcResult(
+            "eth_getLogs",
+            incomingErc20TransfersParams(token, receiver, blockNumber),
+        )
+        return decodeIncomingErc20TransfersResult(result, token, receiver, blockNumber)
+    }
+
+    private fun incomingErc20TransfersParams(
+        token: EvmAddress,
+        receiver: EvmAddress,
+        blockNumber: Long,
+    ): JsonArray {
         require(!token.isZero) { "Token address must not be zero" }
         require(!NativeAsset.isNative(token)) { "Native assets do not emit ERC-20 Transfer logs" }
         require(!receiver.isZero) { "Payment receiver must not be zero" }
@@ -175,11 +207,151 @@ class ReadOnlyRpcClient private constructor(
                 add(addressTopic(receiver))
             })
         }
-        val result = rpcResult("eth_getLogs", JsonArray().apply { add(filter) })
+        return JsonArray().apply { add(filter) }
+    }
+
+    private fun decodeIncomingErc20TransfersResult(
+        result: JsonElement,
+        token: EvmAddress,
+        receiver: EvmAddress,
+        blockNumber: Long,
+    ): List<IncomingErc20Transfer> {
         if (!result.isJsonArray) throw RpcException("eth_getLogs result must be an array")
         return result.asJsonArray.map { element ->
             decodeIncomingErc20Transfer(element, token, receiver, blockNumber)
         }
+    }
+
+    /**
+     * Wave 1 of a batched evidence resolution: endpoint identity, both saved anchors, and both
+     * anchor-height balances in one JSON-RPC batch. Anchor hash verification stays with the
+     * resolver; the closing bracket re-reads every anchor fresh via [paymentEvidenceBlockHeaders].
+     */
+    internal fun openPaymentEvidenceContext(
+        asset: EvmAddress,
+        receiver: EvmAddress,
+        publicationBlockNumber: Long,
+        fundingBlockNumber: Long,
+    ): PaymentEvidenceOpenContext {
+        require(publicationBlockNumber >= 0) { "Block number must not be negative" }
+        require(fundingBlockNumber >= 0) { "Block number must not be negative" }
+        val isNative = NativeAsset.isNative(asset)
+        val results = rpcResults(
+            listOf(
+                RpcCall("eth_chainId", JsonArray()),
+                RpcCall(
+                    "eth_getBlockByNumber",
+                    paymentEvidenceBlockParams(publicationBlockNumber, false),
+                ),
+                RpcCall(
+                    "eth_getBlockByNumber",
+                    paymentEvidenceBlockParams(fundingBlockNumber, false),
+                ),
+                assetBalanceCall(asset, receiver, quantityHex(publicationBlockNumber)),
+                assetBalanceCall(asset, receiver, quantityHex(fundingBlockNumber)),
+            ),
+        )
+        return PaymentEvidenceOpenContext(
+            chainId = parseQuantity(resultString(results[0]), "eth_chainId")
+                .toSupportedLong("Chain ID"),
+            publicationBlock = decodePaymentEvidenceBlockResult(
+                results[1],
+                publicationBlockNumber,
+                false,
+            ),
+            fundingBlock = decodePaymentEvidenceBlockResult(results[2], fundingBlockNumber, false),
+            publicationBalance = decodeAssetBalance(results[3], isNative),
+            fundingBalance = decodeAssetBalance(results[4], isNative),
+        )
+    }
+
+    /** Fresh batched balance reads at exact heights; chunks over ten run concurrently. */
+    internal fun paymentAssetBalances(
+        asset: EvmAddress,
+        receiver: EvmAddress,
+        blockNumbers: Collection<Long>,
+    ): Map<Long, BigInteger> {
+        val ordered = blockNumbers.toCollection(LinkedHashSet())
+        require(ordered.isNotEmpty()) { "Balance block set must not be empty" }
+        require(ordered.size <= MAX_CONCURRENT_CALL_SET_SIZE) {
+            "Balance block set must contain at most $MAX_CONCURRENT_CALL_SET_SIZE heights"
+        }
+        ordered.forEach { require(it >= 0) { "Block number must not be negative" } }
+        val isNative = NativeAsset.isNative(asset)
+        val results = rpcResultsChunked(
+            ordered.map { blockNumber -> assetBalanceCall(asset, receiver, quantityHex(blockNumber)) },
+        )
+        return ordered.mapIndexed { index, blockNumber ->
+            blockNumber to decodeAssetBalance(results[index], isNative)
+        }.toMap(LinkedHashMap())
+    }
+
+    /**
+     * Crossing-block reads in one batch: the optional prior-height balance, the canonical crossing
+     * block (with full transactions only for native assets), and receiver-scoped ERC-20 Transfer
+     * logs for token assets.
+     */
+    internal fun paymentCrossingReads(
+        asset: EvmAddress,
+        receiver: EvmAddress,
+        blockNumber: Long,
+        includePriorBalance: Boolean,
+    ): PaymentCrossingReads {
+        require(blockNumber >= 0) { "Block number must not be negative" }
+        val isNative = NativeAsset.isNative(asset)
+        val calls = buildList {
+            if (includePriorBalance) {
+                require(blockNumber > 0) { "Prior balance requires a positive block number" }
+                add(assetBalanceCall(asset, receiver, quantityHex(blockNumber - 1L)))
+            }
+            add(
+                RpcCall(
+                    "eth_getBlockByNumber",
+                    paymentEvidenceBlockParams(blockNumber, isNative),
+                ),
+            )
+            if (!isNative) {
+                add(RpcCall("eth_getLogs", incomingErc20TransfersParams(asset, receiver, blockNumber)))
+            }
+        }
+        val results = rpcResults(calls)
+        var index = 0
+        val priorBalance = if (includePriorBalance) {
+            decodeAssetBalance(results[index++], isNative)
+        } else {
+            null
+        }
+        val block = decodePaymentEvidenceBlockResult(results[index++], blockNumber, isNative)
+        val transfers = if (!isNative) {
+            decodeIncomingErc20TransfersResult(results[index], asset, receiver, blockNumber)
+        } else {
+            null
+        }
+        return PaymentCrossingReads(
+            block = block,
+            erc20Transfers = transfers,
+            priorBalance = priorBalance,
+        )
+    }
+
+    /** Fresh batched canonical header reads used to close the evidence bracket. */
+    internal fun paymentEvidenceBlockHeaders(
+        blockNumbers: Collection<Long>,
+    ): Map<Long, PaymentEvidenceBlock?> {
+        val ordered = blockNumbers.toCollection(LinkedHashSet())
+        require(ordered.isNotEmpty()) { "Header block set must not be empty" }
+        require(ordered.size <= MAX_BATCH_SIZE) {
+            "Header block set must contain at most $MAX_BATCH_SIZE heights"
+        }
+        ordered.forEach { require(it >= 0) { "Block number must not be negative" } }
+        val results = rpcResults(
+            ordered.map { blockNumber ->
+                RpcCall("eth_getBlockByNumber", paymentEvidenceBlockParams(blockNumber, false))
+            },
+        )
+        return ordered.mapIndexed { index, blockNumber ->
+            blockNumber to decodePaymentEvidenceBlockResult(results[index], blockNumber, false)
+        }.toMap(LinkedHashMap())
     }
 
     private fun decodeDirectNativePaymentTransaction(
@@ -1468,8 +1640,36 @@ private class HttpUrlConnectionRpcTransport(
     private val rpcUrl: String,
     private val connectTimeoutMillis: Int,
     private val readTimeoutMillis: Int,
+    /**
+     * Optional whole-call deadline. Socket timeouts bound each blocking operation but not their
+     * sum, and they are idle timeouts: a peer releasing one header or body byte per interval
+     * keeps a call alive indefinitely without ever tripping them. The deadline is therefore
+     * enforced by a watchdog that disconnects the connection when it expires — closing the
+     * underlying socket aborts whichever blocking phase is in progress (connect, header read
+     * inside responseCode, or body read) within milliseconds. Cooperative re-checks between
+     * body chunks remain as a deterministic backstop. Request-body writes have no OS-level
+     * timeout, but bodies are small enough to fit socket buffers.
+     */
+    private val callTimeoutMillis: Int? = null,
 ) : RpcTransport {
+    init {
+        require(callTimeoutMillis == null || callTimeoutMillis > 0) {
+            "RPC call timeout must be greater than zero"
+        }
+    }
+
     override fun execute(requestBody: String): String {
+        val deadlineNanos = callTimeoutMillis?.let {
+            System.nanoTime() + it * NANOS_PER_MILLI
+        }
+        val deadlineExpired = AtomicBoolean()
+        fun requireCallDeadline() {
+            if (deadlineExpired.get() ||
+                (deadlineNanos != null && System.nanoTime() > deadlineNanos)
+            ) {
+                throw RpcException(CALL_DEADLINE_MESSAGE)
+            }
+        }
         val body = requestBody.toByteArray(StandardCharsets.UTF_8)
         val connection = (URL(rpcUrl).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -1481,37 +1681,61 @@ private class HttpUrlConnectionRpcTransport(
             setRequestProperty("Content-Type", "application/json; charset=utf-8")
             setFixedLengthStreamingMode(body.size)
         }
+        val watchdog = callTimeoutMillis?.let { timeout ->
+            CALL_DEADLINE_WATCHDOG.schedule(
+                {
+                    deadlineExpired.set(true)
+                    // Closes the socket, aborting any blocked connect/header/body operation.
+                    runCatching { connection.disconnect() }
+                },
+                timeout.toLong(),
+                TimeUnit.MILLISECONDS,
+            )
+        }
 
-        connection.outputStream.use { it.write(body) }
-        val status = connection.responseCode
-        val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-        if (status == 429) {
-            stream?.close()
-            throw rpcHttpFailure(
-                status = status,
-                retryAfterHeader = connection.getHeaderField("Retry-After"),
-                nowEpochMillis = System.currentTimeMillis(),
-            )
+        try {
+            connection.outputStream.use { it.write(body) }
+            val status = connection.responseCode
+            requireCallDeadline()
+            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+            if (status == 429) {
+                stream?.close()
+                throw rpcHttpFailure(
+                    status = status,
+                    retryAfterHeader = connection.getHeaderField("Retry-After"),
+                    nowEpochMillis = System.currentTimeMillis(),
+                )
+            }
+            val response = stream?.use { input ->
+                readLimitedUtf8(input, ::requireCallDeadline)
+            }.orEmpty()
+            if (status !in 200..299) {
+                throw rpcHttpFailure(
+                    status = status,
+                    retryAfterHeader = connection.getHeaderField("Retry-After"),
+                    nowEpochMillis = System.currentTimeMillis(),
+                )
+            }
+            if (response.isEmpty()) throw RpcException("RPC HTTP response body is empty")
+            // Closing request/response streams returns this connection to Android's process-wide
+            // keep-alive pool. Calling disconnect() here prevented reuse across short RPC phases.
+            return response
+        } catch (error: Exception) {
+            // A watchdog disconnect surfaces as an arbitrary transport IOException from whichever
+            // blocking call it aborted; report the deadline deterministically instead.
+            if (deadlineExpired.get()) throw RpcException(CALL_DEADLINE_MESSAGE)
+            throw error
+        } finally {
+            watchdog?.cancel(false)
         }
-        val response = stream?.use(::readLimitedUtf8).orEmpty()
-        if (status !in 200..299) {
-            throw rpcHttpFailure(
-                status = status,
-                retryAfterHeader = connection.getHeaderField("Retry-After"),
-                nowEpochMillis = System.currentTimeMillis(),
-            )
-        }
-        if (response.isEmpty()) throw RpcException("RPC HTTP response body is empty")
-        // Closing request/response streams returns this connection to Android's process-wide
-        // keep-alive pool. Calling disconnect() here prevented reuse across short RPC phases.
-        return response
     }
 
-    private fun readLimitedUtf8(input: InputStream): String {
+    private fun readLimitedUtf8(input: InputStream, betweenChunks: () -> Unit): String {
         val output = ByteArrayOutputStream()
         val buffer = ByteArray(8 * 1024)
         var total = 0
         while (true) {
+            betweenChunks()
             val count = input.read(buffer)
             if (count < 0) break
             total += count
@@ -1525,6 +1749,14 @@ private class HttpUrlConnectionRpcTransport(
         // Full canonical blocks are needed only for direct native-payment attribution and can be
         // larger than the earlier metadata-only RPC ceiling. Keep a finite defensive bound.
         private const val MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+        private const val NANOS_PER_MILLI = 1_000_000L
+        private const val CALL_DEADLINE_MESSAGE = "RPC HTTP call exceeded its deadline"
+
+        // One shared daemon thread arms at most one pending disconnect per in-flight call that
+        // configured a whole-call deadline; completed calls cancel their task in a finally block.
+        private val CALL_DEADLINE_WATCHDOG = Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "opk-rpc-call-deadline").apply { isDaemon = true }
+        }
     }
 }
 
