@@ -7,15 +7,26 @@ import org.junit.Test
 
 class BackgroundRpcBudgetTest {
     @Test
-    fun `evidence resolution budget plus one worst socket stays within coordinator lease`() {
-        // The resolver checks its end-to-end budget before every network operation, so the worst
-        // complete pass is the budget plus one final worst-case socket operation.
-        val worstCaseMillis = Web3jPaymentTransactionResolver.EVIDENCE_TOTAL_BUDGET_MILLIS +
-            Web3jPaymentTransactionResolver.EVIDENCE_RPC_CONNECT_TIMEOUT_MILLIS +
+    fun `evidence resolution worst envelope stays strictly below coordinator lease`() {
+        // The resolver checks its end-to-end budget before every network operation, and each
+        // HTTP call is bounded by the whole-call transport deadline plus one further blocked
+        // read. The worst complete pass is therefore the budget plus one worst-case call, and it
+        // must sit strictly below the lease to leave headroom for request writes, response
+        // parsing, and coroutine resumption.
+        val worstCallMillis = Web3jPaymentTransactionResolver.EVIDENCE_RPC_CALL_TIMEOUT_MILLIS +
             Web3jPaymentTransactionResolver.EVIDENCE_RPC_READ_TIMEOUT_MILLIS
+        val worstCaseMillis =
+            Web3jPaymentTransactionResolver.EVIDENCE_TOTAL_BUDGET_MILLIS + worstCallMillis
 
         assertTrue(
-            worstCaseMillis <= RpcWorkCoordinator.DEFAULT_BACKGROUND_OPERATION_TIMEOUT_MILLIS,
+            worstCaseMillis < RpcWorkCoordinator.DEFAULT_BACKGROUND_OPERATION_TIMEOUT_MILLIS,
+        )
+        // A healthy single-read call (connect plus one full read) must fit the call deadline so
+        // the deadline only fires on genuinely stalled or dribbling responses.
+        assertTrue(
+            Web3jPaymentTransactionResolver.EVIDENCE_RPC_CONNECT_TIMEOUT_MILLIS +
+                Web3jPaymentTransactionResolver.EVIDENCE_RPC_READ_TIMEOUT_MILLIS <=
+                Web3jPaymentTransactionResolver.EVIDENCE_RPC_CALL_TIMEOUT_MILLIS,
         )
     }
 

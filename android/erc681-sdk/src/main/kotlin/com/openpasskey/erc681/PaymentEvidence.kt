@@ -224,6 +224,10 @@ class PaymentEvidenceResolver(
                 chain.paymentAssetBalance(request.asset, request.receiver, blockNumber),
             )
         }
+        fun budgetedAnchor(anchor: PaymentConfirmationCursor, label: String): PaymentEvidenceBlock {
+            requireBudget()
+            return requireAnchor(anchor, label)
+        }
 
         if (batched != null) {
             val context = batched.openPaymentEvidenceContext(
@@ -243,14 +247,15 @@ class PaymentEvidenceResolver(
             recordBalance(request.publicationCursor.blockNumber, context.publicationBalance)
             recordBalance(request.fundingCursor.blockNumber, context.fundingBalance)
         } else {
+            requireBudget()
             val remoteChainId = chain.chainId()
             if (remoteChainId != request.chainId) {
                 throw NetworkConfigurationException(
                     "RPC chain ID $remoteChainId does not match payment chain ID ${request.chainId}",
                 )
             }
-            requireAnchor(request.publicationCursor, "publication")
-            requireAnchor(request.fundingCursor, "funding")
+            budgetedAnchor(request.publicationCursor, "publication")
+            budgetedAnchor(request.fundingCursor, "funding")
         }
 
         val publicationBalance = balanceAt(request.publicationCursor.blockNumber)
@@ -377,15 +382,15 @@ class PaymentEvidenceResolver(
                 "funding",
             )
         } else {
-            val finalPaymentBlock = requireAnchor(
+            val finalPaymentBlock = budgetedAnchor(
                 PaymentConfirmationCursor(crossingBlock.blockNumber, crossingBlock.blockHash),
                 "payment",
             )
             if (finalPaymentBlock.blockTimestamp != crossingBlock.blockTimestamp) {
                 throw RpcException("Canonical payment block timestamp changed during attribution")
             }
-            requireAnchor(request.publicationCursor, "publication")
-            requireAnchor(request.fundingCursor, "funding")
+            budgetedAnchor(request.publicationCursor, "publication")
+            budgetedAnchor(request.fundingCursor, "funding")
         }
         return selected
     }

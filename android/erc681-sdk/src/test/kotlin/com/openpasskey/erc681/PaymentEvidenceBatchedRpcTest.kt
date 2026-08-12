@@ -73,6 +73,61 @@ class PaymentEvidenceBatchedRpcTest {
     }
 
     @Test
+    fun `sequential compatibility path checks the budget before every network read`() {
+        var nowMillis = 0L
+        var networkCalls = 0
+        val chain = object : PaymentEvidenceChainClient {
+            private fun tick() {
+                networkCalls += 1
+                nowMillis += 2_000
+            }
+
+            override fun chainId(): Long {
+                tick()
+                return CONFIG.chainId
+            }
+
+            override fun paymentAssetBalance(
+                asset: EvmAddress,
+                receiver: EvmAddress,
+                blockNumber: Long,
+            ): BigInteger {
+                tick()
+                return BigInteger.ZERO
+            }
+
+            override fun paymentEvidenceBlock(
+                blockNumber: Long,
+                includeDirectNativeTransactions: Boolean,
+            ): PaymentEvidenceBlock {
+                tick()
+                return PaymentEvidenceBlock(blockNumber, PUBLICATION_HASH, PUBLICATION_TIMESTAMP)
+            }
+
+            override fun incomingErc20Transfers(
+                token: EvmAddress,
+                receiver: EvmAddress,
+                blockNumber: Long,
+            ): List<IncomingErc20Transfer> {
+                tick()
+                return emptyList()
+            }
+        }
+        val resolver = PaymentEvidenceResolver(
+            chain = chain,
+            totalBudgetMillis = 3_000,
+            elapsedMillis = { nowMillis },
+        )
+
+        val error = assertFailsWith<RpcException> { resolver.resolve(request()) }
+
+        assertEquals("Payment evidence resolution exceeded its time budget", error.message)
+        // chainId consumed 2s inside budget and the publication anchor's pre-check at 2s passed;
+        // the funding anchor's pre-check at 4s crossed the 3s deadline before its network read.
+        assertEquals(2, networkCalls)
+    }
+
+    @Test
     fun `midpoint prefetch covers every height the bounded search visits`() {
         for (last in 2L..16L) {
             val midpoints = balanceCrossingMidpoints(1L, last, 4)

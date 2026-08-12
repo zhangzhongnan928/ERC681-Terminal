@@ -82,12 +82,15 @@ class ReadOnlyRpcClient private constructor(
         config: NetworkConfig,
         connectTimeoutMillis: Int = DEFAULT_CONNECT_TIMEOUT_MILLIS,
         readTimeoutMillis: Int = DEFAULT_READ_TIMEOUT_MILLIS,
+        /** Optional whole-call transport deadline; socket timeouts bound only each operation. */
+        callTimeoutMillis: Int? = null,
     ) : this(
         config = config,
         transport = HttpUrlConnectionRpcTransport(
             config.rpcUrl,
             checkedTimeout(connectTimeoutMillis),
             checkedTimeout(readTimeoutMillis),
+            callTimeoutMillis?.let(::checkedTimeout),
         ),
         retrySleep = { delayMillis -> Thread.sleep(delayMillis) },
         retryJitterMillis = {
@@ -1635,8 +1638,30 @@ private class HttpUrlConnectionRpcTransport(
     private val rpcUrl: String,
     private val connectTimeoutMillis: Int,
     private val readTimeoutMillis: Int,
+    /**
+     * Optional whole-call deadline. Socket timeouts bound each blocking operation but not their
+     * sum — a peer releasing one byte per read keeps a response alive indefinitely — so the
+     * deadline is re-checked after connect/headers and between body chunks. One call is
+     * therefore bounded by this deadline plus a single further blocked read. Request-body
+     * writes have no OS-level timeout, but bodies are small enough to fit socket buffers.
+     */
+    private val callTimeoutMillis: Int? = null,
 ) : RpcTransport {
+    init {
+        require(callTimeoutMillis == null || callTimeoutMillis > 0) {
+            "RPC call timeout must be greater than zero"
+        }
+    }
+
     override fun execute(requestBody: String): String {
+        val deadlineNanos = callTimeoutMillis?.let {
+            System.nanoTime() + it * NANOS_PER_MILLI
+        }
+        fun requireCallDeadline() {
+            if (deadlineNanos != null && System.nanoTime() > deadlineNanos) {
+                throw RpcException("RPC HTTP call exceeded its deadline")
+            }
+        }
         val body = requestBody.toByteArray(StandardCharsets.UTF_8)
         val connection = (URL(rpcUrl).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -1651,6 +1676,7 @@ private class HttpUrlConnectionRpcTransport(
 
         connection.outputStream.use { it.write(body) }
         val status = connection.responseCode
+        requireCallDeadline()
         val stream = if (status in 200..299) connection.inputStream else connection.errorStream
         if (status == 429) {
             stream?.close()
@@ -1660,7 +1686,9 @@ private class HttpUrlConnectionRpcTransport(
                 nowEpochMillis = System.currentTimeMillis(),
             )
         }
-        val response = stream?.use(::readLimitedUtf8).orEmpty()
+        val response = stream?.use { input ->
+            readLimitedUtf8(input, ::requireCallDeadline)
+        }.orEmpty()
         if (status !in 200..299) {
             throw rpcHttpFailure(
                 status = status,
@@ -1674,11 +1702,12 @@ private class HttpUrlConnectionRpcTransport(
         return response
     }
 
-    private fun readLimitedUtf8(input: InputStream): String {
+    private fun readLimitedUtf8(input: InputStream, betweenChunks: () -> Unit): String {
         val output = ByteArrayOutputStream()
         val buffer = ByteArray(8 * 1024)
         var total = 0
         while (true) {
+            betweenChunks()
             val count = input.read(buffer)
             if (count < 0) break
             total += count
@@ -1692,6 +1721,7 @@ private class HttpUrlConnectionRpcTransport(
         // Full canonical blocks are needed only for direct native-payment attribution and can be
         // larger than the earlier metadata-only RPC ceiling. Keep a finite defensive bound.
         private const val MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+        private const val NANOS_PER_MILLI = 1_000_000L
     }
 }
 
