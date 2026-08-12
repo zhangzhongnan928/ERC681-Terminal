@@ -2,6 +2,7 @@ package com.openpasskey.terminal.printing
 
 import android.content.Context
 import android.os.RemoteException
+import android.os.SystemClock
 import android.util.Log
 import com.imin.printer.INeoPrinterCallback
 import com.imin.printer.InitPrinterCallback
@@ -11,6 +12,102 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+
+internal enum class IminReceiptAlignment(val sdkValue: Int) {
+    LEFT(0),
+    CENTER(1),
+}
+
+internal data class IminReceiptTextBlock(
+    val text: String,
+    val size: Int,
+    val bold: Boolean,
+    val alignment: IminReceiptAlignment,
+)
+
+internal data class IminReceiptPrintPlan(
+    val textBlocks: List<IminReceiptTextBlock>,
+    val explorerUrl: String,
+    val finalFeed: Int,
+)
+
+/**
+ * Builds a compact immutable command plan. Grouping adjacent lines with identical styling is
+ * important on the Swift 2: every bitmap-text call crosses the printer-service boundary and a
+ * buffered receipt cannot start moving paper until all commands have been queued and committed.
+ */
+internal fun ReceiptPrintContent.toIminReceiptPrintPlan(): IminReceiptPrintPlan {
+    val merchant = merchantLines.joinToString("\n")
+    val details = (paidLines + terminalLines + transactionLines).joinToString("\n")
+    return IminReceiptPrintPlan(
+        textBlocks = listOfNotNull(
+            IminReceiptTextBlock(
+                text = merchant,
+                size = HEADER_TEXT_SIZE,
+                bold = true,
+                alignment = IminReceiptAlignment.CENTER,
+            ),
+            merchantAbn?.let {
+                IminReceiptTextBlock(
+                    text = "ABN $it",
+                    size = BODY_TEXT_SIZE,
+                    bold = false,
+                    alignment = IminReceiptAlignment.CENTER,
+                )
+            },
+            IminReceiptTextBlock(
+                text = "PAYMENT RECEIPT",
+                size = TITLE_TEXT_SIZE,
+                bold = true,
+                alignment = IminReceiptAlignment.CENTER,
+            ),
+            IminReceiptTextBlock(
+                text = metadataLines.joinToString("\n"),
+                size = BODY_TEXT_SIZE,
+                bold = false,
+                alignment = IminReceiptAlignment.LEFT,
+            ),
+            IminReceiptTextBlock(
+                text = totalLines.joinToString("\n"),
+                size = TOTAL_TEXT_SIZE,
+                bold = true,
+                alignment = IminReceiptAlignment.LEFT,
+            ),
+            IminReceiptTextBlock(
+                text = details,
+                size = DETAIL_TEXT_SIZE,
+                bold = false,
+                alignment = IminReceiptAlignment.LEFT,
+            ),
+            IminReceiptTextBlock(
+                text = "Powered by OpenPasskey",
+                size = FOOTER_TEXT_SIZE,
+                bold = true,
+                alignment = IminReceiptAlignment.CENTER,
+            ),
+            IminReceiptTextBlock(
+                text = "Scan for transaction details",
+                size = BODY_TEXT_SIZE,
+                bold = false,
+                alignment = IminReceiptAlignment.CENTER,
+            ),
+        ),
+        explorerUrl = explorerUrl,
+        finalFeed = FINAL_FEED,
+    )
+}
+
+private const val TEXT_STYLE_NORMAL = 0
+private const val TEXT_STYLE_BOLD = 1
+private const val DETAIL_TEXT_SIZE = 20
+private const val BODY_TEXT_SIZE = 22
+private const val TITLE_TEXT_SIZE = 24
+private const val HEADER_TEXT_SIZE = 28
+private const val TOTAL_TEXT_SIZE = 24
+private const val FOOTER_TEXT_SIZE = 22
+private const val QR_SIZE = 5
+private const val QR_ERROR_CORRECTION_M = 1
+private const val FINAL_FEED = 48
 
 /**
  * Receipt printer for iMin Printer SDK 2.x and the Swift 2 built-in 58 mm printer.
@@ -81,6 +178,12 @@ class IminReceiptPrinter(
         }
     }
 
+    init {
+        // Start the AIDL bind while the payment UI is being prepared. A first receipt then normally
+        // reaches an already-connected service instead of spending part of checkout waiting here.
+        requestServiceConnection()
+    }
+
     override suspend fun print(document: ReceiptDocument): ReceiptPrintResult =
         printMutex.withLock {
             if (closed.get()) return@withLock ReceiptPrintResult.Closed
@@ -100,8 +203,8 @@ class IminReceiptPrinter(
 
             statusFailure(printerStatus)?.let { return@withLock it }
 
-            val receiptContent = try {
-                ReceiptFormatter.printContent(document)
+            val printPlan = try {
+                ReceiptFormatter.printContent(document).toIminReceiptPrintPlan()
             } catch (error: RuntimeException) {
                 Log.e(TAG, "Receipt formatting failed", error)
                 return@withLock ReceiptPrintResult.Failure(
@@ -117,15 +220,22 @@ class IminReceiptPrinter(
                 printer.enterPrinterBuffer(true)
                 transactionBufferActive.set(true)
 
-                queueStyledReceipt(receiptContent, outcome)
+                val queueStartedAt = SystemClock.elapsedRealtime()
+                queueCompactReceipt(printPlan, outcome)
                 printer.printQRCodeWithFull(
-                    document.explorerUrl,
+                    printPlan.explorerUrl,
                     QR_SIZE,
                     QR_ERROR_CORRECTION_M,
-                    ALIGN_CENTER,
+                    IminReceiptAlignment.CENTER.sdkValue,
                     commandCallback("explorer QR", outcome),
                 )
-                printer.printAndFeedPaper(FINAL_FEED)
+                printer.printAndFeedPaper(printPlan.finalFeed)
+                Log.i(
+                    TAG,
+                    "Compact receipt queued in " +
+                        "${SystemClock.elapsedRealtime() - queueStartedAt}ms " +
+                        "(${printPlan.textBlocks.size} text blocks)",
+                )
                 val preCommitFailure = outcome.beginCommit()
                 if (preCommitFailure != null) {
                     // A synchronous content callback rejected the buffered job. Do not submit a
@@ -153,90 +263,20 @@ class IminReceiptPrinter(
             }
         }
 
-    /** Mirrors the reference OPK receipt hierarchy while keeping the entire job transactional. */
-    private fun queueStyledReceipt(
-        content: ReceiptPrintContent,
+    /** Queues the compact receipt while keeping the whole physical job transactional. */
+    private fun queueCompactReceipt(
+        plan: IminReceiptPrintPlan,
         outcome: IminBufferedReceiptOutcome,
     ) {
-        val textCallback = commandCallback("receipt text", outcome)
-        val columnsCallback = commandCallback("receipt columns", outcome)
-
-        fun bitmapLine(
-            value: String,
-            size: Int,
-            bold: Boolean,
-            alignment: Int,
-        ) {
-            printer.setTextBitmapSize(size)
-            printer.setTextBitmapStyle(if (bold) TEXT_STYLE_BOLD else TEXT_STYLE_NORMAL)
-            printer.printTextBitmapWithAli("$value\n", alignment, textCallback)
-        }
-
-        bitmapLine(SEPARATOR_HEAVY, HEADER_TEXT_SIZE, bold = true, ALIGN_CENTER)
-        content.merchantLines.forEach {
-            bitmapLine(it, HEADER_TEXT_SIZE, bold = true, ALIGN_CENTER)
-        }
-        content.merchantAbn?.let {
-            bitmapLine("ABN $it", BODY_TEXT_SIZE, bold = false, ALIGN_CENTER)
-        }
-        bitmapLine(SEPARATOR_HEAVY, HEADER_TEXT_SIZE, bold = true, ALIGN_CENTER)
-
-        bitmapLine("", BODY_TEXT_SIZE, bold = false, ALIGN_CENTER)
-        bitmapLine("PAYMENT RECEIPT", TITLE_TEXT_SIZE, bold = true, ALIGN_CENTER)
-        bitmapLine("", BODY_TEXT_SIZE, bold = false, ALIGN_CENTER)
-
-        printer.setTextBitmapSize(BODY_TEXT_SIZE)
-        printer.setTextBitmapStyle(TEXT_STYLE_NORMAL)
-        printer.printColumnsString(
-            arrayOf("Date (UTC):", content.date),
-            intArrayOf(DATE_LABEL_COLUMNS, DATE_VALUE_COLUMNS),
-            intArrayOf(ALIGN_LEFT, ALIGN_RIGHT),
-            intArrayOf(BODY_TEXT_SIZE, BODY_TEXT_SIZE),
-            columnsCallback,
-        )
-        printer.printColumnsString(
-            arrayOf("Receipt:", "#${content.receiptNumber}"),
-            intArrayOf(DATE_LABEL_COLUMNS, DATE_VALUE_COLUMNS),
-            intArrayOf(ALIGN_LEFT, ALIGN_RIGHT),
-            intArrayOf(BODY_TEXT_SIZE, BODY_TEXT_SIZE),
-            columnsCallback,
-        )
-
-        bitmapLine("", BODY_TEXT_SIZE, bold = false, ALIGN_CENTER)
-        bitmapLine(SEPARATOR_LIGHT, BODY_TEXT_SIZE, bold = false, ALIGN_CENTER)
-        if (content.total.length <= TOTAL_VALUE_COLUMNS) {
-            printer.setTextBitmapSize(TOTAL_TEXT_SIZE)
-            printer.setTextBitmapStyle(TEXT_STYLE_BOLD)
-            printer.printColumnsString(
-                arrayOf("TOTAL", content.total),
-                intArrayOf(TOTAL_LABEL_COLUMNS, TOTAL_VALUE_COLUMNS),
-                intArrayOf(ALIGN_LEFT, ALIGN_RIGHT),
-                intArrayOf(TOTAL_TEXT_SIZE, TOTAL_TEXT_SIZE),
-                columnsCallback,
+        plan.textBlocks.forEachIndexed { index, block ->
+            printer.setTextBitmapSize(block.size)
+            printer.setTextBitmapStyle(if (block.bold) TEXT_STYLE_BOLD else TEXT_STYLE_NORMAL)
+            printer.printTextBitmapWithAli(
+                "${block.text}\n",
+                block.alignment.sdkValue,
+                commandCallback("receipt text ${index + 1}", outcome),
             )
-        } else {
-            bitmapLine("TOTAL", TOTAL_TEXT_SIZE, bold = true, ALIGN_LEFT)
-            content.totalLines.drop(1).forEach {
-                bitmapLine(it.trim(), BODY_TEXT_SIZE, bold = true, ALIGN_RIGHT)
-            }
         }
-        bitmapLine(SEPARATOR_LIGHT, BODY_TEXT_SIZE, bold = false, ALIGN_CENTER)
-        bitmapLine("", DETAIL_TEXT_SIZE, bold = false, ALIGN_LEFT)
-
-        printer.setTextBitmapSize(DETAIL_TEXT_SIZE)
-        printer.setTextBitmapStyle(TEXT_STYLE_NORMAL)
-        printer.setCodeAlignment(ALIGN_LEFT)
-        (content.paidLines + content.terminalLines + content.transactionLines).forEach {
-            printer.printText("$it\n", textCallback)
-        }
-
-        bitmapLine("", BODY_TEXT_SIZE, bold = false, ALIGN_CENTER)
-        bitmapLine(SEPARATOR_HEAVY, HEADER_TEXT_SIZE, bold = true, ALIGN_CENTER)
-        bitmapLine("Powered by OPK", HEADER_TEXT_SIZE, bold = true, ALIGN_CENTER)
-        bitmapLine(SEPARATOR_HEAVY, HEADER_TEXT_SIZE, bold = true, ALIGN_CENTER)
-        bitmapLine("", BODY_TEXT_SIZE, bold = false, ALIGN_CENTER)
-        bitmapLine("Scan for transaction details", BODY_TEXT_SIZE, bold = false, ALIGN_CENTER)
-        bitmapLine(content.explorerUrl, URL_TEXT_SIZE, bold = false, ALIGN_CENTER)
     }
 
     override fun close() {
@@ -260,10 +300,43 @@ class IminReceiptPrinter(
 
     private suspend fun ensureServiceConnected(): ReceiptPrintResult? {
         if (serviceConnected) return null
+        if (closed.get()) return ReceiptPrintResult.Closed
+        val waiter = requestServiceConnection() ?: return when {
+            closed.get() -> ReceiptPrintResult.Closed
+            serviceConnected -> null
+            else -> ReceiptPrintResult.Unavailable(
+                status = STATUS_NOT_CONNECTED,
+                message = "Printer service is not connected.",
+            )
+        }
+
+        val connected = withTimeoutOrNull(serviceConnectionTimeoutMillis) {
+            waiter.await()
+        }
+
+        return when {
+            closed.get() -> ReceiptPrintResult.Closed
+            connected == true && serviceConnected -> null
+            connected == null -> {
+                resetTimedOutBinding(waiter)
+                ReceiptPrintResult.TimedOut(
+                    ReceiptPrintResult.TimedOut.Stage.SERVICE_CONNECTION,
+                )
+            }
+            else -> ReceiptPrintResult.Unavailable(
+                status = STATUS_NOT_CONNECTED,
+                message = "Printer service is not connected.",
+            )
+        }
+    }
+
+    /** Starts or joins the one process-wide service bind without waiting for it. */
+    private fun requestServiceConnection(): CompletableDeferred<Boolean>? {
+        if (closed.get() || serviceConnected) return null
 
         var shouldBind = false
         val waiter = synchronized(stateLock) {
-            if (serviceConnected) {
+            if (closed.get() || serviceConnected) {
                 null
             } else {
                 connectionWaiter?.takeIf { it.isActive }
@@ -285,32 +358,20 @@ class IminReceiptPrinter(
             }
 
             if (!accepted) {
+                var completeFailure = false
                 synchronized(stateLock) {
-                    bindingRequested = false
-                    if (connectionWaiter === waiter) connectionWaiter = null
+                    // Some service implementations invoke onConnected synchronously. Never undo
+                    // that successful callback merely because their boolean return is stale.
+                    if (!serviceConnected && connectionWaiter === waiter) {
+                        bindingRequested = false
+                        connectionWaiter = null
+                        completeFailure = true
+                    }
                 }
-                waiter.complete(false)
+                if (completeFailure) waiter.complete(false)
             }
         }
-
-        val connected = withTimeoutOrNull(serviceConnectionTimeoutMillis) {
-            waiter.await()
-        }
-
-        return when {
-            closed.get() -> ReceiptPrintResult.Closed
-            connected == true && serviceConnected -> null
-            connected == null -> {
-                resetTimedOutBinding(waiter)
-                ReceiptPrintResult.TimedOut(
-                    ReceiptPrintResult.TimedOut.Stage.SERVICE_CONNECTION,
-                )
-            }
-            else -> ReceiptPrintResult.Unavailable(
-                status = STATUS_NOT_CONNECTED,
-                message = "Printer service is not connected.",
-            )
-        }
+        return waiter
     }
 
     private fun resetTimedOutBinding(waiter: CompletableDeferred<Boolean>) {
@@ -425,27 +486,6 @@ class IminReceiptPrinter(
         const val STATUS_NORMAL = 0
         const val STATUS_COVER_OPEN = 3
         const val STATUS_OUT_OF_PAPER = 7
-
-        const val ALIGN_LEFT = 0
-        const val ALIGN_CENTER = 1
-        const val ALIGN_RIGHT = 2
-        const val TEXT_STYLE_NORMAL = 0
-        const val TEXT_STYLE_BOLD = 1
-        const val DETAIL_TEXT_SIZE = 20
-        const val URL_TEXT_SIZE = 18
-        const val BODY_TEXT_SIZE = 22
-        const val TITLE_TEXT_SIZE = 24
-        const val HEADER_TEXT_SIZE = 28
-        const val TOTAL_TEXT_SIZE = 28
-        const val DATE_LABEL_COLUMNS = 12
-        const val DATE_VALUE_COLUMNS = 20
-        const val TOTAL_LABEL_COLUMNS = 16
-        const val TOTAL_VALUE_COLUMNS = 16
-        const val SEPARATOR_HEAVY = "================================"
-        const val SEPARATOR_LIGHT = "--------------------------------"
-        const val QR_SIZE = 5
-        const val QR_ERROR_CORRECTION_M = 1
-        const val FINAL_FEED = 80
 
         const val DEFAULT_SERVICE_CONNECTION_TIMEOUT_MILLIS = 5_000L
         const val DEFAULT_PRINT_COMPLETION_TIMEOUT_MILLIS = 15_000L

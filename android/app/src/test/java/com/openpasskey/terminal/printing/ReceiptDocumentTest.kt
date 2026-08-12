@@ -26,34 +26,24 @@ class ReceiptDocumentTest {
 
         assertEquals(
             """
-            |================================
             |           Blue Brew
             |       ABN 61 695 642 285
-            |================================
-            |
             |        PAYMENT RECEIPT
-            |
-            |Date (UTC): 01 Jan 2024  00:00
-            |Receipt:  #42
-            |
-            |--------------------------------
+            |Date (UTC):   01 Jan 2024  00:00
+            |Receipt:                     #42
             |TOTAL                 12.34 AUDD
-            |--------------------------------
-            |
             |Paid: 12.34 AUDD (Base)
             |Terminal: 0x12345...45678
             |Tx Hash:  0xabcde...fabcd
-            |
-            |================================
-            |         Powered by OPK
-            |================================
-            |
+            |     Powered by OpenPasskey
             |  Scan for transaction details
-            |https://basescan.org/tx/0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd
             |
             """.trimMargin(),
             ReceiptFormatter.format(document, ZoneId.of("UTC")),
         )
+        assertFalse(ReceiptFormatter.format(document, ZoneId.of("UTC")).contains("===="))
+        assertFalse(ReceiptFormatter.format(document, ZoneId.of("UTC")).contains("----"))
+        assertFalse(ReceiptFormatter.format(document, ZoneId.of("UTC")).contains("\n\n"))
     }
 
     @Test
@@ -114,7 +104,7 @@ class ReceiptDocumentTest {
 
         assertEquals(utcReceipt, sydneyReceipt)
         assertEquals(utcReceipt, losAngelesReceipt)
-        assertTrue(utcReceipt.contains("Date (UTC): 01 Jan 2024  00:00"))
+        assertTrue(utcReceipt.contains("Date (UTC):   01 Jan 2024  00:00"))
     }
 
     @Test
@@ -133,7 +123,7 @@ class ReceiptDocumentTest {
     }
 
     @Test
-    fun `includes the exact explorer URL`() {
+    fun `retains exact explorer URL for QR without printing it as text`() {
         val explorerUrl = "https://sepolia.basescan.org/tx/0x" + "ab".repeat(32)
         val receipt =
             ReceiptFormatter.format(
@@ -142,7 +132,8 @@ class ReceiptDocumentTest {
             )
 
         assertTrue(receipt.contains("Scan for transaction details"))
-        assertTrue(receipt.contains(explorerUrl))
+        assertEquals(explorerUrl, ReceiptFormatter.printContent(document(explorerUrl = explorerUrl)).explorerUrl)
+        assertFalse(receipt.contains(explorerUrl))
     }
 
     private fun document(

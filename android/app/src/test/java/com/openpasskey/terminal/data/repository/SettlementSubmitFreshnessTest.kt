@@ -16,8 +16,10 @@ import com.openpasskey.terminal.rpc.RpcEndpointResolver
 import com.openpasskey.terminal.rpc.RpcEndpointSnapshot
 import com.openpasskey.terminal.rpc.RpcWorkCoordinator
 import com.openpasskey.terminal.settlement.SettlementBalancePolicy
+import com.openpasskey.terminal.settlement.SettlementAbi
 import com.openpasskey.terminal.settlement.SettlementChainClient
 import com.openpasskey.terminal.settlement.SettlementFeeQuote
+import com.openpasskey.terminal.settlement.SettlementInvoiceIntent
 import com.openpasskey.terminal.settlement.SettlementPreflightSnapshot
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
 import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
@@ -33,6 +35,49 @@ import java.math.BigInteger
 import java.util.concurrent.atomic.AtomicLong
 
 class SettlementSubmitFreshnessTest {
+    @Test
+    fun `automatic submit revalidates and refuses unattended key use after proof expiry`() {
+        val invoice = confirmedInvoice()
+        val persistence = PersistenceCalls()
+        val database = fakeDatabase(invoice, persistence)
+        val wallet = RecordingWalletAccess()
+        val monotonicClock = AtomicLong(INITIAL_NOW)
+        var preflightCalls = 0
+        val client = proxy<SettlementChainClient> { method, arguments ->
+            when (method.name) {
+                "settlementPreflight" -> {
+                    preflightCalls += 1
+                    assertEquals(false, arguments?.get(1))
+                    if (preflightCalls == 2) monotonicClock.set(EXPIRED_AFTER_AUTOMATIC_PREFLIGHT)
+                    preflightSnapshot()
+                }
+                "close" -> Unit
+                else -> error("Automatic submit unexpectedly called settlement RPC ${method.name}")
+            }
+        }
+        val repository = SettlementRepository(
+            database = database,
+            walletAccess = wallet,
+            chainConfigSnapshot = ::unprovisionedConfig,
+            lifecycleGate = TerminalLifecycleGate(),
+            rpcWorkCoordinator = RpcWorkCoordinator(),
+            clientFactory = { client },
+            gson = Gson(),
+            elapsedRealtimeMillis = monotonicClock::get,
+        )
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            runBlocking { repository.submitAutomatically(preparedSettlement(invoice)) }
+        }
+
+        assertTrue(error.message.orEmpty(), error.message.orEmpty().contains("expired"))
+        assertEquals(2, preflightCalls)
+        assertEquals(0, wallet.automaticSignerActivations)
+        assertEquals(0, wallet.signerActivations)
+        assertEquals(0, persistence.settlementInserts)
+        assertEquals(0, persistence.invoiceAttachments)
+    }
+
     @Test
     fun `submit refuses key use and persistence when live preflight crosses proof TTL`() {
         val invoice = confirmedInvoice()
@@ -139,6 +184,7 @@ class SettlementSubmitFreshnessTest {
 
     private class RecordingWalletAccess : SettlementWalletAccess {
         var signerActivations = 0
+        var automaticSignerActivations = 0
 
         override fun snapshot() = OperatorWalletSnapshot(
             availability = OperatorWalletAvailability.READY,
@@ -153,6 +199,22 @@ class SettlementSubmitFreshnessTest {
             eip1559: Boolean,
         ): ByteArray {
             signerActivations += 1
+            return byteArrayOf(1, 2, 3)
+        }
+
+        override fun activateAndSignAutomaticSettlementTransaction(
+            transaction: RawTransaction,
+            chainId: Long,
+            vaultAddress: String,
+            operatorAddress: String,
+            eip1559: Boolean,
+            invoiceIds: List<String>,
+            expectedAmounts: List<BigInteger>,
+            tokenAddress: String,
+            maximumGasCost: BigInteger,
+            requiredBalance: BigInteger,
+        ): ByteArray {
+            automaticSignerActivations += 1
             return byteArrayOf(1, 2, 3)
         }
     }
@@ -193,7 +255,10 @@ class SettlementSubmitFreshnessTest {
             }
         }
         val eventDao = proxy<SettlementEventDao> { method, _ ->
-            error("Submit unexpectedly called SettlementEventDao.${method.name}")
+            when (method.name) {
+                "getByInvoiceScope" -> emptyList<Any>()
+                else -> error("Submit unexpectedly called SettlementEventDao.${method.name}")
+            }
         }
         val database = Class.forName(
             "com.openpasskey.terminal.data.db.InvoiceDatabase_Impl",
@@ -260,7 +325,10 @@ class SettlementSubmitFreshnessTest {
             totalExpectedAmount = BigInteger.ONE,
             totalObservedAmount = BigInteger.ONE,
             confirmedObservedAmounts = listOf(BigInteger.ONE),
-            callData = "0x682b11b5",
+            callData = SettlementAbi.encodeSweepSessions(
+                listOf(SettlementInvoiceIntent(invoice.invoiceId, invoice.receiver, BigInteger.ONE)),
+                invoice.token,
+            ),
             nonce = BigInteger.ZERO,
             gasLimit = gasLimit,
             feeQuote = feeQuote,
@@ -369,6 +437,7 @@ class SettlementSubmitFreshnessTest {
         const val PROOF_ISSUED_AT = 50_000L
         const val INITIAL_NOW = 100_000L
         const val EXPIRED_AFTER_PREFLIGHT = 110_001L
+        const val EXPIRED_AFTER_AUTOMATIC_PREFLIGHT = 160_001L
         val LIVE_NATIVE_BALANCE: BigInteger = BigInteger("200000000000000")
     }
 }

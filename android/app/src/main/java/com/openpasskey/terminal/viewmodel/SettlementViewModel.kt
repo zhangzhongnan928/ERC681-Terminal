@@ -317,7 +317,7 @@ class SettlementViewModel(
         }
     }
 
-    /** Settings propagation only. Enabling never signs or bypasses the existing review/auth UI. */
+    /** Settings propagation only. The one-time unattended grant is enrolled in Admin/setup. */
     fun setAutoSweepEnabled(enabled: Boolean) {
         if (!autoSweepPreferenceInitialized) {
             autoSweepPreferenceInitialized = true
@@ -522,18 +522,27 @@ class SettlementViewModel(
                 }
                 _state.value = _state.value.copy(
                     preparing = false,
-                    prepared = prepared,
-                    preparedAutomatically = true,
-                    preparedAutoSweepFingerprint = candidate.fingerprint,
-                    autoSweepReviewSequence = _state.value.autoSweepReviewSequence + 1,
-                    message = "Auto-sweep is ready for review. Device authentication is required.",
+                    submitting = true,
+                    message = "Auto-sweep is revalidating and signing the confirmed payment.",
+                    isError = false,
+                    autoSweepMessage = true,
+                )
+                val transaction = repository.submitAutomatically(prepared)
+                if (!autoSweepAttemptGate.isCurrent(attemptGeneration)) return@launch
+                _state.value = _state.value.copy(
+                    preparing = false,
+                    submitting = false,
+                    prepared = null,
+                    preparedAutomatically = false,
+                    preparedAutoSweepFingerprint = null,
+                    message = "Auto-sweep ${transaction.status.name.lowercase().replace('_', ' ')}.",
                     isError = false,
                     autoSweepMessage = true,
                 )
                 autoSweepRetryAfter.remove(candidate.fingerprint)
             } catch (error: CancellationException) {
                 if (autoSweepAttemptGate.isCurrent(attemptGeneration)) {
-                    _state.value = _state.value.copy(preparing = false)
+                    _state.value = _state.value.copy(preparing = false, submitting = false)
                 }
                 throw error
             } catch (error: Exception) {
@@ -545,6 +554,7 @@ class SettlementViewModel(
                     tryNextCandidate = true
                     _state.value = _state.value.copy(
                         preparing = false,
+                        submitting = false,
                         message = "Auto-sweep preparation deferred: " +
                             safeReadRpcFailureMessage(error, "settlement preflight failed"),
                         isError = true,

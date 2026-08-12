@@ -29,6 +29,7 @@ import com.openpasskey.terminal.data.model.Invoice
 import com.openpasskey.terminal.data.model.InvoiceStatus
 import com.openpasskey.terminal.data.model.hasSameFundingCursor
 import com.openpasskey.terminal.data.model.hasSuccessfulPrimaryPayment
+import com.openpasskey.terminal.data.model.receiptPrintFingerprint
 import com.openpasskey.terminal.data.model.withoutIncomingPaymentEvidence
 import com.openpasskey.terminal.payment.PaymentTransactionEvidence
 import com.openpasskey.terminal.payment.PaymentTransactionResolver
@@ -47,6 +48,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.math.BigInteger
+import java.util.concurrent.ConcurrentHashMap
 
 internal sealed interface VisibleRpcAttemptResult<out T, out S> {
     data class Observed<T>(val value: T) : VisibleRpcAttemptResult<T, Nothing>
@@ -85,6 +87,74 @@ private data class ResolvedPaymentObservation(
     val observation: PaymentObservation,
     val endpointResolution: RpcEndpointResolution,
 )
+
+/**
+ * Process-local proof that this repository just resolved and atomically persisted the exact
+ * receipt evidence through a still-current endpoint generation. It deliberately does not survive
+ * process death: recovery and history reprints continue to perform full canonical revalidation.
+ */
+internal class FreshPaymentEvidenceAttestations {
+    private data class Attestation(
+        val fingerprint: String,
+        val endpointResolution: RpcEndpointResolution,
+        val expiresAtElapsedRealtimeMillis: Long,
+    )
+
+    private val elapsedRealtimeMillis: () -> Long
+    private val validityMillis: Long
+
+    constructor(
+        elapsedRealtimeMillis: () -> Long = { System.nanoTime() / 1_000_000L },
+        validityMillis: Long = DEFAULT_VALIDITY_MILLIS,
+    ) {
+        require(validityMillis > 0) { "Fresh evidence validity must be positive" }
+        this.elapsedRealtimeMillis = elapsedRealtimeMillis
+        this.validityMillis = validityMillis
+    }
+
+    private val attestations = ConcurrentHashMap<String, Attestation>()
+
+    fun record(invoice: Invoice, endpointResolution: RpcEndpointResolution) {
+        require(
+            invoice.receiptAutoPrintEligible && invoice.receiptNumber > 0 &&
+                invoice.firstDetectedBlock != null && invoice.firstDetectedBlockHash != null &&
+                invoice.paymentTxHash != null && invoice.paymentPayerAddress != null &&
+                invoice.paymentBlockNumber != null && invoice.paymentBlockHash != null &&
+                invoice.paidAt != null,
+        ) { "Only complete canonical receipt evidence can be attested" }
+        require(endpointResolution.chainId == invoice.chainId) {
+            "Receipt evidence endpoint chain does not match the invoice"
+        }
+        attestations[invoice.invoiceId] = Attestation(
+            fingerprint = invoice.receiptPrintFingerprint(),
+            endpointResolution = endpointResolution,
+            expiresAtElapsedRealtimeMillis = Math.addExact(
+                elapsedRealtimeMillis(),
+                validityMillis,
+            ),
+        )
+    }
+
+    /** Consumes one exact fresh proof, regardless of whether printing later succeeds. */
+    fun consumeIfCurrent(
+        invoice: Invoice,
+        isCurrent: (RpcEndpointResolution) -> Boolean,
+    ): Boolean {
+        val attestation = attestations.remove(invoice.invoiceId) ?: return false
+        val matches = attestation.fingerprint == invoice.receiptPrintFingerprint() &&
+            elapsedRealtimeMillis() <= attestation.expiresAtElapsedRealtimeMillis &&
+            isCurrent(attestation.endpointResolution)
+        return matches
+    }
+
+    fun clear(invoiceId: String) {
+        attestations.remove(invoiceId)
+    }
+
+    private companion object {
+        const val DEFAULT_VALIDITY_MILLIS = 10_000L
+    }
+}
 
 internal sealed interface AutomaticPaymentEvidenceResult {
     data class Available(val invoice: Invoice?) : AutomaticPaymentEvidenceResult
@@ -156,6 +226,7 @@ class InvoiceRepository(
         lifecycleGate,
         rpcEndpointResolver = rpcEndpointResolver,
     )
+    private val freshPaymentEvidenceAttestations = FreshPaymentEvidenceAttestations()
 
     /** Serializes cashier profile changes with invoice publication and settlement mutations. */
     suspend fun selectPaymentProfile(profileId: String): TerminalConfigSnapshot =
@@ -462,6 +533,14 @@ class InvoiceRepository(
                 }
             }
             invoice = latest
+            if (observationPersisted && evidence != null && latest.matches(evidence)) {
+                // Auto-print observes this same durable snapshot next. Retain the exact endpoint
+                // generation so it need not queue a duplicate RPC validation behind auto-sweep.
+                freshPaymentEvidenceAttestations.record(
+                    latest,
+                    resolvedObservation.endpointResolution,
+                )
+            }
             // A concurrent monitor or lifecycle transition wins over a sample made from stale
             // state. Resume from its durable observation instead of regressing block/confirmation.
             previous = if (observationPersisted) observation else invoice.toPreviousObservation(request)
@@ -540,6 +619,14 @@ class InvoiceRepository(
         val invoice = invoiceDao.getById(invoiceId)
             ?: return@withContext AutomaticPaymentEvidenceResult.Available(null)
         if (!invoice.needsPaymentEvidenceValidation()) {
+            return@withContext AutomaticPaymentEvidenceResult.Available(invoice)
+        }
+        if (
+            freshPaymentEvidenceAttestations.consumeIfCurrent(
+                invoice,
+                rpcEndpointResolver::isCurrent,
+            )
+        ) {
             return@withContext AutomaticPaymentEvidenceResult.Available(invoice)
         }
         val attempt = try {
@@ -665,13 +752,15 @@ class InvoiceRepository(
     ): Boolean =
         withContext(Dispatchers.IO) {
             lifecycleGate.withExclusiveMutation {
-                invoiceDao.markReceiptPrinted(
+                val marked = invoiceDao.markReceiptPrinted(
                     invoiceId = invoiceId,
                     expectedPaymentTxHash = expectedPaymentTxHash,
                     expectedFundingCursorBlock = expectedFundingCursorBlock,
                     expectedFundingCursorHash = expectedFundingCursorHash,
                     printedAt = printedAt,
                 ) == 1
+                if (marked) freshPaymentEvidenceAttestations.clear(invoiceId)
+                marked
             }
         }
     suspend fun updateStatus(invoiceId: String, status: InvoiceStatus) =

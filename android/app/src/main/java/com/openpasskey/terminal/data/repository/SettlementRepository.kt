@@ -105,6 +105,19 @@ internal interface SettlementWalletAccess {
         operatorAddress: String,
         eip1559: Boolean,
     ): ByteArray
+
+    fun activateAndSignAutomaticSettlementTransaction(
+        transaction: RawTransaction,
+        chainId: Long,
+        vaultAddress: String,
+        operatorAddress: String,
+        eip1559: Boolean,
+        invoiceIds: List<String>,
+        expectedAmounts: List<BigInteger>,
+        tokenAddress: String,
+        maximumGasCost: BigInteger,
+        requiredBalance: BigInteger,
+    ): ByteArray = error("Unattended auto-sweep signing is unavailable")
 }
 
 private class StoredSettlementWalletAccess(
@@ -124,6 +137,30 @@ private class StoredSettlementWalletAccess(
         vaultAddress = vaultAddress,
         operatorAddress = operatorAddress,
         eip1559 = eip1559,
+    )
+
+    override fun activateAndSignAutomaticSettlementTransaction(
+        transaction: RawTransaction,
+        chainId: Long,
+        vaultAddress: String,
+        operatorAddress: String,
+        eip1559: Boolean,
+        invoiceIds: List<String>,
+        expectedAmounts: List<BigInteger>,
+        tokenAddress: String,
+        maximumGasCost: BigInteger,
+        requiredBalance: BigInteger,
+    ): ByteArray = walletStore.activateAndSignAutomaticSettlementTransaction(
+        transaction = transaction,
+        chainId = chainId,
+        vaultAddress = vaultAddress,
+        operatorAddress = operatorAddress,
+        eip1559 = eip1559,
+        invoiceIds = invoiceIds,
+        expectedAmounts = expectedAmounts,
+        tokenAddress = tokenAddress,
+        maximumGasCost = maximumGasCost,
+        requiredBalance = requiredBalance,
     )
 }
 
@@ -228,100 +265,147 @@ class SettlementRepository internal constructor(
                     authenticatedAtElapsedRealtimeMillis = authenticatedAtElapsedRealtimeMillis,
                     nowElapsedRealtimeMillis = elapsedRealtimeMillis(),
                 )
-
-                val raw = when (fresh.feeQuote.mode) {
-                    SettlementFeeMode.LEGACY -> RawTransaction.createTransaction(
-                        fresh.nonce,
-                        requireNotNull(fresh.feeQuote.gasPrice),
-                        fresh.gasLimit,
-                        fresh.vaultAddress,
-                        BigInteger.ZERO,
-                        fresh.callData,
-                    )
-                    SettlementFeeMode.EIP1559 -> RawTransaction.createTransaction(
-                        fresh.chainId,
-                        fresh.nonce,
-                        fresh.gasLimit,
-                        fresh.vaultAddress,
-                        BigInteger.ZERO,
-                        fresh.callData,
-                        requireNotNull(fresh.feeQuote.maxPriorityFeePerGas),
-                        requireNotNull(fresh.feeQuote.maxFeePerGas),
-                    )
-                }
-                val transaction = lifecycleGate.withExclusiveMutation {
-                    requireCurrentOperatorBinding(fresh.operatorAddress)
-                    val invoices = requireEligibleInvoices(fresh.invoiceIds)
-                    require(
-                        invoices.map(Invoice::settlementObservedAmount) ==
-                            fresh.confirmedObservedAmounts,
-                    ) { "Confirmed invoice observations changed immediately before signing" }
-                    // DB/lifecycle checks above may cross the proof boundary. Recheck every proof
-                    // clock at the final key-use boundary, not only device authentication.
-                    requireFreshAuthenticatedPreparedSettlement(
-                        prepared = fresh,
-                        authenticatedAtElapsedRealtimeMillis = authenticatedAtElapsedRealtimeMillis,
-                        nowElapsedRealtimeMillis = elapsedRealtimeMillis(),
-                    )
-                    requireCurrentRpcEndpointGeneration(fresh)
-                    // Activate only the exact historical target just revalidated above, then use
-                    // the constrained signer in the same local mutation critical section.
-                    val signedBytes = walletAccess.activateAndSignSettlementTransaction(
-                        transaction = raw,
-                        chainId = fresh.chainId,
-                        vaultAddress = fresh.vaultAddress,
-                        operatorAddress = fresh.operatorAddress,
-                        eip1559 = fresh.feeQuote.mode == SettlementFeeMode.EIP1559,
-                    )
-                    val signedHex = Numeric.toHexString(signedBytes)
-                    signedBytes.fill(0)
-                    val localHash = Numeric.toHexString(
-                        Hash.sha3(Numeric.hexStringToByteArray(signedHex)),
-                    )
-                    val now = nowSeconds()
-                    val persisted = SettlementTransaction(
-                        id = UUID.randomUUID().toString(),
-                        chainId = fresh.chainId,
-                        networkName = fresh.networkName,
-                        rpcUrl = fresh.rpcUrl,
-                        vaultAddress = fresh.vaultAddress,
-                        tokenAddress = fresh.tokenAddress,
-                        tokenSymbol = fresh.tokenSymbol,
-                        operatorAddress = fresh.operatorAddress,
-                        invoiceIdsJson = gson.toJson(invoices.map(Invoice::invoiceId)),
-                        expectedAmountsJson = gson.toJson(invoices.map(Invoice::expectedAmount)),
-                        receiverAddressesJson = gson.toJson(invoices.map(Invoice::receiver)),
-                        requiredConfirmations = fresh.requiredConfirmations,
-                        callData = fresh.callData,
-                        nonce = fresh.nonce.toString(),
-                        gasLimit = fresh.gasLimit.toString(),
-                        feeMode = fresh.feeQuote.mode,
-                        gasPrice = fresh.feeQuote.gasPrice?.toString(),
-                        maxPriorityFeePerGas = fresh.feeQuote.maxPriorityFeePerGas?.toString(),
-                        maxFeePerGas = fresh.feeQuote.maxFeePerGas?.toString(),
-                        maxGasCostWei = fresh.maximumGasCost.toString(),
-                        feeReserveWei = fresh.safetyReserve.toString(),
-                        requiredBalanceWei = fresh.requiredBalance.toString(),
-                        txHash = localHash,
-                        signedRawTransaction = signedHex,
-                        status = SettlementTransactionStatus.SIGNED,
-                        createdAt = now,
-                        updatedAt = now,
-                    )
-                    database.withTransaction {
-                        settlementDao.insert(persisted)
-                        val attached = invoiceDao.attachSettlement(fresh.invoiceIds, persisted.id)
-                        check(attached == fresh.invoiceIds.size) {
-                            "One or more invoices became unavailable before signing was persisted"
-                        }
-                    }
-                    persisted
-                }
-                // The post-authentication path performs exactly one side-effecting RPC and
-                // returns. Receipt/finality polling belongs to scheduled or explicit recovery.
-                broadcastSignedTransaction(transaction.id)
+                signPersistAndBroadcast(
+                    fresh = fresh,
+                    authenticatedAtElapsedRealtimeMillis = authenticatedAtElapsedRealtimeMillis,
+                    automatic = false,
+                )
             }
         }
+    }
+
+    /**
+     * Full unattended path used only after one-time administrator enrollment. It repeats every
+     * live canonical/configuration/fee check, persists SIGNED bytes before the sole broadcast,
+     * and never weakens the separate manual authentication path above.
+     */
+    suspend fun submitAutomatically(reviewed: PreparedSettlement): SettlementTransaction =
+        withContext(Dispatchers.IO) {
+            rpcWorkCoordinator.withInteractiveOperation {
+                submissionMutex.withLock {
+                    requireCurrentRpcEndpointGeneration(reviewed)
+                    requireNoActiveOperatorTransaction(reviewed)
+                    val revalidated = prepareInternal(
+                        invoiceIds = reviewed.invoiceIds,
+                        reusableHistoricalProof = reviewed,
+                        reusableGasEstimate = reviewed,
+                    )
+                    requireSameReviewedSettlement(reviewed, revalidated)
+                    require(
+                        !SettlementFeePolicy.exceedsConfirmedCost(
+                            reviewed.requiredBalance,
+                            revalidated.requiredBalance,
+                        ),
+                    ) { "Automatic settlement fee increased by more than 20%; retrying later" }
+                    requireNoActiveOperatorTransaction(revalidated)
+                    val fresh = requirePreparedBalancesStillExact(revalidated)
+                    signPersistAndBroadcast(
+                        fresh = fresh,
+                        authenticatedAtElapsedRealtimeMillis = null,
+                        automatic = true,
+                    )
+                }
+            }
+        }
+
+    private suspend fun signPersistAndBroadcast(
+        fresh: PreparedSettlement,
+        authenticatedAtElapsedRealtimeMillis: Long?,
+        automatic: Boolean,
+    ): SettlementTransaction {
+        val raw = when (fresh.feeQuote.mode) {
+            SettlementFeeMode.LEGACY -> RawTransaction.createTransaction(
+                fresh.nonce,
+                requireNotNull(fresh.feeQuote.gasPrice),
+                fresh.gasLimit,
+                fresh.vaultAddress,
+                BigInteger.ZERO,
+                fresh.callData,
+            )
+            SettlementFeeMode.EIP1559 -> RawTransaction.createTransaction(
+                fresh.chainId,
+                fresh.nonce,
+                fresh.gasLimit,
+                fresh.vaultAddress,
+                BigInteger.ZERO,
+                fresh.callData,
+                requireNotNull(fresh.feeQuote.maxPriorityFeePerGas),
+                requireNotNull(fresh.feeQuote.maxFeePerGas),
+            )
+        }
+        val transaction = lifecycleGate.withExclusiveMutation {
+            requireCurrentOperatorBinding(fresh.operatorAddress)
+            val invoices = requireEligibleInvoices(fresh.invoiceIds)
+            require(invoices.map(Invoice::settlementObservedAmount) == fresh.confirmedObservedAmounts) {
+                "Confirmed invoice observations changed immediately before signing"
+            }
+            if (!automatic) {
+                requireFreshAuthenticatedPreparedSettlement(
+                    prepared = fresh,
+                    authenticatedAtElapsedRealtimeMillis = requireNotNull(
+                        authenticatedAtElapsedRealtimeMillis,
+                    ),
+                    nowElapsedRealtimeMillis = elapsedRealtimeMillis(),
+                )
+            } else {
+                requireFreshPreparedSettlementProof(fresh, elapsedRealtimeMillis())
+            }
+            requireCurrentRpcEndpointGeneration(fresh)
+            val expectedAmounts = invoices.map { BigInteger(it.expectedAmount) }
+            val signedBytes = if (automatic) {
+                walletAccess.activateAndSignAutomaticSettlementTransaction(
+                    transaction = raw,
+                    chainId = fresh.chainId,
+                    vaultAddress = fresh.vaultAddress,
+                    operatorAddress = fresh.operatorAddress,
+                    eip1559 = fresh.feeQuote.mode == SettlementFeeMode.EIP1559,
+                    invoiceIds = invoices.map(Invoice::invoiceId),
+                    expectedAmounts = expectedAmounts,
+                    tokenAddress = fresh.tokenAddress,
+                    maximumGasCost = fresh.maximumGasCost,
+                    requiredBalance = fresh.requiredBalance,
+                )
+            } else {
+                walletAccess.activateAndSignSettlementTransaction(
+                    transaction = raw,
+                    chainId = fresh.chainId,
+                    vaultAddress = fresh.vaultAddress,
+                    operatorAddress = fresh.operatorAddress,
+                    eip1559 = fresh.feeQuote.mode == SettlementFeeMode.EIP1559,
+                )
+            }
+            val signedHex = Numeric.toHexString(signedBytes)
+            signedBytes.fill(0)
+            val localHash = Numeric.toHexString(Hash.sha3(Numeric.hexStringToByteArray(signedHex)))
+            val now = nowSeconds()
+            val persisted = SettlementTransaction(
+                id = UUID.randomUUID().toString(), chainId = fresh.chainId,
+                networkName = fresh.networkName, rpcUrl = fresh.rpcUrl,
+                vaultAddress = fresh.vaultAddress, tokenAddress = fresh.tokenAddress,
+                tokenSymbol = fresh.tokenSymbol, operatorAddress = fresh.operatorAddress,
+                invoiceIdsJson = gson.toJson(invoices.map(Invoice::invoiceId)),
+                expectedAmountsJson = gson.toJson(invoices.map(Invoice::expectedAmount)),
+                receiverAddressesJson = gson.toJson(invoices.map(Invoice::receiver)),
+                requiredConfirmations = fresh.requiredConfirmations, callData = fresh.callData,
+                nonce = fresh.nonce.toString(), gasLimit = fresh.gasLimit.toString(),
+                feeMode = fresh.feeQuote.mode, gasPrice = fresh.feeQuote.gasPrice?.toString(),
+                maxPriorityFeePerGas = fresh.feeQuote.maxPriorityFeePerGas?.toString(),
+                maxFeePerGas = fresh.feeQuote.maxFeePerGas?.toString(),
+                maxGasCostWei = fresh.maximumGasCost.toString(),
+                feeReserveWei = fresh.safetyReserve.toString(),
+                requiredBalanceWei = fresh.requiredBalance.toString(), txHash = localHash,
+                signedRawTransaction = signedHex, status = SettlementTransactionStatus.SIGNED,
+                createdAt = now, updatedAt = now,
+            )
+            database.withTransaction {
+                settlementDao.insert(persisted)
+                check(invoiceDao.attachSettlement(fresh.invoiceIds, persisted.id) == fresh.invoiceIds.size) {
+                    "One or more invoices became unavailable before signing was persisted"
+                }
+            }
+            persisted
+        }
+        return broadcastSignedTransaction(transaction.id)
     }
 
     suspend fun recoverPending() = withContext(Dispatchers.IO) {

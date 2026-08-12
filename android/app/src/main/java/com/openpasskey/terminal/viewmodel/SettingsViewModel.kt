@@ -35,6 +35,7 @@ import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
 import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
 import com.openpasskey.terminal.wallet.OperatorWalletStore
+import com.openpasskey.terminal.wallet.UnattendedAutoSweepScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -289,6 +290,42 @@ internal fun requireAdminAuthorizationEpoch(
         ?: throw IllegalStateException("Unlock Admin/setup before $action.")
 }
 
+/** One grant covers every token only when all configured profiles share one exact target. */
+internal fun requiredUnattendedAutoSweepScopes(
+    config: TerminalConfigSnapshot,
+    wallet: OperatorWalletSnapshot,
+): Set<UnattendedAutoSweepScope> {
+    check(config.provisioned && config.hasCompleteProvisioning()) {
+        "Provision the terminal before enabling auto-sweep."
+    }
+    val operator = requireNotNull(wallet.address) { "Create the terminal operator wallet first." }
+    check(config.provisionedOperatorAddress?.equals(operator, true) == true) {
+        "The provisioned operator does not match this terminal wallet."
+    }
+    val scopes = config.resolvedPaymentProfiles().mapTo(linkedSetOf()) { profile ->
+        UnattendedAutoSweepScope(profile.chainId, profile.vaultAddress, operator).canonical()
+    }
+    check(scopes.size == 1) {
+        "Unattended auto-sweep supports one chain and vault at a time. Remove other vault/network " +
+            "profiles or settle them manually."
+    }
+    return scopes
+}
+
+internal fun autoSweepRequiresSecurityUpgradeEnrollment(
+    storedEnabled: Boolean,
+    exactGrantReady: Boolean,
+): Boolean = storedEnabled && !exactGrantReady
+
+/** Revocation always commits before a security-sensitive configuration write can begin. */
+internal fun commitAfterAutoSweepRevocation(
+    disableAndRevoke: () -> Boolean,
+    commitConfiguration: () -> Boolean,
+): Boolean {
+    check(disableAndRevoke()) { "Unable to revoke unattended auto-sweep before configuration changed" }
+    return commitConfiguration()
+}
+
 class SettingsViewModel(
     private val chainConfig: ChainConfig,
     private val walletStore: OperatorWalletStore,
@@ -312,6 +349,7 @@ class SettingsViewModel(
     private var rpcEndpointMutationGeneration = 0L
     private var rpcEndpointMutationChainId: Long? = null
     private var walletCreationAuthorizationEpoch: Long? = null
+    private var autoSweepEnrollmentAuthorizationEpoch: Long? = null
     private var validatedConfiguration: TerminalConfigSnapshot? = null
     private val refreshCompletionCallbacks = ReadinessRefreshCallbacks()
     private val readinessRpcScheduler = ReadinessRpcScheduler(rpcWorkCoordinator)
@@ -320,11 +358,43 @@ class SettingsViewModel(
         chainConfig.snapshot()
         chainConfig.pendingMigrationNotice()?.let(::chainConfigMigrationNoticeMessage)
     }
-    private val _state = MutableStateFlow(load())
+    private val autoSweepEnrollmentRequiredAfterUpgrade = reconcileAutoSweepEnrollment()
+    private val _state = MutableStateFlow(
+        load(
+            message = if (autoSweepEnrollmentRequiredAfterUpgrade) {
+                "Auto-sweep was turned off after the security upgrade. Unlock Admin/setup and " +
+                    "enable it again to approve unattended settlement once."
+            } else null,
+        ),
+    )
     val state: StateFlow<SettingsState> = _state.asStateFlow()
 
     init {
         refreshOperatorStatusAutomatically()
+    }
+
+    private fun reconcileAutoSweepEnrollment(): Boolean {
+        if (!chainConfig.autoSweepEnabled()) {
+            if (walletStore.unattendedAutoSweepGrant().ready) {
+                runCatching { walletStore.revokeUnattendedAutoSweepGrant() }
+            }
+            return false
+        }
+        val scopes = runCatching {
+            requiredUnattendedAutoSweepScopes(chainConfig.snapshot(), walletStore.snapshot())
+        }.getOrNull()
+        val exactGrantReady = scopes != null && walletStore.hasUnattendedAutoSweepGrant(scopes)
+        if (!autoSweepRequiresSecurityUpgradeEnrollment(true, exactGrantReady)) return false
+        chainConfig.updateAutoSweepEnabled(false)
+        runCatching { walletStore.revokeUnattendedAutoSweepGrant() }
+        return true
+    }
+
+    /** Must run under the terminal lifecycle mutation gate for configuration trust changes. */
+    private fun disableAndRevokeUnattendedAutoSweep(): Boolean {
+        val disabled = chainConfig.updateAutoSweepEnabled(false)
+        walletStore.revokeUnattendedAutoSweepGrant()
+        return disabled
     }
 
     fun acknowledgeMigrationNotice() {
@@ -495,6 +565,7 @@ class SettingsViewModel(
 
     fun authenticationFailed(message: String) {
         walletCreationAuthorizationEpoch = null
+        autoSweepEnrollmentAuthorizationEpoch = null
         _state.value = _state.value.copy(message = "Authentication failed: $message", isError = true)
     }
 
@@ -576,6 +647,7 @@ class SettingsViewModel(
     fun lockAdmin() {
         val wasUnlocked = adminSession.lock()
         walletCreationAuthorizationEpoch = null
+        autoSweepEnrollmentAuthorizationEpoch = null
         val cancelledProvisioning = provisioningJob?.isActive == true
         val cancelledRpcEndpointMutation = rpcEndpointMutationJob?.isActive == true
         if (cancelledProvisioning) {
@@ -666,7 +738,12 @@ class SettingsViewModel(
             try {
                 val result = runUserRpcMutation(rpcWorkCoordinator) {
                     provisioner.provision(rawPayload, walletStore.snapshot()) { commit ->
-                        adminSession.withAuthorization(authorizationEpoch, commit)
+                        adminSession.withAuthorization(authorizationEpoch) {
+                            commitAfterAutoSweepRevocation(
+                                ::disableAndRevokeUnattendedAutoSweep,
+                                commit,
+                            )
+                        }
                     }
                 }
                 adminSession.lock()
@@ -807,7 +884,102 @@ class SettingsViewModel(
         }
     }
 
+    /** Captures admin authority before the UI presents the one-time OS authentication prompt. */
+    fun prepareAutoSweepEnrollment(): Boolean = try {
+        check(!chainConfig.autoSweepEnabled()) { "Auto-sweep is already enabled." }
+        check(!(_state.value.savingAutoSweepPreference || autoSweepPreferenceJob?.isActive == true)) {
+            "An auto-sweep setting change is already in progress."
+        }
+        val authorizationEpoch = requireNotNull(
+            requireAdminAuthorizationEpoch(
+                adminPinStore.snapshot().configured,
+                adminSession,
+                "enabling unattended auto-sweep",
+            ),
+        )
+        val scopes = requiredUnattendedAutoSweepScopes(
+            chainConfig.snapshot(),
+            walletStore.snapshot(),
+        )
+        check(_state.value.configurationValidated && _state.value.settlementTargetVerified) {
+            "Refresh terminal status and verify the configured vault before enabling auto-sweep."
+        }
+        check(scopes.isNotEmpty())
+        autoSweepEnrollmentAuthorizationEpoch = authorizationEpoch
+        _state.value = _state.value.copy(
+            message = "Authenticate once to allow bounded unattended settlement while the device is unlocked.",
+            isError = false,
+        )
+        true
+    } catch (error: Exception) {
+        autoSweepEnrollmentAuthorizationEpoch = null
+        _state.value = _state.value.copy(
+            message = error.message ?: "Unable to prepare auto-sweep enrollment",
+            isError = true,
+        )
+        false
+    }
+
+    /** Called only from the successful OS-authentication callback. */
+    fun enableAutoSweepAuthenticated() {
+        val authorizationEpoch = autoSweepEnrollmentAuthorizationEpoch ?: return
+        if (autoSweepPreferenceJob?.isActive == true) return
+        val previousSetupStatus = _state.value.setupStatus
+        _state.value = _state.value.copy(
+            savingAutoSweepPreference = true,
+            message = null,
+            isError = false,
+        )
+        autoSweepPreferenceJob = viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    lifecycleGate.withExclusiveMutation {
+                        adminSession.withAuthorization(authorizationEpoch) {
+                            val scopes = requiredUnattendedAutoSweepScopes(
+                                chainConfig.snapshot(),
+                                walletStore.snapshot(),
+                            )
+                            walletStore.enrollUnattendedAutoSweep(scopes)
+                            if (!chainConfig.updateAutoSweepEnabled(true)) {
+                                walletStore.revokeUnattendedAutoSweepGrant()
+                                error("Unable to save auto-sweep preference")
+                            }
+                        }
+                    }
+                }
+                autoSweepEnrollmentAuthorizationEpoch = null
+                adminSession.lock()
+                _state.value = load(
+                    message = "Auto-sweep enabled. Canonically confirmed payments will be " +
+                        "revalidated, signed, and broadcast automatically without a per-payment prompt.",
+                    setupStatusOverride = previousSetupStatus,
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                autoSweepEnrollmentAuthorizationEpoch = null
+                runCatching { chainConfig.updateAutoSweepEnabled(false) }
+                runCatching { walletStore.revokeUnattendedAutoSweepGrant() }
+                _state.value = load(
+                    message = error.message ?: "Unable to enable unattended auto-sweep",
+                    isError = true,
+                    setupStatusOverride = previousSetupStatus,
+                )
+            } finally {
+                autoSweepPreferenceJob = null
+                _state.value = _state.value.copy(savingAutoSweepPreference = false)
+            }
+        }
+    }
+
     fun updateAutoSweepEnabled(enabled: Boolean) {
+        if (enabled) {
+            _state.value = _state.value.copy(
+                message = "Use the one-time authenticated auto-sweep enrollment.",
+                isError = true,
+            )
+            return
+        }
         if (_state.value.savingAutoSweepPreference || autoSweepPreferenceJob?.isActive == true) {
             return
         }
@@ -859,19 +1031,16 @@ class SettingsViewModel(
                         commitWithAuthorization = { commit ->
                             adminSession.withAuthorization(authorizationEpoch, commit)
                         },
-                        update = { chainConfig.updateAutoSweepEnabled(enabled) },
+                        update = {
+                            val disabled = chainConfig.updateAutoSweepEnabled(false)
+                            if (disabled) walletStore.revokeUnattendedAutoSweepGrant()
+                            disabled
+                        },
                     )
                 }
                 adminSession.lock()
                 _state.value = load(
-                    message = if (enabled) {
-                        "Auto-sweep enabled. Newly issued invoices with their own incoming " +
-                            "transaction evidence will open the review and device-authenticated " +
-                            "settlement flow after canonical confirmation. Late payments remain " +
-                            "manual."
-                    } else {
-                        "Auto-sweep disabled. Ready payments remain available on the Settle screen."
-                    },
+                    message = "Auto-sweep disabled. Ready payments remain available on the Settle screen.",
                     setupStatusOverride = previousSetupStatus,
                 )
             } catch (error: CancellationException) {
@@ -940,7 +1109,12 @@ class SettingsViewModel(
                         validateCandidate = rpcEndpointStore::validateCandidate,
                         verify = rpcEndpointVerifier::verify,
                         commitWithAuthorization = { commit ->
-                            adminSession.withAuthorization(authorizationEpoch, commit)
+                            adminSession.withAuthorization(authorizationEpoch) {
+                                commitAfterAutoSweepRevocation(
+                                    ::disableAndRevokeUnattendedAutoSweep,
+                                    commit,
+                                )
+                            }
                         },
                         update = rpcEndpointStore::setOverride,
                     )
@@ -1022,7 +1196,12 @@ class SettingsViewModel(
                         lifecycleGate = lifecycleGate,
                         chainId = chainId,
                         commitWithAuthorization = { commit ->
-                            adminSession.withAuthorization(authorizationEpoch, commit)
+                            adminSession.withAuthorization(authorizationEpoch) {
+                                commitAfterAutoSweepRevocation(
+                                    ::disableAndRevokeUnattendedAutoSweep,
+                                    commit,
+                                )
+                            }
                         },
                         clear = rpcEndpointStore::clearOverride,
                     )
@@ -1069,11 +1248,13 @@ class SettingsViewModel(
 
     /** Synchronizes the Settings toggle after the settlement safety ledger reaches capacity. */
     fun autoSweepDisabledBySafetyCapacity() {
+        runCatching { chainConfig.updateAutoSweepEnabled(false) }
+        runCatching { walletStore.revokeUnattendedAutoSweepGrant() }
         _state.value = _state.value.copy(
             autoSweepEnabled = false,
             savingAutoSweepPreference = false,
-            message = "Auto-sweep was turned off because its dismissal history is full. " +
-                "Explicitly re-enable it to start a new review session.",
+            message = "Auto-sweep was turned off by a safety limit. Explicitly re-enable and " +
+                "authenticate once to create a new unattended grant.",
             isError = true,
         )
     }
@@ -1138,7 +1319,12 @@ class SettingsViewModel(
                         chainId = chainId,
                         confirmationBlocks = confirmationBlocks,
                         commitWithAuthorization = { commit ->
-                            adminSession.withAuthorization(authorizationEpoch, commit)
+                            adminSession.withAuthorization(authorizationEpoch) {
+                                commitAfterAutoSweepRevocation(
+                                    ::disableAndRevokeUnattendedAutoSweep,
+                                    commit,
+                                )
+                            }
                         },
                         update = chainConfig::updateNetworkConfirmationBlocks,
                     )
@@ -1208,7 +1394,12 @@ class SettingsViewModel(
                         lifecycleGate = lifecycleGate,
                         profileId = profileId,
                         commitWithAuthorization = { commit ->
-                            adminSession.withAuthorization(authorizationEpoch, commit)
+                            adminSession.withAuthorization(authorizationEpoch) {
+                                commitAfterAutoSweepRevocation(
+                                    ::disableAndRevokeUnattendedAutoSweep,
+                                    commit,
+                                )
+                            }
                         },
                         removeProfile = chainConfig::removeProfile,
                     )

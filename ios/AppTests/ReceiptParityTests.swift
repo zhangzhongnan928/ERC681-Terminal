@@ -100,30 +100,17 @@ final class ReceiptParityTests: XCTestCase {
         XCTAssertEqual(
             sydney,
             """
-            ================================
                        Blue Brew
                    ABN 51 824 753 556
-            ================================
-
                     PAYMENT RECEIPT
-
-            Date (UTC): 01 Jan 2025  00:00
-            Receipt:  #42
-
-            --------------------------------
+            Date (UTC):   01 Jan 2025  00:00
+            Receipt:                     #42
             TOTAL                  10.50 AUD
-            --------------------------------
-
             Paid: 10.50 AUD (Base)
             Terminal: 0x11111...11111
             Tx Hash:  0xaaaaa...aaaaa
-
-            ================================
-                     Powered by OPK
-            ================================
-
+                 Powered by OpenPasskey
               Scan for transaction details
-            https://sepolia.basescan.org/tx/0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
             """
         )

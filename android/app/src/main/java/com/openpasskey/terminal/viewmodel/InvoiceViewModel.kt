@@ -75,6 +75,7 @@ class InvoiceViewModel(
     private val automaticPrintMutex = Mutex()
 
     private var monitorJob: Job? = null
+    private var promptAutoPrintRetryJob: Job? = null
 
     init {
         refreshConfiguration()
@@ -340,7 +341,10 @@ class InvoiceViewModel(
                 }
                 is ReceiptRequestResult.Unavailable -> {
                     if (result.retryAutomatically) {
-                        scheduleAutomaticReceiptRetry(fingerprint)
+                        scheduleAutomaticReceiptRetry(
+                            fingerprint = fingerprint,
+                            promptly = result.retryPromptly,
+                        )
                     } else {
                         autoPrintRetryStates.remove(fingerprint)
                         unsupportedAutoPrintFingerprints += fingerprint
@@ -385,7 +389,11 @@ class InvoiceViewModel(
         result: ReceiptRequestResult,
         automatic: Boolean,
     ) {
-        if (automatic && result == ReceiptRequestResult.AlreadyPrinted) {
+        if (
+            automatic &&
+            (result == ReceiptRequestResult.AlreadyPrinted ||
+                result is ReceiptRequestResult.Unavailable && result.retryPromptly)
+        ) {
             val current = _receiptState.value
             if (current.printingInvoiceId == invoiceId) {
                 _receiptState.value = current.copy(printingInvoiceId = null)
@@ -409,14 +417,34 @@ class InvoiceViewModel(
         )
     }
 
-    private fun scheduleAutomaticReceiptRetry(fingerprint: String) {
-        autoPrintRetryStates[fingerprint] = nextAutoReceiptRetryState(
-            previous = autoPrintRetryStates[fingerprint],
-            nowElapsedRealtimeMillis = SystemClock.elapsedRealtime(),
-            baseDelayMillis = AUTO_PRINT_RETRY_MILLIS,
-            maximumDelayMillis = MAX_AUTO_PRINT_RETRY_MILLIS,
-            maximumBackoffSteps = MAX_AUTO_PRINT_BACKOFF_STEPS,
-        )
+    private fun scheduleAutomaticReceiptRetry(
+        fingerprint: String,
+        promptly: Boolean = false,
+    ) {
+        val now = SystemClock.elapsedRealtime()
+        autoPrintRetryStates[fingerprint] = if (promptly) {
+            promptAutoReceiptRetryState(
+                nowElapsedRealtimeMillis = now,
+                retryDelayMillis = PROMPT_AUTO_PRINT_RETRY_MILLIS,
+            )
+        } else {
+            nextAutoReceiptRetryState(
+                previous = autoPrintRetryStates[fingerprint],
+                nowElapsedRealtimeMillis = now,
+                baseDelayMillis = AUTO_PRINT_RETRY_MILLIS,
+                maximumDelayMillis = MAX_AUTO_PRINT_RETRY_MILLIS,
+                maximumBackoffSteps = MAX_AUTO_PRINT_BACKOFF_STEPS,
+            )
+        }
+        if (promptly) {
+            // A settlement/authentication reservation can end at any moment. Do not wait for the
+            // 30-second printer-recovery cadence when no physical print was submitted.
+            promptAutoPrintRetryJob?.cancel()
+            promptAutoPrintRetryJob = viewModelScope.launch {
+                delay(PROMPT_AUTO_PRINT_RETRY_MILLIS)
+                attemptNextAutomaticReceipt()
+            }
+        }
     }
 
     private fun currentAutoPrintSuppressions(): Set<String> =
@@ -428,6 +456,7 @@ class InvoiceViewModel(
 
     override fun onCleared() {
         stopPaymentMonitoring()
+        promptAutoPrintRetryJob?.cancel()
         super.onCleared()
     }
 
@@ -444,6 +473,7 @@ class InvoiceViewModel(
     private companion object {
         const val RECOVERY_INTERVAL_MILLIS = 60_000L
         const val RECOVERY_STAGGER_MILLIS = 30_000L
+        const val PROMPT_AUTO_PRINT_RETRY_MILLIS = 1_000L
         const val AUTO_PRINT_RETRY_MILLIS = 30_000L
         const val MAX_AUTO_PRINT_RETRY_MILLIS = 30 * 60_000L
         const val MAX_AUTO_PRINT_BACKOFF_STEPS = 7
@@ -454,6 +484,21 @@ internal data class AutoReceiptRetryState(
     val failureCount: Int,
     val retryAfterElapsedRealtimeMillis: Long,
 )
+
+internal fun promptAutoReceiptRetryState(
+    nowElapsedRealtimeMillis: Long,
+    retryDelayMillis: Long,
+): AutoReceiptRetryState {
+    require(nowElapsedRealtimeMillis >= 0)
+    require(retryDelayMillis > 0)
+    return AutoReceiptRetryState(
+        failureCount = 0,
+        retryAfterElapsedRealtimeMillis = Math.addExact(
+            nowElapsedRealtimeMillis,
+            retryDelayMillis,
+        ),
+    )
+}
 
 internal fun selectAutomaticReceiptCandidate(
     pending: List<Invoice>,

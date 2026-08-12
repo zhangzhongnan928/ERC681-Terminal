@@ -10,6 +10,17 @@ import org.junit.Test
 
 class AutoReceiptQueuePolicyTest {
     @Test
+    fun `cooperative rpc deferral uses a prompt non escalating retry`() {
+        val retry = promptAutoReceiptRetryState(
+            nowElapsedRealtimeMillis = 10_000,
+            retryDelayMillis = 1_000,
+        )
+
+        assertEquals(0, retry.failureCount)
+        assertEquals(11_000L, retry.retryAfterElapsedRealtimeMillis)
+    }
+
+    @Test
     fun `queued duplicate is rejected after serialized attempt becomes ambiguous`() {
         val invoice = invoice("old")
         val fingerprint = invoice.autoReceiptFingerprint()

@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -39,6 +40,66 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 class InvoiceRepositoryMonitorIntegrationTest {
+    @Test
+    fun `fresh monitor evidence prints without duplicate rpc behind settlement reservation`() =
+        runBlocking {
+            rpcServer { requestBody ->
+                successfulObservationResponse(requestBody, remoteChainId = CHAIN_ID)
+            }.use { server ->
+                val resolverCalls = AtomicInteger()
+                val coordinator = RpcWorkCoordinator()
+                val paymentHash = "0x${"44".repeat(32)}"
+                val fixture = repositoryFixture(
+                    initial = invoice(server.url).copy(
+                        publishedAtBlock = BLOCK_NUMBER - 1,
+                        publishedAtBlockHash = "0x${"33".repeat(32)}",
+                        confirmationBlocks = 1,
+                        receiptNumber = 1,
+                        receiptAutoPrintEligible = true,
+                    ),
+                    paymentResolver = PaymentTransactionResolver { _, _ ->
+                        resolverCalls.incrementAndGet()
+                        PaymentTransactionEvidence(
+                            txHash = paymentHash,
+                            payerAddress = "0x${"55".repeat(20)}",
+                            blockNumber = BLOCK_NUMBER,
+                            blockHash = BLOCK_HASH,
+                            blockTimestamp = 1_704_067_200,
+                        )
+                    },
+                    rpcWorkCoordinator = coordinator,
+                )
+
+                val paid = fixture.repository.observePayment(INVOICE_ID)
+                    .drop(1)
+                    .first { it.status == InvoiceStatus.PAID }
+                assertEquals(1, resolverCalls.get())
+
+                val reservation = coordinator.reserveInteractiveWindow()
+                try {
+                    val result = fixture.repository.ensurePaymentEvidenceAutomatically(INVOICE_ID)
+
+                    val available = result as AutomaticPaymentEvidenceResult.Available
+                    assertEquals(paid, available.invoice)
+                    assertEquals(1, resolverCalls.get())
+                } finally {
+                    reservation.close()
+                }
+
+                // The short-lived proof is consume-once. A later request follows the ordinary
+                // cooperative path and does not trust process-local state indefinitely.
+                val reservationAgain = coordinator.reserveInteractiveWindow()
+                try {
+                    assertSame(
+                        AutomaticPaymentEvidenceResult.Deferred,
+                        fixture.repository.ensurePaymentEvidenceAutomatically(INVOICE_ID),
+                    )
+                } finally {
+                    reservationAgain.close()
+                }
+            }
+        }
+
     @Test
     fun `funding observation persists incoming payment evidence with its confirmation cursor`() =
         runBlocking {

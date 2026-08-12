@@ -332,6 +332,7 @@ class ReceiptCoordinatorTest {
             ReceiptRequestResult.Unavailable(
                 message = "Payment transaction details will be retried in the background.",
                 retryAutomatically = true,
+                retryPromptly = true,
             ),
             result,
         )

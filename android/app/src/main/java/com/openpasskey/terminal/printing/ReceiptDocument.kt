@@ -22,9 +22,7 @@ data class ReceiptDocument(
 internal data class ReceiptPrintContent(
     val merchantLines: List<String>,
     val merchantAbn: String?,
-    val date: String,
-    val receiptNumber: String,
-    val total: String,
+    val metadataLines: List<String>,
     val totalLines: List<String>,
     val paidLines: List<String>,
     val terminalLines: List<String>,
@@ -49,31 +47,16 @@ object ReceiptFormatter {
     fun format(document: ReceiptDocument, zoneId: ZoneId): String {
         val content = printContent(document)
         val lines = mutableListOf<String>()
-        lines += "=".repeat(RECEIPT_WIDTH)
         lines += content.merchantLines.map { it.centered() }
         content.merchantAbn?.let { lines += "ABN $it".centered() }
-        lines += "=".repeat(RECEIPT_WIDTH)
-        lines += ""
         lines += "PAYMENT RECEIPT".centered()
-        lines += ""
-        lines += "Date (UTC): ${content.date}"
-        lines += "Receipt:  #${content.receiptNumber}"
-        lines += ""
-        lines += "-".repeat(RECEIPT_WIDTH)
+        lines += content.metadataLines
         lines += content.totalLines
-        lines += "-".repeat(RECEIPT_WIDTH)
-        lines += ""
         lines += content.paidLines
         lines += content.terminalLines
         lines += content.transactionLines
-        lines += ""
-        lines += "=".repeat(RECEIPT_WIDTH)
-        lines += "Powered by OPK".centered()
-        lines += "=".repeat(RECEIPT_WIDTH)
-        lines += ""
+        lines += "Powered by OpenPasskey".centered()
         lines += "Scan for transaction details".centered()
-        // Keep the URL intact. It is intentionally the one receipt line that may exceed 32 columns.
-        lines += content.explorerUrl
 
         return lines.joinToString(separator = "\n", postfix = "\n")
     }
@@ -96,9 +79,8 @@ object ReceiptFormatter {
             merchantAbn = document.merchantAbn
                 ?.toSingleLine()
                 ?.takeIf(String::isNotBlank),
-            date = date,
-            receiptNumber = document.receiptNumber.toString(),
-            total = total,
+            metadataLines = twoColumns("Date (UTC):", date) +
+                twoColumns("Receipt:", "#${document.receiptNumber}"),
             totalLines = twoColumns("TOTAL", total),
             paidLines = paid.fittedLines(),
             terminalLines = "Terminal: ${abbreviate(document.terminalAddress)}".fittedLines(),
