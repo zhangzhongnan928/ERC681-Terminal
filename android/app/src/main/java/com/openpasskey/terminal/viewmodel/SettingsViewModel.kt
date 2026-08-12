@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.erc681.NetworkConfig
 import com.openpasskey.erc681.ReadOnlyRpcClient
+import com.openpasskey.erc681.RpcRateLimit
 import com.openpasskey.terminal.admin.AdminPinStore
 import com.openpasskey.terminal.admin.AdminPinVerification
 import com.openpasskey.terminal.chain.ChainConfig
@@ -22,6 +23,13 @@ import com.openpasskey.terminal.provisioning.minimumOperatorNativeReserveDisplay
 import com.openpasskey.terminal.provisioning.TerminalProvisioner
 import com.openpasskey.terminal.provisioning.TerminalProvisioningPayloadCodec
 import com.openpasskey.terminal.rpc.RpcWorkCoordinator
+import com.openpasskey.terminal.rpc.RpcEndpointOverrideState
+import com.openpasskey.terminal.rpc.RpcEndpointNotConfiguredException
+import com.openpasskey.terminal.rpc.RpcEndpointSource
+import com.openpasskey.terminal.rpc.RpcEndpointStorageException
+import com.openpasskey.terminal.rpc.RpcEndpointStore
+import com.openpasskey.terminal.rpc.RpcEndpointVerifier
+import com.openpasskey.terminal.rpc.safeReadRpcFailureMessage
 import com.openpasskey.terminal.lifecycle.TerminalResetCoordinator
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
@@ -34,6 +42,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import java.math.BigInteger
 
@@ -77,6 +86,26 @@ internal suspend fun <T> runUserRpcMutation(
     block: suspend () -> T,
 ): T = coordinator.withInteractiveOperation(block)
 
+/** Endpoint replacement must drain the one possible old-provider background read before commit. */
+internal suspend fun <T> runExclusiveRpcEndpointMutation(
+    coordinator: RpcWorkCoordinator,
+    block: suspend () -> T,
+): T = coordinator.withExclusiveInteractiveOperation(block)
+
+internal const val BASE_RPC_BUSY_MESSAGE =
+    "The selected Base RPC provider is busy. Wait a moment and try again. If this continues, " +
+        "review the configured endpoint credentials and provider quota."
+
+internal fun terminalRpcFailureMessage(error: Exception, fallback: String): String =
+    when (error) {
+        is RpcRateLimit -> BASE_RPC_BUSY_MESSAGE
+        is RpcEndpointNotConfiguredException -> requireNotNull(error.message)
+        else -> safeReadRpcFailureMessage(error, fallback)
+    }
+
+internal fun retryReadinessOnThrottle(priority: ReadinessRpcPriority): Boolean =
+    priority == ReadinessRpcPriority.INTERACTIVE
+
 internal fun shouldRestartActiveReadinessRefresh(
     trigger: ReadinessRefreshTrigger,
     refreshActive: Boolean,
@@ -111,6 +140,9 @@ data class SettingsState(
     val savingMerchantReceiptProfile: Boolean = false,
     val autoSweepEnabled: Boolean = false,
     val savingAutoSweepPreference: Boolean = false,
+    val rpcEndpointSettings: List<RpcEndpointSetting> = emptyList(),
+    val provisioningRpcEndpointAvailable: Boolean = false,
+    val savingRpcEndpointChainId: Long? = null,
     val networkName: String = "",
     val isTestnet: Boolean = false,
     val nativeCurrencySymbol: String = "native currency",
@@ -147,6 +179,22 @@ data class SettingsState(
     val message: String? = null,
     val migrationNotice: String? = null,
     val isError: Boolean = false,
+)
+
+enum class RpcEndpointOverrideStatus {
+    NOT_CONFIGURED,
+    READY,
+    UNAVAILABLE,
+}
+
+/** Redacted endpoint metadata safe for display. A credential-bearing URL never enters UI state. */
+data class RpcEndpointSetting(
+    val chainId: Long,
+    val networkName: String,
+    val isTestnet: Boolean,
+    val status: RpcEndpointOverrideStatus,
+    val providerLabel: String?,
+    val source: RpcEndpointSource,
 )
 
 internal data class MerchantReceiptProfileInputValidation(
@@ -249,6 +297,8 @@ class SettingsViewModel(
     private val resetCoordinator: TerminalResetCoordinator,
     private val lifecycleGate: TerminalLifecycleGate,
     private val rpcWorkCoordinator: RpcWorkCoordinator,
+    private val rpcEndpointStore: RpcEndpointStore,
+    private val rpcEndpointVerifier: RpcEndpointVerifier,
 ) : ViewModel() {
     private val adminSession = AdminSessionGate()
     private var refreshJob: Job? = null
@@ -258,6 +308,9 @@ class SettingsViewModel(
     private var provisioningGeneration = 0L
     private var merchantReceiptProfileJob: Job? = null
     private var autoSweepPreferenceJob: Job? = null
+    private var rpcEndpointMutationJob: Job? = null
+    private var rpcEndpointMutationGeneration = 0L
+    private var rpcEndpointMutationChainId: Long? = null
     private var walletCreationAuthorizationEpoch: Long? = null
     private var validatedConfiguration: TerminalConfigSnapshot? = null
     private val refreshCompletionCallbacks = ReadinessRefreshCallbacks()
@@ -297,6 +350,25 @@ class SettingsViewModel(
             .getOrNull()
             ?: MerchantReceiptProfile.DEFAULT
         val autoSweepEnabled = chainConfig.autoSweepEnabled()
+        val rpcEndpointSnapshots = KnownChainPolicy.enabledProfiles().associate { profile ->
+            profile.chainId to rpcEndpointStore.snapshot(profile.chainId)
+        }
+        val rpcEndpointSettings = KnownChainPolicy.enabledProfiles().map { profile ->
+            val endpoint = rpcEndpointSnapshots.getValue(profile.chainId)
+            RpcEndpointSetting(
+                chainId = profile.chainId,
+                networkName = profile.networkName,
+                isTestnet = profile.isTestnet,
+                status = when (endpoint.state) {
+                    RpcEndpointOverrideState.NOT_CONFIGURED ->
+                        RpcEndpointOverrideStatus.NOT_CONFIGURED
+                    RpcEndpointOverrideState.READY -> RpcEndpointOverrideStatus.READY
+                    RpcEndpointOverrideState.UNAVAILABLE -> RpcEndpointOverrideStatus.UNAVAILABLE
+                },
+                providerLabel = endpoint.providerLabel,
+                source = endpoint.source,
+            )
+        }
         val wallet = walletStore.snapshot()
         val admin = adminPinStore.snapshot()
         val pairing = wallet.address?.let {
@@ -323,6 +395,10 @@ class SettingsViewModel(
             savingMerchantReceiptProfile = merchantReceiptProfileJob?.isActive == true,
             autoSweepEnabled = autoSweepEnabled,
             savingAutoSweepPreference = autoSweepPreferenceJob?.isActive == true,
+            rpcEndpointSettings = rpcEndpointSettings,
+            provisioningRpcEndpointAvailable = rpcEndpointSnapshots.values.any { it.available },
+            savingRpcEndpointChainId = rpcEndpointMutationChainId
+                .takeIf { rpcEndpointMutationJob?.isActive == true },
             networkName = config.networkName,
             isTestnet = networkPolicy?.isTestnet ?: false,
             nativeCurrencySymbol = networkPolicy?.nativeCurrencySymbol ?: "native currency",
@@ -501,14 +577,27 @@ class SettingsViewModel(
         val wasUnlocked = adminSession.lock()
         walletCreationAuthorizationEpoch = null
         val cancelledProvisioning = provisioningJob?.isActive == true
+        val cancelledRpcEndpointMutation = rpcEndpointMutationJob?.isActive == true
         if (cancelledProvisioning) {
             provisioningGeneration += 1
             provisioningJob?.cancel()
             provisioningJob = null
         }
-        if (wasUnlocked || cancelledProvisioning) {
-            _state.value = if (cancelledProvisioning) {
-                load("Admin/setup controls locked; provisioning was cancelled.")
+        if (cancelledRpcEndpointMutation) {
+            rpcEndpointMutationGeneration += 1
+            rpcEndpointMutationJob?.cancel()
+            rpcEndpointMutationJob = null
+            rpcEndpointMutationChainId = null
+        }
+        if (wasUnlocked || cancelledProvisioning || cancelledRpcEndpointMutation) {
+            _state.value = if (cancelledProvisioning || cancelledRpcEndpointMutation) {
+                load(
+                    if (cancelledProvisioning) {
+                        "Admin/setup controls locked; provisioning was cancelled."
+                    } else {
+                        "Admin/setup controls locked; the RPC endpoint change was cancelled."
+                    },
+                )
             } else _state.value.copy(
                 adminUnlocked = false,
                 message = "Admin/setup controls locked.",
@@ -524,7 +613,10 @@ class SettingsViewModel(
             _state.value = current.copy(message = "Provisioning is already in progress.", isError = true)
             return
         }
-        if (merchantReceiptProfileJob?.isActive == true || autoSweepPreferenceJob?.isActive == true) {
+        if (merchantReceiptProfileJob?.isActive == true ||
+            autoSweepPreferenceJob?.isActive == true ||
+            rpcEndpointMutationJob?.isActive == true
+        ) {
             _state.value = current.copy(
                 message = "Wait for the current settings change to finish before provisioning.",
                 isError = true,
@@ -544,6 +636,24 @@ class SettingsViewModel(
             _state.value = current.copy(message = error.message, isError = true)
             return
         }
+        val provisioningPolicy = runCatching {
+            val payload = TerminalProvisioningPayloadCodec.parse(rawPayload)
+            KnownChainPolicy.requireProfile(payload.chainId)
+        }.getOrElse { error ->
+            _state.value = current.copy(
+                message = error.message ?: "Invalid terminal provisioning QR.",
+                isError = true,
+            )
+            return
+        }
+        val rpcPrerequisite = rpcEndpointProvisioningPrerequisiteMessage(
+            networkName = provisioningPolicy.networkName,
+            source = rpcEndpointStore.snapshot(provisioningPolicy.chainId).source,
+        )
+        if (rpcPrerequisite != null) {
+            _state.value = current.copy(message = rpcPrerequisite, isError = true)
+            return
+        }
         invalidateReadinessRefresh()
         _state.value = current.copy(
             setupStatus = TerminalSetupStatus.PROVISIONING,
@@ -554,11 +664,9 @@ class SettingsViewModel(
         val generation = ++provisioningGeneration
         provisioningJob = viewModelScope.launch {
             try {
-                val result = withContext(Dispatchers.IO) {
-                    runUserRpcMutation(rpcWorkCoordinator) {
-                        provisioner.provision(rawPayload, walletStore.snapshot()) { commit ->
-                            adminSession.withAuthorization(authorizationEpoch, commit)
-                        }
+                val result = runUserRpcMutation(rpcWorkCoordinator) {
+                    provisioner.provision(rawPayload, walletStore.snapshot()) { commit ->
+                        adminSession.withAuthorization(authorizationEpoch, commit)
                     }
                 }
                 adminSession.lock()
@@ -572,7 +680,7 @@ class SettingsViewModel(
                 throw error
             } catch (error: Exception) {
                 _state.value = load(
-                    error.message ?: "Provisioning failed",
+                    terminalRpcFailureMessage(error, "Provisioning failed"),
                     isError = true,
                     setupStatusOverride = previousSetupStatus,
                 )
@@ -626,6 +734,13 @@ class SettingsViewModel(
         if (autoSweepPreferenceJob?.isActive == true) {
             _state.value = _state.value.copy(
                 message = "Wait for the auto-sweep setting to finish saving.",
+                isError = true,
+            )
+            return
+        }
+        if (rpcEndpointMutationJob?.isActive == true) {
+            _state.value = _state.value.copy(
+                message = "Wait for the RPC endpoint change to finish.",
                 isError = true,
             )
             return
@@ -710,6 +825,13 @@ class SettingsViewModel(
             )
             return
         }
+        if (rpcEndpointMutationJob?.isActive == true) {
+            _state.value = _state.value.copy(
+                message = "Wait for the RPC endpoint change to finish.",
+                isError = true,
+            )
+            return
+        }
         if (enabled == chainConfig.autoSweepEnabled()) return
         val authorizationEpoch = runCatching {
             requireNotNull(
@@ -767,6 +889,184 @@ class SettingsViewModel(
         }
     }
 
+    fun updateRpcEndpoint(chainId: Long, rawRpcUrl: String) {
+        if (rpcEndpointMutationJob?.isActive == true) return
+        if (provisioningJob?.isActive == true ||
+            merchantReceiptProfileJob?.isActive == true ||
+            autoSweepPreferenceJob?.isActive == true
+        ) {
+            _state.value = _state.value.copy(
+                message = "Wait for the current setup change to finish before changing RPC endpoints.",
+                isError = true,
+            )
+            return
+        }
+        val policy = runCatching { KnownChainPolicy.requireProfile(chainId) }.getOrElse { error ->
+            _state.value = _state.value.copy(
+                message = error.message ?: "Unsupported RPC endpoint network",
+                isError = true,
+            )
+            return
+        }
+        val authorizationEpoch = runCatching {
+            requireNotNull(
+                requireAdminAuthorizationEpoch(
+                    adminPinStore.snapshot().configured,
+                    adminSession,
+                    "changing RPC endpoints",
+                ),
+            )
+        }.getOrElse { error ->
+            _state.value = _state.value.copy(message = error.message, isError = true)
+            return
+        }
+        val previousSetupStatus = _state.value.setupStatus
+        invalidateReadinessRefresh()
+        rpcEndpointMutationChainId = chainId
+        _state.value = _state.value.copy(
+            savingRpcEndpointChainId = chainId,
+            message = "Verifying the ${policy.networkName} RPC endpoint on-chain…",
+            isError = false,
+        )
+        val generation = ++rpcEndpointMutationGeneration
+        rpcEndpointMutationJob = viewModelScope.launch {
+            try {
+                runExclusiveRpcEndpointMutation(rpcWorkCoordinator) {
+                    updateRpcEndpointExclusively(
+                        lifecycleGate = lifecycleGate,
+                        chainId = chainId,
+                        rawRpcUrl = rawRpcUrl,
+                        currentConfiguration = chainConfig::snapshot,
+                        validateCandidate = rpcEndpointStore::validateCandidate,
+                        verify = rpcEndpointVerifier::verify,
+                        commitWithAuthorization = { commit ->
+                            adminSession.withAuthorization(authorizationEpoch, commit)
+                        },
+                        update = rpcEndpointStore::setOverride,
+                    )
+                }
+                val providerLabel = rpcEndpointStore.snapshot(chainId).providerLabel
+                    ?: "dedicated HTTPS provider"
+                adminSession.lock()
+                _state.value = load(
+                    message = "$providerLabel saved for ${policy.networkName}. " +
+                        "The credential-bearing URL remains masked.",
+                    setupStatusOverride = previousSetupStatus,
+                )
+                if (chainConfig.snapshot().let { it.provisioned && it.chainId == chainId }) {
+                    refreshOperatorStatus()
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (generation != rpcEndpointMutationGeneration) return@launch
+                _state.value = load(
+                    message = rpcEndpointMutationFailureMessage(error),
+                    isError = true,
+                    setupStatusOverride = previousSetupStatus,
+                )
+            } finally {
+                if (generation == rpcEndpointMutationGeneration) {
+                    rpcEndpointMutationJob = null
+                    rpcEndpointMutationChainId = null
+                    _state.value = _state.value.copy(savingRpcEndpointChainId = null)
+                }
+            }
+        }
+    }
+
+    fun clearRpcEndpoint(chainId: Long) {
+        if (rpcEndpointMutationJob?.isActive == true) return
+        if (provisioningJob?.isActive == true ||
+            merchantReceiptProfileJob?.isActive == true ||
+            autoSweepPreferenceJob?.isActive == true
+        ) {
+            _state.value = _state.value.copy(
+                message = "Wait for the current setup change to finish before clearing an RPC endpoint.",
+                isError = true,
+            )
+            return
+        }
+        val policy = runCatching { KnownChainPolicy.requireProfile(chainId) }.getOrElse { error ->
+            _state.value = _state.value.copy(
+                message = error.message ?: "Unsupported RPC endpoint network",
+                isError = true,
+            )
+            return
+        }
+        val authorizationEpoch = runCatching {
+            requireNotNull(
+                requireAdminAuthorizationEpoch(
+                    adminPinStore.snapshot().configured,
+                    adminSession,
+                    "clearing an RPC endpoint",
+                ),
+            )
+        }.getOrElse { error ->
+            _state.value = _state.value.copy(message = error.message, isError = true)
+            return
+        }
+        val previousSetupStatus = _state.value.setupStatus
+        invalidateReadinessRefresh()
+        rpcEndpointMutationChainId = chainId
+        _state.value = _state.value.copy(
+            savingRpcEndpointChainId = chainId,
+            message = "Clearing the ${policy.networkName} RPC endpoint override…",
+            isError = false,
+        )
+        val generation = ++rpcEndpointMutationGeneration
+        rpcEndpointMutationJob = viewModelScope.launch {
+            try {
+                runExclusiveRpcEndpointMutation(rpcWorkCoordinator) {
+                    clearRpcEndpointExclusively(
+                        lifecycleGate = lifecycleGate,
+                        chainId = chainId,
+                        commitWithAuthorization = { commit ->
+                            adminSession.withAuthorization(authorizationEpoch, commit)
+                        },
+                        clear = rpcEndpointStore::clearOverride,
+                    )
+                }
+                val fallbackDescription = when (rpcEndpointStore.snapshot(chainId).source) {
+                    RpcEndpointSource.BUILD_MANAGED ->
+                        "The app build default is active again."
+                    RpcEndpointSource.PUBLIC_FALLBACK ->
+                        "The development-only Base public RPC fallback is active again."
+                    RpcEndpointSource.MISSING ->
+                        "No RPC endpoint is active. Configure a replacement before using this network."
+                    RpcEndpointSource.UNAVAILABLE ->
+                        "The saved endpoint remains unavailable; configure a replacement."
+                    RpcEndpointSource.ADMIN_OVERRIDE ->
+                        "The administrator override remains active."
+                }
+                adminSession.lock()
+                _state.value = load(
+                    message = "RPC override cleared for ${policy.networkName}. " +
+                        fallbackDescription,
+                    setupStatusOverride = previousSetupStatus,
+                )
+                if (chainConfig.snapshot().let { it.provisioned && it.chainId == chainId }) {
+                    refreshOperatorStatus()
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (generation != rpcEndpointMutationGeneration) return@launch
+                _state.value = load(
+                    message = rpcEndpointMutationFailureMessage(error),
+                    isError = true,
+                    setupStatusOverride = previousSetupStatus,
+                )
+            } finally {
+                if (generation == rpcEndpointMutationGeneration) {
+                    rpcEndpointMutationJob = null
+                    rpcEndpointMutationChainId = null
+                    _state.value = _state.value.copy(savingRpcEndpointChainId = null)
+                }
+            }
+        }
+    }
+
     /** Synchronizes the Settings toggle after the settlement safety ledger reaches capacity. */
     fun autoSweepDisabledBySafetyCapacity() {
         _state.value = _state.value.copy(
@@ -786,7 +1086,10 @@ class SettingsViewModel(
             )
             return
         }
-        if (merchantReceiptProfileJob?.isActive == true || autoSweepPreferenceJob?.isActive == true) {
+        if (merchantReceiptProfileJob?.isActive == true ||
+            autoSweepPreferenceJob?.isActive == true ||
+            rpcEndpointMutationJob?.isActive == true
+        ) {
             _state.value = _state.value.copy(
                 message = "Wait for the current settings change to finish before changing confirmations.",
                 isError = true,
@@ -866,7 +1169,10 @@ class SettingsViewModel(
             )
             return
         }
-        if (merchantReceiptProfileJob?.isActive == true || autoSweepPreferenceJob?.isActive == true) {
+        if (merchantReceiptProfileJob?.isActive == true ||
+            autoSweepPreferenceJob?.isActive == true ||
+            rpcEndpointMutationJob?.isActive == true
+        ) {
             _state.value = _state.value.copy(
                 message = "Wait for the current settings change to finish before removing a payment profile.",
                 isError = true,
@@ -1004,21 +1310,26 @@ class SettingsViewModel(
         refreshPriority = priority
         refreshJob = viewModelScope.launch {
             try {
-                val result = withContext(Dispatchers.IO) {
-                    readinessRpcScheduler.run(priority) {
-                        val profile = KnownChainPolicy.requireProfile(config.chainId)
-                        profile.requireValidCreate2Fixture()
-                        require(config.factoryAddress.equals(profile.factory.value, true)) { "Factory pin mismatch" }
-                        require(
-                            config.receiverImplementationAddress.equals(
-                                profile.receiverImplementation.value,
-                                true,
-                            ),
-                        ) { "Receiver implementation pin mismatch" }
-                        val token = config.paymentTokens.single()
-                        val network = NetworkConfig(
+                val result = readinessRpcScheduler.run(priority) {
+                    val profile = KnownChainPolicy.requireProfile(config.chainId)
+                    profile.requireValidCreate2Fixture()
+                    require(config.factoryAddress.equals(profile.factory.value, true)) { "Factory pin mismatch" }
+                    require(
+                        config.receiverImplementationAddress.equals(
+                            profile.receiverImplementation.value,
+                            true,
+                        ),
+                    ) { "Receiver implementation pin mismatch" }
+                    val token = config.paymentTokens.single()
+                    val retryOnThrottle = retryReadinessOnThrottle(priority)
+                    runInterruptible(Dispatchers.IO) {
+                        val resolvedRpcUrl = rpcEndpointStore.resolve(
                             config.chainId,
                             config.rpcUrl,
+                        )
+                        val network = NetworkConfig(
+                            config.chainId,
+                            resolvedRpcUrl,
                             profile.factory,
                             profile.receiverImplementation,
                             EvmAddress.parse(config.vaultAddress),
@@ -1033,12 +1344,16 @@ class SettingsViewModel(
                             ReadOnlyRpcClient(network)
                         }
                         rpc.validate(
-                            EvmAddress.parse(token.address),
-                            token.decimals,
-                            token.symbol,
+                            token = EvmAddress.parse(token.address),
+                            expectedDecimals = token.decimals,
+                            expectedSymbol = token.symbol,
+                            retryOnThrottle = retryOnThrottle,
                         )
                         val operator = EvmAddress.parse(address)
-                        val readiness = rpc.operatorReadiness(operator)
+                        val readiness = rpc.operatorReadiness(
+                            operator = operator,
+                            retryOnThrottle = retryOnThrottle,
+                        )
                         OperatorChainStatus(
                             balance = readiness.nativeBalance,
                             authorized = readiness.listedOperator || readiness.vaultOwner == operator,
@@ -1098,7 +1413,10 @@ class SettingsViewModel(
                 throw error
             } catch (error: Exception) {
                 if (generation != refreshGeneration) return@launch
-                _state.value = load(error.message ?: "Unable to validate terminal readiness", isError = true)
+                _state.value = load(
+                    terminalRpcFailureMessage(error, "Unable to validate terminal readiness"),
+                    isError = true,
+                )
                 completeReadinessCallbacks(ready = false)
             } finally {
                 if (generation == refreshGeneration) {
@@ -1117,7 +1435,10 @@ class SettingsViewModel(
             )
             return
         }
-        if (merchantReceiptProfileJob?.isActive == true || autoSweepPreferenceJob?.isActive == true) {
+        if (merchantReceiptProfileJob?.isActive == true ||
+            autoSweepPreferenceJob?.isActive == true ||
+            rpcEndpointMutationJob?.isActive == true
+        ) {
             _state.value = _state.value.copy(
                 message = "Wait for the current settings change to finish before resetting the wallet.",
                 isError = true,
@@ -1199,6 +1520,8 @@ class SettingsViewModel(
         private val resetCoordinator: TerminalResetCoordinator,
         private val lifecycleGate: TerminalLifecycleGate,
         private val rpcWorkCoordinator: RpcWorkCoordinator,
+        private val rpcEndpointStore: RpcEndpointStore,
+        private val rpcEndpointVerifier: RpcEndpointVerifier,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T = SettingsViewModel(
@@ -1209,6 +1532,8 @@ class SettingsViewModel(
             resetCoordinator,
             lifecycleGate,
             rpcWorkCoordinator,
+            rpcEndpointStore,
+            rpcEndpointVerifier,
         ) as T
     }
 
@@ -1216,7 +1541,7 @@ class SettingsViewModel(
 
     companion object {
         // Anchored validation is three waves; operator readiness is one more. Automatic refresh is
-        // retryable, so keep its total socket budget below the coordinator's five-second lease.
+        // non-retrying, and its total socket budget stays below the coordinator's five-second lease.
         internal const val AUTOMATIC_RPC_WAVES = 4
         internal const val AUTOMATIC_RPC_CONNECT_TIMEOUT_MILLIS = 300
         internal const val AUTOMATIC_RPC_READ_TIMEOUT_MILLIS = 700
@@ -1307,6 +1632,84 @@ internal suspend fun updateAutoSweepPreferenceExclusively(
         "Unable to save auto-sweep preference"
     }
 }
+
+internal fun rpcEndpointProvisioningPrerequisiteMessage(
+    networkName: String,
+    source: RpcEndpointSource,
+): String? = when (source) {
+    RpcEndpointSource.MISSING ->
+        "Configure a dedicated $networkName RPC endpoint in Admin/setup before scanning the " +
+            "merchant portal QR."
+    RpcEndpointSource.UNAVAILABLE ->
+        "Replace the unavailable $networkName RPC endpoint in Admin/setup before scanning the " +
+            "merchant portal QR."
+    RpcEndpointSource.ADMIN_OVERRIDE,
+    RpcEndpointSource.BUILD_MANAGED,
+    RpcEndpointSource.PUBLIC_FALLBACK -> null
+}
+
+internal suspend fun updateRpcEndpointExclusively(
+    lifecycleGate: TerminalLifecycleGate,
+    chainId: Long,
+    rawRpcUrl: String,
+    currentConfiguration: () -> TerminalConfigSnapshot,
+    validateCandidate: (String) -> Unit,
+    verify: suspend (Long, String, TerminalConfigSnapshot) -> Unit,
+    commitWithAuthorization: ((() -> Boolean) -> Boolean),
+    update: (Long, String) -> Boolean,
+) = lifecycleGate.withExclusiveMutation {
+    check(commitWithAuthorization { true }) {
+        "Admin/setup authorization expired before RPC endpoint verification."
+    }
+    validateCandidate(rawRpcUrl)
+    verify(chainId, rawRpcUrl, currentConfiguration())
+    check(commitWithAuthorization { update(chainId, rawRpcUrl) }) {
+        "Unable to save the RPC endpoint securely."
+    }
+}
+
+internal suspend fun clearRpcEndpointExclusively(
+    lifecycleGate: TerminalLifecycleGate,
+    chainId: Long,
+    commitWithAuthorization: ((() -> Boolean) -> Boolean),
+    clear: (Long) -> Boolean,
+) = lifecycleGate.withExclusiveMutation {
+    check(commitWithAuthorization { clear(chainId) }) {
+        "Unable to clear the RPC endpoint securely."
+    }
+}
+
+internal fun rpcEndpointMutationFailureMessage(error: Exception): String = when {
+    error is RpcRateLimit ->
+        "The selected RPC provider is busy. Wait a moment and try again."
+    error is RpcEndpointStorageException ->
+        error.message ?: "Secure RPC endpoint storage is unavailable."
+    error is IllegalArgumentException && error.message in SAFE_RPC_ENDPOINT_MESSAGES ->
+        requireNotNull(error.message)
+    else ->
+        "Unable to verify or save the RPC endpoint. Check the URL and client credential, then try again."
+}
+
+private val SAFE_RPC_ENDPOINT_MESSAGES = setOf(
+    "RPC URL is required.",
+    "RPC URL is too long.",
+    "RPC URL contains unsupported characters.",
+    "Remove spaces before or after the RPC URL.",
+    "RPC URL is invalid.",
+    "RPC URL must use HTTPS.",
+    "RPC URL must include a host.",
+    "RPC URL must not use username/password credentials.",
+    "RPC URL must not include a fragment.",
+    "RPC URL port is invalid.",
+    "RPC endpoint does not serve the selected Base network",
+    "RPC endpoint did not return the known OPK factory",
+    "RPC endpoint did not return the known receiver implementation",
+    "RPC endpoint returned a different OPK receiver implementation",
+    "Stored factory pin does not match the selected Base network",
+    "Stored receiver implementation pin does not match the selected Base network",
+    "RPC endpoint returned unexpected vault runtime bytecode",
+    "RPC endpoint failed the configured payment-route validation",
+)
 
 internal fun operatorFundingPayload(
     config: TerminalConfigSnapshot,

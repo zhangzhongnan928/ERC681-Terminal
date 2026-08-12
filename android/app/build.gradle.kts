@@ -1,4 +1,5 @@
 import java.io.File
+import java.net.URI
 import java.util.Properties
 import org.gradle.api.GradleException
 
@@ -94,6 +95,74 @@ val playSigningPassword: String? = playSigningProperties?.let { properties ->
         ?: throw GradleException("passwordFile must not be empty.")
 }
 
+fun configuredRpcEndpoint(
+    gradlePropertyName: String,
+    environmentVariableName: String,
+): String {
+    val rawValue = providers.gradleProperty(gradlePropertyName).orNull
+        ?: providers.environmentVariable(environmentVariableName).orNull
+        ?: return ""
+    if (rawValue.isBlank() || rawValue != rawValue.trim() || rawValue.length > 8_192 ||
+        rawValue.any(Char::isISOControl)
+    ) {
+        throw GradleException("$gradlePropertyName must be one valid HTTPS RPC URL.")
+    }
+    val endpoint = try {
+        URI(rawValue)
+    } catch (_: Exception) {
+        throw GradleException("$gradlePropertyName must be one valid HTTPS RPC URL.")
+    }
+    if (
+        endpoint.isOpaque ||
+        !endpoint.scheme.equals("https", ignoreCase = true) ||
+        endpoint.host.isNullOrBlank() ||
+        endpoint.userInfo != null ||
+        endpoint.fragment != null ||
+        (endpoint.port != -1 && endpoint.port !in 1..65_535)
+    ) {
+        throw GradleException("$gradlePropertyName must be one valid HTTPS RPC URL.")
+    }
+    return endpoint.toASCIIString()
+}
+
+fun String.asBuildConfigString(): String =
+    "\"${replace("\\", "\\\\").replace("\"", "\\\"")}\""
+
+val baseMainnetRpcUrl = configuredRpcEndpoint(
+    gradlePropertyName = "opkBaseMainnetRpcUrl",
+    environmentVariableName = "OPK_BASE_MAINNET_RPC_URL",
+)
+val baseSepoliaRpcUrl = configuredRpcEndpoint(
+    gradlePropertyName = "opkBaseSepoliaRpcUrl",
+    environmentVariableName = "OPK_BASE_SEPOLIA_RPC_URL",
+)
+
+val verifyManagedRpcForRelease = tasks.register("verifyManagedRpcForRelease") {
+    group = "verification"
+    description = "Rejects a release build that explicitly embeds a public Base RPC endpoint."
+    doLast {
+        val publicBaseHosts = setOf("mainnet.base.org", "sepolia.base.org")
+        listOf(baseMainnetRpcUrl, baseSepoliaRpcUrl).forEach { configuredEndpoint ->
+            val configuredHost = configuredEndpoint.takeIf(String::isNotBlank)
+                ?.let(::URI)
+                ?.host
+                ?.lowercase()
+                ?.trimEnd('.')
+            if (configuredHost != null && configuredHost in publicBaseHosts) {
+                throw GradleException(
+                    "Release builds must not embed a public Base RPC endpoint. Leave the " +
+                        "build-managed URL empty for per-terminal Admin/setup provisioning, " +
+                        "or provide a dedicated revocable client endpoint."
+                )
+            }
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "preReleaseBuild") dependsOn(verifyManagedRpcForRelease)
+}
+
 android {
     namespace = "com.openpasskey.terminal"
     compileSdk = 36
@@ -102,9 +171,21 @@ android {
         applicationId = "com.openpasskey.terminal"
         minSdk = 26
         targetSdk = 36
-        versionCode = 17
-        versionName = "0.3.0"
+        versionCode = 18
+        versionName = "0.3.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField(
+            "String",
+            "OPK_BASE_MAINNET_RPC_URL",
+            baseMainnetRpcUrl.asBuildConfigString(),
+        )
+        buildConfigField(
+            "String",
+            "OPK_BASE_SEPOLIA_RPC_URL",
+            baseSepoliaRpcUrl.asBuildConfigString(),
+        )
+        // Production must never silently consume the rate-limited public Base transport.
+        buildConfigField("boolean", "OPK_ALLOW_PUBLIC_RPC_FALLBACK", "false")
     }
 
     signingConfigs {
@@ -128,6 +209,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Local development remains usable without a provider account or client credential.
+            buildConfigField("boolean", "OPK_ALLOW_PUBLIC_RPC_FALLBACK", "true")
+        }
         release {
             isMinifyEnabled = true
             proguardFiles(
@@ -150,6 +235,7 @@ android {
     }
 
     buildFeatures {
+        buildConfig = true
         compose = true
     }
 

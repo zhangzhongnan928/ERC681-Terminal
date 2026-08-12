@@ -13,12 +13,17 @@ import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.payment.PaymentTransactionEvidence
 import com.openpasskey.terminal.payment.PaymentTransactionResolver
 import com.openpasskey.terminal.rpc.RpcWorkCoordinator
+import com.openpasskey.terminal.rpc.RpcEndpointOverrideState
+import com.openpasskey.terminal.rpc.RpcEndpointResolution
+import com.openpasskey.terminal.rpc.RpcEndpointResolver
+import com.openpasskey.terminal.rpc.RpcEndpointSnapshot
 import com.openpasskey.terminal.wallet.OperatorWalletStore
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.Mockito.mock
 import java.lang.reflect.InvocationHandler
@@ -48,7 +53,7 @@ class InvoiceRepositoryMonitorIntegrationTest {
                         receiptNumber = 1,
                         receiptAutoPrintEligible = true,
                     ),
-                    paymentResolver = PaymentTransactionResolver {
+                    paymentResolver = PaymentTransactionResolver { _, _ ->
                         PaymentTransactionEvidence(
                             txHash = paymentHash,
                             payerAddress = "0x${"55".repeat(20)}",
@@ -123,9 +128,66 @@ class InvoiceRepositoryMonitorIntegrationTest {
         }
     }
 
+    @Test
+    fun `endpoint rotation discards old sample and next observation uses new provider`() =
+        runBlocking {
+            val oldRequests = AtomicInteger()
+            val newRequests = AtomicInteger()
+            rpcServer { requestBody ->
+                oldRequests.incrementAndGet()
+                successfulObservationResponse(
+                    requestBody = requestBody,
+                    remoteChainId = CHAIN_ID,
+                    observedAmount = EXPECTED_AMOUNT,
+                )
+            }.use { oldServer ->
+                rpcServer { requestBody ->
+                    newRequests.incrementAndGet()
+                    successfulObservationResponse(
+                        requestBody = requestBody,
+                        remoteChainId = CHAIN_ID,
+                        observedAmount = OVERPAID_AMOUNT,
+                    )
+                }.use { newServer ->
+                    val endpointResolver = SwitchingRpcEndpointResolver(oldServer.url)
+                    val evidenceCalls = AtomicInteger()
+                    val fixture = repositoryFixture(
+                        initial = invoice(oldServer.url).copy(
+                            confirmationBlocks = 1,
+                            receiptNumber = 1,
+                            receiptAutoPrintEligible = true,
+                        ),
+                        paymentResolver = PaymentTransactionResolver { _, _ ->
+                            if (evidenceCalls.incrementAndGet() == 1) {
+                                // The sample above came from A. Rotate before its lifecycle write;
+                                // the repository must discard it and rebuild the next observer on B.
+                                endpointResolver.switchTo(newServer.url)
+                            }
+                            null
+                        },
+                        rpcEndpointResolver = endpointResolver,
+                        paymentPollIntervalMillis = 1,
+                    )
+
+                    val persisted = fixture.repository.observePayment(INVOICE_ID)
+                        .drop(1)
+                        .first { it.status == InvoiceStatus.OVERPAID }
+                    assertEquals(OVERPAID_AMOUNT, persisted.receivedAmount)
+                    assertEquals(1, fixture.observationWrites.get())
+                    assertEquals(OVERPAID_AMOUNT, fixture.invoice.get().receivedAmount)
+                    assertTrue(oldRequests.get() > 0)
+                    assertTrue(newRequests.get() > 0)
+                }
+            }
+        }
+
     private fun repositoryFixture(
         initial: Invoice,
-        paymentResolver: PaymentTransactionResolver = PaymentTransactionResolver { null },
+        paymentResolver: PaymentTransactionResolver = PaymentTransactionResolver { _, _ -> null },
+        rpcEndpointResolver: RpcEndpointResolver = RpcEndpointResolver.PASSTHROUGH,
+        rpcWorkCoordinator: RpcWorkCoordinator = RpcWorkCoordinator(),
+        lifecycleGate: TerminalLifecycleGate = TerminalLifecycleGate(),
+        paymentPollIntervalMillis: Long = InvoiceRepository.POLL_INTERVAL_MILLIS,
     ): RepositoryFixture {
         val invoice = AtomicReference(initial)
         val observationWrites = AtomicInteger()
@@ -167,9 +229,11 @@ class InvoiceRepositoryMonitorIntegrationTest {
                 settlementEventDao = settlementEventDao,
                 chainConfig = mock(ChainConfig::class.java),
                 operatorWalletStore = mock(OperatorWalletStore::class.java),
-                lifecycleGate = TerminalLifecycleGate(),
-                rpcWorkCoordinator = RpcWorkCoordinator(),
+                lifecycleGate = lifecycleGate,
+                rpcWorkCoordinator = rpcWorkCoordinator,
+                rpcEndpointResolver = rpcEndpointResolver,
                 paymentTransactionResolver = paymentResolver,
+                paymentPollIntervalMillis = paymentPollIntervalMillis,
             ),
             invoice = invoice,
             observationWrites = observationWrites,
@@ -200,6 +264,7 @@ class InvoiceRepositoryMonitorIntegrationTest {
         requestBody: String,
         remoteChainId: Long,
         chainIdResult: String = "0x${remoteChainId.toString(16)}",
+        observedAmount: String = EXPECTED_AMOUNT,
     ): String {
         val root = JsonParser.parseString(requestBody)
         val requests = if (root.isJsonArray) root.asJsonArray.toList() else listOf(root)
@@ -209,7 +274,7 @@ class InvoiceRepositoryMonitorIntegrationTest {
             val result = when (method) {
                 "eth_chainId" -> chainIdResult
                 "eth_getBlockByNumber" -> blockResult()
-                "eth_call" -> "0x${EXPECTED_AMOUNT.toBigInteger().toString(16).padStart(64, '0')}"
+                "eth_call" -> "0x${observedAmount.toBigInteger().toString(16).padStart(64, '0')}"
                 else -> error("Unexpected RPC method: $method")
             }
             JsonObject().apply {
@@ -330,10 +395,39 @@ class InvoiceRepositoryMonitorIntegrationTest {
         }
     }
 
+    private class SwitchingRpcEndpointResolver(initialEndpoint: String) : RpcEndpointResolver {
+        private var endpoint = initialEndpoint
+        private var generation = 0L
+
+        override fun snapshot(chainId: Long): RpcEndpointSnapshot = RpcEndpointSnapshot(
+            chainId = chainId,
+            state = RpcEndpointOverrideState.READY,
+            providerLabel = "Test provider",
+        )
+
+        @Synchronized
+        override fun resolve(chainId: Long, fallbackUrl: String): String = endpoint
+
+        @Synchronized
+        override fun resolveCurrent(chainId: Long, fallbackUrl: String): RpcEndpointResolution =
+            RpcEndpointResolution(chainId, endpoint, generation)
+
+        @Synchronized
+        override fun isCurrent(resolution: RpcEndpointResolution): Boolean =
+            resolution.generation == generation
+
+        @Synchronized
+        fun switchTo(nextEndpoint: String) {
+            endpoint = nextEndpoint
+            generation += 1
+        }
+    }
+
     private companion object {
         const val CHAIN_ID = 84_532L
         const val BLOCK_NUMBER = 100L
         const val EXPECTED_AMOUNT = "10"
+        const val OVERPAID_AMOUNT = "11"
         val INVOICE_ID = "0x" + "11".repeat(32)
         val FACTORY = "0x" + "22".repeat(20)
         val IMPLEMENTATION = "0x" + "33".repeat(20)

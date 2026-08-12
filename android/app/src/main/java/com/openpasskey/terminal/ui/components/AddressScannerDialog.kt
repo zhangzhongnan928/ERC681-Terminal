@@ -41,9 +41,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.openpasskey.terminal.provisioning.TerminalProvisioningPayloadCodec
+import com.openpasskey.terminal.rpc.validateRpcEndpoint
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -95,11 +98,41 @@ internal fun ProvisioningScannerDialog(
     )
 }
 
+/**
+ * Imports an RPC endpoint into an editable field only. The caller remains responsible for showing
+ * the value for explicit confirmation and for validating the endpoint before it is persisted.
+ */
+@Composable
+internal fun RpcEndpointScannerDialog(
+    onDismiss: () -> Unit,
+    onRpcUrlScanned: (String) -> Unit,
+) {
+    ConfigurationQrScannerDialog(
+        title = "Scan RPC endpoint",
+        instructions = "Scan a QR containing only an HTTPS RPC endpoint URL. Scanning fills the " +
+            "masked field; it does not contact or save the endpoint.",
+        manualFallback = "You can still paste the RPC endpoint URL.",
+        secureWindow = true,
+        onDismiss = onDismiss,
+        acceptPayload = { rawValue ->
+            runCatching { validateRpcEndpoint(rawValue) }
+                .fold(
+                    onSuccess = {
+                        onRpcUrlScanned(rawValue)
+                        null
+                    },
+                    onFailure = { "Not an HTTPS RPC endpoint QR. No value was imported." },
+                )
+        },
+    )
+}
+
 @Composable
 private fun ConfigurationQrScannerDialog(
     title: String,
     instructions: String,
     manualFallback: String,
+    secureWindow: Boolean = false,
     onDismiss: () -> Unit,
     acceptPayload: (String) -> String?,
 ) {
@@ -127,7 +160,16 @@ private fun ConfigurationQrScannerDialog(
         if (!permissionGranted) permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    Dialog(onDismissRequest = dismissScanner) {
+    Dialog(
+        onDismissRequest = dismissScanner,
+        properties = DialogProperties(
+            securePolicy = if (secureWindow) {
+                SecureFlagPolicy.SecureOn
+            } else {
+                SecureFlagPolicy.Inherit
+            },
+        ),
+    ) {
         Surface(
             modifier = Modifier.fillMaxWidth().wrapContentHeight(),
             shape = MaterialTheme.shapes.extraLarge,
@@ -255,7 +297,7 @@ private fun CameraQrPreview(
                     )
                 }.onFailure {
                     if (disposed.get()) return@onFailure
-                    currentOnError("Camera is unavailable. You can still paste the address.")
+                    currentOnError("Camera is unavailable.")
                 }
             },
             mainExecutor,
@@ -329,7 +371,7 @@ private class ConfigurationQrAnalyzer(
             if (!closed.get() && failureReported.compareAndSet(false, true)) {
                 mainExecutor.execute {
                     if (!closed.get()) {
-                        onError("QR scanning failed. You can still paste the address.")
+                        onError("QR scanning failed.")
                     }
                 }
             }

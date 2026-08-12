@@ -54,7 +54,7 @@ class SettingsPresentationTest {
     }
 
     @Test
-    fun `privileged setup stays busy for provisioning and both settings saves`() {
+    fun `privileged setup stays busy for provisioning and every settings save`() {
         assertFalse(privilegedSetupBusy(SettingsState(setupStatus = TerminalSetupStatus.READY)))
         assertTrue(
             privilegedSetupBusy(SettingsState(setupStatus = TerminalSetupStatus.PROVISIONING)),
@@ -73,6 +73,28 @@ class SettingsPresentationTest {
                     setupStatus = TerminalSetupStatus.READY,
                     savingAutoSweepPreference = true,
                 ),
+            ),
+        )
+        assertTrue(
+            privilegedSetupBusy(
+                SettingsState(
+                    setupStatus = TerminalSetupStatus.READY,
+                    savingRpcEndpointChainId = 8453,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `merchant portal scan waits for at least one configured network endpoint`() {
+        assertFalse(
+            canScanMerchantPortalSetup(
+                SettingsState(provisioningRpcEndpointAvailable = false),
+            ),
+        )
+        assertTrue(
+            canScanMerchantPortalSetup(
+                SettingsState(provisioningRpcEndpointAvailable = true),
             ),
         )
     }

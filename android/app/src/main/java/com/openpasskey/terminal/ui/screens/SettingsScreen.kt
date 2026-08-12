@@ -9,8 +9,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteForever
@@ -19,6 +21,8 @@ import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -53,7 +57,10 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.fragment.app.FragmentActivity
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.erc681.NativeAsset
@@ -61,12 +68,16 @@ import com.openpasskey.terminal.ui.components.DeviceAuthentication
 import com.openpasskey.terminal.ui.components.AddressScannerDialog
 import com.openpasskey.terminal.ui.components.ProvisioningScannerDialog
 import com.openpasskey.terminal.ui.components.QRCodeView
+import com.openpasskey.terminal.ui.components.RpcEndpointScannerDialog
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import com.openpasskey.terminal.provisioning.formatNativeCurrencyAmount
+import com.openpasskey.terminal.rpc.RpcEndpointSource
 import com.openpasskey.terminal.chain.TerminalPaymentProfile
 import com.openpasskey.terminal.chain.MerchantReceiptProfile
 import com.openpasskey.terminal.viewmodel.SettingsState
 import com.openpasskey.terminal.viewmodel.SettingsViewModel
+import com.openpasskey.terminal.viewmodel.RpcEndpointOverrideStatus
+import com.openpasskey.terminal.viewmodel.RpcEndpointSetting
 import com.openpasskey.terminal.viewmodel.TerminalSetupStatus
 import com.openpasskey.terminal.viewmodel.validateMerchantReceiptProfileInput
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
@@ -99,6 +110,7 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
     var showProvisioningScanner by remember { mutableStateOf(false) }
     var showReset by remember { mutableStateOf(false) }
     var showAdvancedManualSetup by remember { mutableStateOf(false) }
+    var showRpcEndpointSettings by remember { mutableStateOf(false) }
     var profilePendingRemoval by remember { mutableStateOf<TerminalPaymentProfile?>(null) }
     var chainPendingConfirmationEdit by remember { mutableStateOf<Long?>(null) }
     val setupBusy = privilegedSetupBusy(state)
@@ -107,6 +119,7 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
         if (state.adminPinConfigured && (!state.adminUnlocked || setupBusy)) {
             showProvisioningScanner = false
             showAdvancedManualSetup = false
+            showRpcEndpointSettings = false
             showReset = false
             profilePendingRemoval = null
             chainPendingConfirmationEdit = null
@@ -249,6 +262,21 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
             },
         )
     }
+    if (showRpcEndpointSettings) {
+        RpcEndpointSettingsDialog(
+            endpoints = state.rpcEndpointSettings,
+            initialChainId = state.chainId,
+            onDismiss = { showRpcEndpointSettings = false },
+            onSave = { chainId, rpcUrl ->
+                showRpcEndpointSettings = false
+                viewModel.updateRpcEndpoint(chainId, rpcUrl)
+            },
+            onClear = { chainId ->
+                showRpcEndpointSettings = false
+                viewModel.clearRpcEndpoint(chainId)
+            },
+        )
+    }
 
     Scaffold(topBar = { TopAppBar(title = { Text("Settings") }) }) { padding ->
         LazyColumn(
@@ -297,12 +325,23 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
             ) {
                 item {
                     Button(
-                        onClick = { showProvisioningScanner = true },
+                        onClick = {
+                            if (canScanMerchantPortalSetup(state)) {
+                                showProvisioningScanner = true
+                            } else {
+                                showRpcEndpointSettings = true
+                            }
+                        },
                         enabled = !setupBusy,
                         modifier = Modifier.fillMaxWidth().height(52.dp),
                     ) {
-                        Icon(Icons.Default.QrCodeScanner, contentDescription = null)
-                        Text(" Scan merchant portal setup")
+                        if (canScanMerchantPortalSetup(state)) {
+                            Icon(Icons.Default.QrCodeScanner, contentDescription = null)
+                            Text(" Scan merchant portal setup")
+                        } else {
+                            Icon(Icons.Default.Security, contentDescription = null)
+                            Text(" Configure RPC endpoint")
+                        }
                     }
                 }
             }
@@ -330,6 +369,7 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                         unlocked = state.adminUnlocked,
                         busy = setupBusy,
                         onAutoSweepChanged = viewModel::updateAutoSweepEnabled,
+                        onConfigureRpcEndpoints = { showRpcEndpointSettings = true },
                     )
                 }
                 item {
@@ -378,7 +418,11 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
 internal fun privilegedSetupBusy(state: SettingsState): Boolean =
     state.setupStatus == TerminalSetupStatus.PROVISIONING ||
         state.savingMerchantReceiptProfile ||
-        state.savingAutoSweepPreference
+        state.savingAutoSweepPreference ||
+        state.savingRpcEndpointChainId != null
+
+internal fun canScanMerchantPortalSetup(state: SettingsState): Boolean =
+    state.provisioningRpcEndpointAvailable
 
 @Composable
 private fun ExternalLinksCard() {
@@ -401,12 +445,18 @@ private fun ExternalLinksCard() {
 @Composable
 private fun SetupStatusCard(state: SettingsState) {
     val (title, detail) = when (state.setupStatus) {
-        TerminalSetupStatus.CREATE_WALLET -> "Step 1 of 2 · Create terminal wallet" to
+        TerminalSetupStatus.CREATE_WALLET -> "Create terminal wallet" to
             "Create the device EOA used for terminal identity and constrained settlement signing."
         TerminalSetupStatus.SET_ADMIN_PIN -> "Protect setup" to
             "Set a local admin PIN before importing merchant configuration."
-        TerminalSetupStatus.SCAN_PORTAL -> "Step 2 of 2 · Connect merchant portal" to
-            "On a personal phone or computer, authorize this terminal and show its unified setup QR."
+        TerminalSetupStatus.SCAN_PORTAL -> if (state.provisioningRpcEndpointAvailable) {
+            "Connect merchant portal" to
+                "On a personal phone or computer, authorize this terminal and show its unified setup QR."
+        } else {
+            "Configure RPC endpoint" to
+                "Add a dedicated Base Mainnet or Base Sepolia HTTPS client endpoint in " +
+                    "Admin/setup before scanning the matching portal QR."
+        }
         TerminalSetupStatus.PROVISIONING -> "Validating configuration" to
             "Checking the known chain, vault, deployment pins, token metadata, and whitelist."
         TerminalSetupStatus.AWAITING_AUTHORIZATION -> "Awaiting portal authorization" to
@@ -736,6 +786,7 @@ private fun AdvancedSettingsCard(
     unlocked: Boolean,
     busy: Boolean,
     onAutoSweepChanged: (Boolean) -> Unit,
+    onConfigureRpcEndpoints: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -762,9 +813,22 @@ private fun AdvancedSettingsCard(
                     enabled = unlocked && !busy,
                 )
             }
+            OutlinedButton(
+                onClick = onConfigureRpcEndpoints,
+                enabled = unlocked && !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Default.Security, contentDescription = null)
+                Text(" Configure RPC endpoints")
+            }
+            Text(
+                "Set a dedicated HTTPS provider separately for Base Mainnet and Base Sepolia. " +
+                    "The endpoint is verified against the selected chain before it is saved.",
+                style = MaterialTheme.typography.bodySmall,
+            )
             if (!unlocked) {
                 Text(
-                    "Unlock Admin/setup to change auto-sweep.",
+                    "Unlock Admin/setup to change auto-sweep or RPC endpoints.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             } else if (busy) {
@@ -775,6 +839,217 @@ private fun AdvancedSettingsCard(
             }
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RpcEndpointSettingsDialog(
+    endpoints: List<RpcEndpointSetting>,
+    initialChainId: Long,
+    onDismiss: () -> Unit,
+    onSave: (Long, String) -> Unit,
+    onClear: (Long) -> Unit,
+) {
+    val initialEndpoint = remember(endpoints, initialChainId) {
+        endpoints.firstOrNull { it.chainId == initialChainId } ?: endpoints.firstOrNull()
+    }
+    var selectedChainId by remember(initialEndpoint) {
+        mutableStateOf(initialEndpoint?.chainId)
+    }
+    var chainMenuExpanded by remember { mutableStateOf(false) }
+    var rpcUrl by remember(selectedChainId) { mutableStateOf("") }
+    var revealRpcUrl by remember(selectedChainId) { mutableStateOf(false) }
+    var showScanner by remember { mutableStateOf(false) }
+    var showTrustConfirmation by remember { mutableStateOf(false) }
+    val selectedEndpoint = endpoints.firstOrNull { it.chainId == selectedChainId }
+
+    if (showScanner) {
+        RpcEndpointScannerDialog(
+            onDismiss = { showScanner = false },
+            onRpcUrlScanned = { scannedUrl ->
+                rpcUrl = scannedUrl
+                revealRpcUrl = false
+                showScanner = false
+            },
+        )
+    }
+    if (showTrustConfirmation && selectedEndpoint != null) {
+        AlertDialog(
+            onDismissRequest = { showTrustConfirmation = false },
+            title = { Text("Trust this RPC provider?") },
+            text = {
+                Text(
+                    "An RPC server can report false payment balances, operator authorization, " +
+                        "or transaction state. Saving makes this provider the source of truth " +
+                        "for ${selectedEndpoint.networkName}. Continue only if the merchant " +
+                        "trusts and controls the provider relationship. The URL remains masked.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showTrustConfirmation = false
+                        onSave(selectedEndpoint.chainId, rpcUrl)
+                    },
+                ) { Text("Trust, verify & save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTrustConfirmation = false }) { Text("Cancel") }
+            },
+            properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("RPC endpoints") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "Each network has its own override. Saved administrator override credentials " +
+                        "are encrypted on this terminal and are never added to provisioning QRs, " +
+                        "receipts, or transaction history. A build-default client credential is " +
+                        "embedded in the APK and can be extracted.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (selectedEndpoint == null) {
+                    Text(
+                        "No supported Base network is available in this build.",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                } else {
+                    ExposedDropdownMenuBox(
+                        expanded = chainMenuExpanded,
+                        onExpandedChange = { chainMenuExpanded = it },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        OutlinedTextField(
+                            value = rpcEndpointNetworkLabel(selectedEndpoint),
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("Network") },
+                            trailingIcon = {
+                                ExposedDropdownMenuDefaults.TrailingIcon(chainMenuExpanded)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                                .menuAnchor(MenuAnchorType.PrimaryNotEditable),
+                        )
+                        ExposedDropdownMenu(
+                            expanded = chainMenuExpanded,
+                            onDismissRequest = { chainMenuExpanded = false },
+                        ) {
+                            endpoints.forEach { endpoint ->
+                                DropdownMenuItem(
+                                    text = { Text(rpcEndpointNetworkLabel(endpoint)) },
+                                    onClick = {
+                                        selectedChainId = endpoint.chainId
+                                        rpcUrl = ""
+                                        revealRpcUrl = false
+                                        chainMenuExpanded = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        rpcEndpointStatusLabel(selectedEndpoint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (
+                            selectedEndpoint.status == RpcEndpointOverrideStatus.UNAVAILABLE
+                        ) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                    OutlinedTextField(
+                        value = rpcUrl,
+                        onValueChange = { rpcUrl = it },
+                        label = { Text("New HTTPS RPC endpoint") },
+                        placeholder = { Text("https://provider.example/…") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        visualTransformation = if (revealRpcUrl) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
+                        trailingIcon = {
+                            Row {
+                                IconButton(onClick = { revealRpcUrl = !revealRpcUrl }) {
+                                    Icon(
+                                        imageVector = if (revealRpcUrl) {
+                                            Icons.Default.VisibilityOff
+                                        } else {
+                                            Icons.Default.Visibility
+                                        },
+                                        contentDescription = if (revealRpcUrl) {
+                                            "Hide RPC endpoint"
+                                        } else {
+                                            "Reveal RPC endpoint"
+                                        },
+                                    )
+                                }
+                                IconButton(onClick = { showScanner = true }) {
+                                    Icon(
+                                        Icons.Default.QrCodeScanner,
+                                        contentDescription = "Scan RPC endpoint",
+                                    )
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "Scanning only fills this masked field. Save verifies the HTTPS URL and " +
+                            "reported chain before replacing the current endpoint. The saved " +
+                            "provider becomes this terminal's read trust source for that Base " +
+                            "network. Prefer a per-terminal, revocable client credential, " +
+                            "never a server secret.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    if (selectedEndpoint.status != RpcEndpointOverrideStatus.NOT_CONFIGURED) {
+                        OutlinedButton(
+                            onClick = { onClear(selectedEndpoint.chainId) },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Clear saved override")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { showTrustConfirmation = true },
+                enabled = selectedEndpoint != null && rpcUrl.isNotBlank(),
+            ) { Text("Verify & save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
+    )
+}
+
+internal fun rpcEndpointNetworkLabel(endpoint: RpcEndpointSetting): String =
+    "${endpoint.networkName} (${endpoint.chainId}) · " +
+        if (endpoint.isTestnet) "testnet" else "production"
+
+internal fun rpcEndpointStatusLabel(endpoint: RpcEndpointSetting): String = when (endpoint.source) {
+    RpcEndpointSource.ADMIN_OVERRIDE ->
+        "Saved override: ${endpoint.providerLabel ?: "Custom HTTPS provider"}. The URL remains masked."
+    RpcEndpointSource.BUILD_MANAGED ->
+        "Build default: ${endpoint.providerLabel ?: "Custom HTTPS provider"}. " +
+            "No admin endpoint override is stored."
+    RpcEndpointSource.PUBLIC_FALLBACK ->
+        "Using the development-only, rate-limited Base public RPC fallback. This build has no " +
+            "managed endpoint or admin override for this network."
+    RpcEndpointSource.MISSING ->
+        "Required before use. This production build has no embedded endpoint or saved admin override."
+    RpcEndpointSource.UNAVAILABLE ->
+        "The saved override cannot be opened securely. Clear it and save a replacement."
 }
 
 @Composable

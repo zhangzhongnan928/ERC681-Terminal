@@ -4,7 +4,9 @@
 package com.openpasskey.erc681
 
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 
 class NetworkConfigTest {
     private val factory = EvmAddress.parse("0x1111111111111111111111111111111111111111")
@@ -26,6 +28,21 @@ class NetworkConfigTest {
     fun `RPC URL rejects embedded identity and fragments`() {
         assertFailsWith<IllegalArgumentException> { config("https://user:password@rpc.example.test") }
         assertFailsWith<IllegalArgumentException> { config("https://rpc.example.test/#fragment") }
+    }
+
+    @Test
+    fun `RPC credentials are redacted from diagnostics and invalid URL causes`() {
+        val secret = "terminal-client-key"
+        val valid = config("https://rpc.example.test/v2/$secret")
+
+        assertFalse(valid.toString().contains(secret))
+        assertFalse(valid.toString().contains("rpc.example.test"))
+
+        val error = assertFailsWith<IllegalArgumentException> {
+            config("https://rpc.example.test/[$secret")
+        }
+        assertNull(error.cause)
+        assertFalse(error.toString().contains(secret))
     }
 
     private fun config(rpcUrl: String) = NetworkConfig(

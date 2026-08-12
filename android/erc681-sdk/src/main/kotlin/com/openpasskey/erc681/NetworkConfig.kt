@@ -22,8 +22,8 @@ data class NetworkConfig(
 
         val uri = try {
             URI(rpcUrl)
-        } catch (error: Exception) {
-            throw IllegalArgumentException("RPC URL is invalid", error)
+        } catch (_: Exception) {
+            throw IllegalArgumentException("RPC URL is invalid")
         }
         val scheme = uri.scheme?.lowercase()
         val host = uri.host?.lowercase()
@@ -38,4 +38,11 @@ data class NetworkConfig(
 
     val receiverResolver: Create2ReceiverResolver
         get() = Create2ReceiverResolver(factory, receiverImplementation)
+
+    override fun toString(): String = "NetworkConfig(" +
+        "chainId=$chainId, " +
+        "rpcUrl=<redacted>, " +
+        "factory=$factory, " +
+        "receiverImplementation=$receiverImplementation, " +
+        "vault=$vault)"
 }

@@ -10,6 +10,10 @@ import com.openpasskey.terminal.data.model.Invoice
 import com.openpasskey.terminal.data.model.InvoiceStatus
 import com.openpasskey.terminal.data.model.SettlementFeeMode
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
+import com.openpasskey.terminal.rpc.RpcEndpointOverrideState
+import com.openpasskey.terminal.rpc.RpcEndpointResolution
+import com.openpasskey.terminal.rpc.RpcEndpointResolver
+import com.openpasskey.terminal.rpc.RpcEndpointSnapshot
 import com.openpasskey.terminal.rpc.RpcWorkCoordinator
 import com.openpasskey.terminal.settlement.SettlementBalancePolicy
 import com.openpasskey.terminal.settlement.SettlementChainClient
@@ -83,6 +87,56 @@ class SettlementSubmitFreshnessTest {
         assertEquals(0, broadcastCalls)
     }
 
+    @Test
+    fun `endpoint generation is rechecked at final key use boundary`() {
+        val invoice = confirmedInvoice()
+        val persistence = PersistenceCalls()
+        val resolver = SwitchingResolver("https://rpc-a.example/credential-a")
+        val database = fakeDatabase(invoice, persistence) { readCount ->
+            if (readCount == 2) resolver.switchTo("https://rpc-b.example/credential-b")
+        }
+        val wallet = RecordingWalletAccess()
+        var preflightCalls = 0
+        val client = proxy<SettlementChainClient> { method, arguments ->
+            when (method.name) {
+                "settlementPreflight" -> {
+                    preflightCalls += 1
+                    assertEquals(false, arguments?.get(1))
+                    preflightSnapshot()
+                }
+                "close" -> Unit
+                else -> error("Submit unexpectedly called settlement RPC ${method.name}")
+            }
+        }
+        val repository = SettlementRepository(
+            database = database,
+            walletAccess = wallet,
+            chainConfigSnapshot = ::unprovisionedConfig,
+            lifecycleGate = TerminalLifecycleGate(),
+            rpcWorkCoordinator = RpcWorkCoordinator(),
+            rpcEndpointResolver = resolver,
+            clientFactory = { client },
+            gson = Gson(),
+            elapsedRealtimeMillis = { INITIAL_NOW },
+        )
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            runBlocking {
+                repository.submit(
+                    reviewed = preparedSettlement(invoice),
+                    userExplicitlyConfirmed = true,
+                    authenticatedAtElapsedRealtimeMillis = INITIAL_NOW,
+                )
+            }
+        }
+
+        assertTrue(error.message.orEmpty().contains("RPC endpoint changed"))
+        assertEquals(1, preflightCalls)
+        assertEquals(0, wallet.signerActivations)
+        assertEquals(0, persistence.settlementInserts)
+        assertEquals(0, persistence.invoiceAttachments)
+    }
+
     private class RecordingWalletAccess : SettlementWalletAccess {
         var signerActivations = 0
 
@@ -111,10 +165,16 @@ class SettlementSubmitFreshnessTest {
     private fun fakeDatabase(
         invoice: Invoice,
         calls: PersistenceCalls,
+        onInvoicesRead: (Int) -> Unit = {},
     ): InvoiceDatabase {
+        var invoiceReads = 0
         val invoiceDao = proxy<InvoiceDao> { method, _ ->
             when (method.name) {
-                "getByIds" -> listOf(invoice)
+                "getByIds" -> {
+                    invoiceReads += 1
+                    onInvoicesRead(invoiceReads)
+                    listOf(invoice)
+                }
                 "attachSettlement" -> {
                     calls.invoiceAttachments += 1
                     1
@@ -144,6 +204,34 @@ class SettlementSubmitFreshnessTest {
         return database
     }
 
+    private class SwitchingResolver(initialEndpoint: String) : RpcEndpointResolver {
+        private var endpoint = initialEndpoint
+        private var generation = 0L
+
+        override fun snapshot(chainId: Long): RpcEndpointSnapshot = RpcEndpointSnapshot(
+            chainId = chainId,
+            state = RpcEndpointOverrideState.READY,
+            providerLabel = "Test provider",
+        )
+
+        @Synchronized
+        override fun resolve(chainId: Long, fallbackUrl: String): String = endpoint
+
+        @Synchronized
+        override fun resolveCurrent(chainId: Long, fallbackUrl: String): RpcEndpointResolution =
+            RpcEndpointResolution(chainId, endpoint, generation)
+
+        @Synchronized
+        override fun isCurrent(resolution: RpcEndpointResolution): Boolean =
+            resolution.generation == generation
+
+        @Synchronized
+        fun switchTo(nextEndpoint: String) {
+            endpoint = nextEndpoint
+            generation += 1
+        }
+    }
+
     private fun InvoiceDatabase.setGeneratedDao(fieldName: String, dao: Any) {
         javaClass.getDeclaredField(fieldName).apply {
             isAccessible = true
@@ -163,6 +251,7 @@ class SettlementSubmitFreshnessTest {
             chainId = invoice.chainId,
             networkName = invoice.networkName,
             rpcUrl = invoice.rpcUrl,
+            rpcEndpointGeneration = 0,
             vaultAddress = invoice.vaultAddress,
             tokenAddress = invoice.token,
             tokenSymbol = invoice.tokenSymbol,

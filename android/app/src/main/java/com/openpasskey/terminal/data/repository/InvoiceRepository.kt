@@ -21,6 +21,8 @@ import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import com.openpasskey.terminal.provisioning.minimumOperatorNativeReserveDisplay
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.rpc.RpcWorkCoordinator
+import com.openpasskey.terminal.rpc.RpcEndpointResolver
+import com.openpasskey.terminal.rpc.RpcEndpointResolution
 import com.openpasskey.terminal.data.db.InvoiceDao
 import com.openpasskey.terminal.data.db.SettlementEventDao
 import com.openpasskey.terminal.data.model.Invoice
@@ -54,6 +56,35 @@ internal sealed interface VisibleRpcAttemptResult<out T, out S> {
 }
 
 private data class PaymentEvidenceAttempt(val evidence: PaymentTransactionEvidence?)
+
+private data class ResolvedPaymentEvidenceAttempt(
+    val evidence: PaymentTransactionEvidence?,
+    val endpointResolution: RpcEndpointResolution,
+)
+
+private sealed interface AutomaticPaymentEvidenceAttempt {
+    val endpointResolution: RpcEndpointResolution
+
+    data class Resolved(
+        val evidence: PaymentTransactionEvidence?,
+        override val endpointResolution: RpcEndpointResolution,
+    ) : AutomaticPaymentEvidenceAttempt
+
+    data class Unsupported(
+        val failure: NetworkConfigurationException,
+        override val endpointResolution: RpcEndpointResolution,
+    ) : AutomaticPaymentEvidenceAttempt
+}
+
+private sealed interface PaymentEvidencePersistenceResult {
+    data class Current(val invoice: Invoice?) : PaymentEvidencePersistenceResult
+    data class StaleEndpoint(val invoice: Invoice?) : PaymentEvidencePersistenceResult
+}
+
+private data class ResolvedPaymentObservation(
+    val observation: PaymentObservation,
+    val endpointResolution: RpcEndpointResolution,
+)
 
 internal sealed interface AutomaticPaymentEvidenceResult {
     data class Available(val invoice: Invoice?) : AutomaticPaymentEvidenceResult
@@ -110,13 +141,20 @@ class InvoiceRepository(
     private val operatorWalletStore: OperatorWalletStore,
     private val lifecycleGate: TerminalLifecycleGate,
     private val rpcWorkCoordinator: RpcWorkCoordinator = RpcWorkCoordinator(),
+    private val rpcEndpointResolver: RpcEndpointResolver = RpcEndpointResolver.PASSTHROUGH,
     private val paymentTransactionResolver: PaymentTransactionResolver =
         Web3jPaymentTransactionResolver(),
+    private val paymentPollIntervalMillis: Long = POLL_INTERVAL_MILLIS,
 ) {
+    init {
+        require(paymentPollIntervalMillis > 0) { "Payment polling interval must be positive" }
+    }
+
     private val lateInvoiceReconciler = LateInvoiceReconciler(
         invoiceDao,
         settlementEventDao,
         lifecycleGate,
+        rpcEndpointResolver = rpcEndpointResolver,
     )
 
     /** Serializes cashier profile changes with invoice publication and settlement mutations. */
@@ -153,7 +191,9 @@ class InvoiceRepository(
                             true,
                         ),
                     ) { "Receiver implementation pin mismatch" }
-                    val network = settings.toNetworkConfig()
+                    val network = settings.toNetworkConfig(
+                        rpcEndpointResolver.resolve(settings.chainId, settings.rpcUrl),
+                    )
                     val tokenAddress = EvmAddress.parse(token.address)
                     val amount = TokenAmount.parse(displayAmount, token.decimals)
                     val rpc = ReadOnlyRpcClient(network)
@@ -241,39 +281,50 @@ class InvoiceRepository(
         if (!invoice.canMonitor()) return@flow
 
         val request = invoice.toPaymentRequest()
-        val observer = PaymentObserver(
-            ReadOnlyRpcClient(
-                invoice.toNetworkConfig(),
-                connectTimeoutMillis = if (boundedRpc) {
-                    RECOVERY_RPC_CONNECT_TIMEOUT_MILLIS
-                } else {
-                    MONITOR_RPC_CONNECT_TIMEOUT_MILLIS
-                },
-                readTimeoutMillis = if (boundedRpc) {
-                    RECOVERY_RPC_READ_TIMEOUT_MILLIS
-                } else {
-                    MONITOR_RPC_READ_TIMEOUT_MILLIS
-                },
-            ),
-        )
+        val connectTimeoutMillis = if (boundedRpc) {
+            RECOVERY_RPC_CONNECT_TIMEOUT_MILLIS
+        } else {
+            MONITOR_RPC_CONNECT_TIMEOUT_MILLIS
+        }
+        val readTimeoutMillis = if (boundedRpc) {
+            RECOVERY_RPC_READ_TIMEOUT_MILLIS
+        } else {
+            MONITOR_RPC_READ_TIMEOUT_MILLIS
+        }
         var previous = invoice.toPreviousObservation(request)
         while (invoice.canMonitor()) {
             val attempt = runVisibleRpcAttempt(
                 boundedRpc = boundedRpc,
                 attempt = {
                     rpcWorkCoordinator.withBackgroundOperation {
-                        observer.observe(
-                            request = request,
-                            previous = previous,
-                            requiredConfirmations = invoice.confirmationBlocks,
+                        // Resolve and construct inside every bounded unit. An already-open invoice
+                        // therefore switches providers on its next sample after an admin rotation.
+                        val endpointResolution = rpcEndpointResolver.resolveCurrent(
+                            invoice.chainId,
+                            invoice.rpcUrl,
+                        )
+                        val observer = PaymentObserver(
+                            ReadOnlyRpcClient(
+                                invoice.toNetworkConfig(endpointResolution.endpoint),
+                                connectTimeoutMillis = connectTimeoutMillis,
+                                readTimeoutMillis = readTimeoutMillis,
+                            ),
+                        )
+                        ResolvedPaymentObservation(
+                            observation = observer.observe(
+                                request = request,
+                                previous = previous,
+                                requiredConfirmations = invoice.confirmationBlocks,
+                            ),
+                            endpointResolution = endpointResolution,
                         )
                     }
                 },
                 reloadDurableState = { invoiceDao.getById(invoice.invoiceId) },
                 shouldContinue = { candidate -> candidate.canMonitor() },
-                pauseBeforeRetry = { delay(POLL_INTERVAL_MILLIS) },
+                pauseBeforeRetry = { delay(paymentPollIntervalMillis) },
             )
-            val observation = when (attempt) {
+            val resolvedObservation = when (attempt) {
                 is VisibleRpcAttemptResult.Observed -> attempt.value
                 is VisibleRpcAttemptResult.Retry -> {
                     invoice = attempt.durableState
@@ -308,6 +359,7 @@ class InvoiceRepository(
                     continue
                 }
             }
+            val observation = resolvedObservation.observation
             val status = observation.toInvoiceStatus()
             val confirmedBlock = if (status == InvoiceStatus.PAID || status == InvoiceStatus.OVERPAID) {
                 observation.blockNumber
@@ -341,7 +393,12 @@ class InvoiceRepository(
                 )
                 try {
                     rpcWorkCoordinator.withBackgroundOperation {
-                        PaymentEvidenceAttempt(paymentTransactionResolver.resolve(candidate))
+                        PaymentEvidenceAttempt(
+                            paymentTransactionResolver.resolve(
+                                candidate,
+                                resolvedObservation.endpointResolution.endpoint,
+                            ),
+                        )
                     }?.evidence
                 } catch (error: CancellationException) {
                     throw error
@@ -380,7 +437,9 @@ class InvoiceRepository(
             val (latest, observationPersisted) = lifecycleGate.withExclusiveMutation {
                 val current = invoiceDao.getById(invoice.invoiceId)
                     ?: throw IllegalStateException("Invoice disappeared while monitoring")
-                if (current != invoice) {
+                if (!rpcEndpointResolver.isCurrent(resolvedObservation.endpointResolution) ||
+                    current != invoice
+                ) {
                     current to false
                 } else {
                     check(
@@ -408,7 +467,7 @@ class InvoiceRepository(
             previous = if (observationPersisted) observation else invoice.toPreviousObservation(request)
             emit(invoice)
             if (!invoice.canMonitor()) break
-            delay(POLL_INTERVAL_MILLIS)
+            delay(paymentPollIntervalMillis)
         }
     }.flowOn(Dispatchers.IO)
 
@@ -444,10 +503,31 @@ class InvoiceRepository(
         if (!invoice.needsPaymentEvidenceValidation()) {
             return@withContext invoice
         }
-        val evidence = rpcWorkCoordinator.withInteractiveOperation {
-            paymentTransactionResolver.resolve(invoice)
-        } ?: return@withContext invoice.withoutIncomingPaymentEvidence()
-        persistValidatedPaymentEvidence(invoice, evidence)
+        val attempt = rpcWorkCoordinator.withInteractiveOperation {
+            val endpointResolution = rpcEndpointResolver.resolveCurrent(
+                invoice.chainId,
+                invoice.rpcUrl,
+            )
+            ResolvedPaymentEvidenceAttempt(
+                evidence = paymentTransactionResolver.resolve(
+                    invoice,
+                    endpointResolution.endpoint,
+                ),
+                endpointResolution = endpointResolution,
+            )
+        }
+        val evidence = attempt.evidence
+            ?: return@withContext invoice.withoutIncomingPaymentEvidence()
+        when (
+            val result = persistValidatedPaymentEvidence(
+                invoice,
+                evidence,
+                attempt.endpointResolution,
+            )
+        ) {
+            is PaymentEvidencePersistenceResult.Current -> result.invoice
+            is PaymentEvidencePersistenceResult.StaleEndpoint -> result.invoice
+        }
     }
 
     /**
@@ -464,38 +544,87 @@ class InvoiceRepository(
         }
         val attempt = try {
             rpcWorkCoordinator.withBackgroundOperation {
-                PaymentEvidenceAttempt(paymentTransactionResolver.resolve(invoice))
+                val endpointResolution = rpcEndpointResolver.resolveCurrent(
+                    invoice.chainId,
+                    invoice.rpcUrl,
+                )
+                try {
+                    AutomaticPaymentEvidenceAttempt.Resolved(
+                        evidence = paymentTransactionResolver.resolve(
+                            invoice,
+                            endpointResolution.endpoint,
+                        ),
+                        endpointResolution = endpointResolution,
+                    )
+                } catch (error: NetworkConfigurationException) {
+                    // Preserve the generation that produced the terminal failure. Endpoint
+                    // replacement may begin as soon as this background coordinator unit releases.
+                    AutomaticPaymentEvidenceAttempt.Unsupported(error, endpointResolution)
+                }
             }
         } catch (error: CancellationException) {
             throw error
-        } catch (error: NetworkConfigurationException) {
-            return@withContext AutomaticPaymentEvidenceResult.Unsupported(
-                invoice.withoutIncomingPaymentEvidence(),
-            )
         } catch (_: Exception) {
+            // Rate limits and transport failures remain retryable regardless of endpoint rotation.
             return@withContext AutomaticPaymentEvidenceResult.Deferred
         } ?: return@withContext AutomaticPaymentEvidenceResult.Deferred
 
-        val evidence = attempt.evidence
-            ?: return@withContext AutomaticPaymentEvidenceResult.Unsupported(
+        when (attempt) {
+            is AutomaticPaymentEvidenceAttempt.Unsupported ->
+                classifyUnsupportedAutomaticPaymentEvidence(
+                    invoice,
+                    attempt.endpointResolution,
+                )
+            is AutomaticPaymentEvidenceAttempt.Resolved -> {
+                val evidence = attempt.evidence
+                    ?: return@withContext classifyUnsupportedAutomaticPaymentEvidence(
+                        invoice,
+                        attempt.endpointResolution,
+                    )
+                when (
+                    val result = persistValidatedPaymentEvidence(
+                        invoice,
+                        evidence,
+                        attempt.endpointResolution,
+                    )
+                ) {
+                    is PaymentEvidencePersistenceResult.Current ->
+                        AutomaticPaymentEvidenceResult.Available(result.invoice)
+                    is PaymentEvidencePersistenceResult.StaleEndpoint ->
+                        AutomaticPaymentEvidenceResult.Deferred
+                }
+            }
+        }
+    }
+
+    private suspend fun classifyUnsupportedAutomaticPaymentEvidence(
+        invoice: Invoice,
+        endpointResolution: RpcEndpointResolution,
+    ): AutomaticPaymentEvidenceResult = lifecycleGate.withExclusiveMutation {
+        if (rpcEndpointResolver.isCurrent(endpointResolution)) {
+            AutomaticPaymentEvidenceResult.Unsupported(
                 invoice.withoutIncomingPaymentEvidence(),
             )
-        AutomaticPaymentEvidenceResult.Available(
-            persistValidatedPaymentEvidence(invoice, evidence),
-        )
+        } else {
+            AutomaticPaymentEvidenceResult.Deferred
+        }
     }
 
     private suspend fun persistValidatedPaymentEvidence(
         invoice: Invoice,
         evidence: PaymentTransactionEvidence,
-    ): Invoice? {
-        val current = lifecycleGate.withExclusiveMutation {
+        endpointResolution: RpcEndpointResolution,
+    ): PaymentEvidencePersistenceResult {
+        val (current, endpointChanged) = lifecycleGate.withExclusiveMutation {
             val durable = invoiceDao.getById(invoice.invoiceId)
-                ?: return@withExclusiveMutation null
+                ?: return@withExclusiveMutation null to false
+            if (!rpcEndpointResolver.isCurrent(endpointResolution)) {
+                return@withExclusiveMutation durable.withoutIncomingPaymentEvidence() to true
+            }
             if (!durable.receiptAutoPrintEligible || !durable.hasSuccessfulPrimaryPayment() ||
                 !durable.hasSameFundingCursor(invoice)
             ) {
-                return@withExclusiveMutation durable.withoutIncomingPaymentEvidence()
+                return@withExclusiveMutation durable.withoutIncomingPaymentEvidence() to false
             }
             if (!durable.matches(evidence)) {
                 invoiceDao.persistPaymentEvidence(
@@ -510,12 +639,17 @@ class InvoiceRepository(
                     paidAt = evidence.blockTimestamp,
                 )
             }
-            invoiceDao.getById(invoice.invoiceId)
+            invoiceDao.getById(invoice.invoiceId) to false
         }
-        return current?.takeIf {
+        val printable = current?.takeIf {
             it.receiptAutoPrintEligible && it.hasSuccessfulPrimaryPayment() &&
                 it.hasSameFundingCursor(invoice) && it.matches(evidence)
         } ?: current?.withoutIncomingPaymentEvidence()
+        return if (endpointChanged) {
+            PaymentEvidencePersistenceResult.StaleEndpoint(printable)
+        } else {
+            PaymentEvidencePersistenceResult.Current(printable)
+        }
     }
 
     private fun Invoice.needsPaymentEvidenceValidation(): Boolean =
@@ -556,17 +690,17 @@ class InvoiceRepository(
             settings.provisionedOperatorAddress?.equals(wallet.address, true) == true
     }
 
-    private fun TerminalConfigSnapshot.toNetworkConfig() = NetworkConfig(
+    private fun TerminalConfigSnapshot.toNetworkConfig(resolvedRpcUrl: String) = NetworkConfig(
         chainId = chainId,
-        rpcUrl = rpcUrl,
+        rpcUrl = resolvedRpcUrl,
         factory = EvmAddress.parse(factoryAddress),
         receiverImplementation = EvmAddress.parse(receiverImplementationAddress),
         vault = EvmAddress.parse(vaultAddress)
     )
 
-    private fun Invoice.toNetworkConfig() = NetworkConfig(
+    private fun Invoice.toNetworkConfig(resolvedRpcUrl: String) = NetworkConfig(
         chainId = chainId,
-        rpcUrl = rpcUrl,
+        rpcUrl = resolvedRpcUrl,
         factory = EvmAddress.parse(factoryAddress),
         receiverImplementation = EvmAddress.parse(receiverImplementationAddress),
         vault = EvmAddress.parse(vaultAddress)

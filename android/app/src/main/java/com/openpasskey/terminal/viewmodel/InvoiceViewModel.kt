@@ -15,6 +15,7 @@ import com.openpasskey.terminal.data.model.receiptPrintFingerprint
 import com.openpasskey.terminal.data.repository.InvoiceRepository
 import com.openpasskey.terminal.printing.ReceiptCoordinator
 import com.openpasskey.terminal.printing.ReceiptRequestResult
+import com.openpasskey.terminal.rpc.safeReadRpcFailureMessage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -209,7 +210,7 @@ class InvoiceViewModel(
                 )
             } catch (error: Exception) {
                 _createState.value = _createState.value.withRepositoryFailure(
-                    error.message ?: "Invoice validation failed.",
+                    safeReadRpcFailureMessage(error, "Invoice validation failed."),
                 )
             }
         }
@@ -252,7 +253,10 @@ class InvoiceViewModel(
                 throw error
             } catch (error: Exception) {
                 val stored = repository.getInvoice(invoiceId)
-                _paymentState.value = PaymentUiState(stored, error.message ?: "Read-only RPC failed")
+                _paymentState.value = PaymentUiState(
+                    stored,
+                    safeReadRpcFailureMessage(error, "Read-only RPC failed"),
+                )
             }
         }
     }

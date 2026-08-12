@@ -13,12 +13,34 @@ import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.lifecycle.TerminalResetCoordinator
 import com.openpasskey.terminal.lifecycle.RpcOperatorNativeBalanceReader
 import com.openpasskey.terminal.rpc.RpcWorkCoordinator
+import com.openpasskey.terminal.rpc.RpcEndpointStore
+import com.openpasskey.terminal.rpc.PinnedRpcEndpointVerifier
 import com.openpasskey.terminal.printing.IminReceiptPrinter
 import com.openpasskey.terminal.printing.ReceiptCoordinator
 
 class OPKTerminalApp : Application() {
-    val chainConfig by lazy { ChainConfig(this) }
-    val invoiceDatabase by lazy { InvoiceDatabase.getInstance(this) }
+    val rpcEndpointStore by lazy {
+        RpcEndpointStore(
+            context = this,
+            buildManagedEndpoints = buildMap {
+                BuildConfig.OPK_BASE_MAINNET_RPC_URL.takeIf(String::isNotBlank)?.let {
+                    put(8453L, it)
+                }
+                BuildConfig.OPK_BASE_SEPOLIA_RPC_URL.takeIf(String::isNotBlank)?.let {
+                    put(84532L, it)
+                }
+            },
+            allowPublicFallback = BuildConfig.OPK_ALLOW_PUBLIC_RPC_FALLBACK,
+        )
+    }
+    val rpcEndpointVerifier by lazy { PinnedRpcEndpointVerifier() }
+    val chainConfig by lazy { ChainConfig(this, rpcEndpointStore) }
+    val invoiceDatabase by lazy {
+        // Capture and sanitize any legacy active endpoint before Room removes historical plaintext
+        // endpoint copies during its version-9 migration.
+        chainConfig.snapshot()
+        InvoiceDatabase.getInstance(this)
+    }
     val operatorWalletStore by lazy { OperatorWalletStore(this) }
     val adminPinStore by lazy { AdminPinStore(this) }
     val terminalLifecycleGate by lazy { TerminalLifecycleGate() }
@@ -26,10 +48,11 @@ class OPKTerminalApp : Application() {
     val receiptPrinter by lazy { IminReceiptPrinter(this) }
     val terminalProvisioner by lazy {
         TerminalProvisioner(
-            chainConfig::snapshot,
-            chainConfig::compareAndReplaceProvisioned,
-            operatorWalletStore::snapshot,
-            terminalLifecycleGate,
+            snapshot = chainConfig::snapshot,
+            compareAndCommit = chainConfig::compareAndReplaceProvisioned,
+            currentWalletSnapshot = operatorWalletStore::snapshot,
+            lifecycleGate = terminalLifecycleGate,
+            rpcEndpointResolver = rpcEndpointStore,
         )
     }
     val operatorResetGuard by lazy {
@@ -39,7 +62,10 @@ class OPKTerminalApp : Application() {
         TerminalResetCoordinator(
             terminalLifecycleGate,
             operatorResetGuard,
-            RpcOperatorNativeBalanceReader(chainConfig::snapshot),
+            RpcOperatorNativeBalanceReader(
+                configSnapshot = chainConfig::snapshot,
+                rpcEndpointResolver = rpcEndpointStore,
+            ),
             chainConfig::clearProvisioning,
             operatorWalletStore::resetWalletAfterExplicitConfirmation,
         )
@@ -52,6 +78,7 @@ class OPKTerminalApp : Application() {
             operatorWalletStore,
             terminalLifecycleGate,
             rpcWorkCoordinator,
+            rpcEndpointStore,
         )
     }
     val receiptCoordinator by lazy {
@@ -64,6 +91,7 @@ class OPKTerminalApp : Application() {
             chainConfig,
             terminalLifecycleGate,
             rpcWorkCoordinator,
+            rpcEndpointStore,
         )
     }
 }

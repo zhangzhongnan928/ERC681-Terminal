@@ -7,6 +7,29 @@ import java.lang.reflect.Proxy
 
 class InvoiceDatabaseMigrationTest {
     @Test
+    fun v9RemovesCredentialBearingRpcCopiesFromBothSnapshotTables() {
+        val statements = mutableListOf<String>()
+        val database = recordingDatabase(statements)
+
+        InvoiceDatabase.MIGRATION_8_9.migrate(database)
+
+        assertTrue(statements.size == 3)
+        assertTrue(statements.any {
+            "UPDATE invoices SET rpcUrl" in it &&
+                "8453 THEN 'https://mainnet.base.org'" in it &&
+                "84532 THEN 'https://sepolia.base.org'" in it
+        })
+        assertTrue(statements.any {
+            "UPDATE settlement_transactions SET rpcUrl" in it &&
+                "WHERE chainId IN (8453, 84532)" in it
+        })
+        assertTrue(statements.any {
+            "UPDATE settlement_transactions SET error" in it &&
+                "secure RPC migration" in it
+        })
+    }
+
+    @Test
     fun v8AddsStableMerchantReceiptIdentity() {
         val statements = mutableListOf<String>()
         val database = recordingDatabase(statements)

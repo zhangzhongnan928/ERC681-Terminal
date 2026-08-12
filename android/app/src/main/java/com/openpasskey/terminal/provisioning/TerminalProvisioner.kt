@@ -12,10 +12,13 @@ import com.openpasskey.terminal.chain.resolvedPaymentProfiles
 import com.openpasskey.terminal.chain.selectedPaymentProfile
 import com.openpasskey.terminal.chain.upsertingProfile
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
+import com.openpasskey.terminal.rpc.RpcEndpointResolver
 import com.openpasskey.terminal.wallet.OperatorWalletAvailability
 import com.openpasskey.terminal.wallet.OperatorWalletSnapshot
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.runInterruptible
 import org.web3j.crypto.Hash
 import org.web3j.utils.Numeric
 import java.io.Closeable
@@ -69,7 +72,7 @@ fun interface ProvisioningChainReaderFactory {
     fun create(config: NetworkConfig): ProvisioningChainReader
 }
 
-private class RpcProvisioningChainReader(
+internal class RpcProvisioningChainReader(
     private val client: ReadOnlyRpcClient,
 ) : ProvisioningChainReader {
     override fun chainId(): Long = client.chainId()
@@ -83,9 +86,19 @@ private class RpcProvisioningChainReader(
 
     override fun tokenDecimals(token: EvmAddress): Int = client.tokenDecimals(token)
     override fun tokenSymbol(token: EvmAddress): String = client.tokenSymbol(token)
-    override fun validate(token: EvmAddress): NetworkValidation = client.validate(token)
+    override fun validate(token: EvmAddress): NetworkValidation = client.validate(
+        token = token,
+        expectedDecimals = null,
+        expectedSymbol = null,
+        retryOnThrottle = true,
+    )
     override fun validateWithEvidence(token: EvmAddress): ProvisioningValidationEvidence {
-        val evidence = client.validateWithEvidence(token)
+        val evidence = client.validateWithEvidence(
+            token = token,
+            expectedDecimals = null,
+            expectedSymbol = null,
+            retryOnThrottle = true,
+        )
         return ProvisioningValidationEvidence(
             validation = evidence.validation,
             vaultRuntimeCode = evidence.vaultRuntimeCode,
@@ -96,7 +109,12 @@ private class RpcProvisioningChainReader(
         expectedDecimals: Int,
         expectedSymbol: String,
     ): ProvisioningValidationEvidence {
-        val evidence = client.validateWithEvidence(token, expectedDecimals, expectedSymbol)
+        val evidence = client.validateWithEvidence(
+            token = token,
+            expectedDecimals = expectedDecimals,
+            expectedSymbol = expectedSymbol,
+            retryOnThrottle = true,
+        )
         return ProvisioningValidationEvidence(
             validation = evidence.validation,
             vaultRuntimeCode = evidence.vaultRuntimeCode,
@@ -106,7 +124,12 @@ private class RpcProvisioningChainReader(
         token: EvmAddress,
         expectedDecimals: Int,
         expectedSymbol: String,
-    ): NetworkValidation = client.validate(token, expectedDecimals, expectedSymbol)
+    ): NetworkValidation = client.validate(
+        token = token,
+        expectedDecimals = expectedDecimals,
+        expectedSymbol = expectedSymbol,
+        retryOnThrottle = true,
+    )
 
     override fun close() = Unit
 }
@@ -123,6 +146,7 @@ class TerminalProvisioner(
     private val compareAndCommit: (TerminalConfigSnapshot, TerminalConfigSnapshot) -> Boolean,
     private val currentWalletSnapshot: () -> OperatorWalletSnapshot,
     private val lifecycleGate: TerminalLifecycleGate,
+    private val rpcEndpointResolver: RpcEndpointResolver = RpcEndpointResolver.PASSTHROUGH,
     private val clientFactory: ProvisioningChainReaderFactory = ProvisioningChainReaderFactory { config ->
         RpcProvisioningChainReader(ReadOnlyRpcClient(config))
     },
@@ -145,38 +169,41 @@ class TerminalProvisioner(
         val profile = KnownChainPolicy.requireProfile(payload.chainId)
         profile.requireValidCreate2Fixture()
         val previous = snapshot()
-        val rpcUrl = selectRpcUrl(previous, profile, payload.vault)
+        val storedRpcUrl = selectRpcUrl(previous, profile, payload.vault)
+        val operationalRpcUrl = rpcEndpointResolver.resolve(profile.chainId, storedRpcUrl)
+        val trustedRpcUrl = rpcEndpointResolver.resolve(profile.chainId, profile.rpcUrl)
         val operationalNetwork = NetworkConfig(
             chainId = profile.chainId,
-            rpcUrl = rpcUrl,
+            rpcUrl = operationalRpcUrl,
             factory = profile.factory,
             receiverImplementation = profile.receiverImplementation,
             vault = payload.vault,
         )
-        val trustedNetwork = operationalNetwork.copy(rpcUrl = profile.rpcUrl)
+        val trustedNetwork = operationalNetwork.copy(rpcUrl = trustedRpcUrl)
 
-        val token = if (rpcUrl == profile.rpcUrl) {
-            clientFactory.create(trustedNetwork).use { trusted ->
-                // validateWithEvidence anchors and verifies the trusted chain before provenance
-                // reads, so a standalone chainId round trip here would be redundant.
-                validateTrustedProvenance(trusted, profile, payload)
-            }
+        val token = if (operationalRpcUrl == trustedRpcUrl) {
+            // A build-managed or locally admin-authorized endpoint is the active read trust source
+            // for this chain. It must still prove every compiled deployment and route pin before
+            // configuration can be committed.
+            validateTrustedProvenanceInterruptibly(trustedNetwork, profile, payload)
         } else {
-            // A persisted/admin-supplied endpoint is useful operationally, but it is not a trust
-            // root. It gets exactly one capability here: proving that it serves the selected chain.
-            clientFactory.create(operationalNetwork).use { operational ->
-                require(operational.chainId() == profile.chainId) {
-                    "Operational RPC chain ID mismatch"
+            // Compatibility callers can still supply a distinct legacy operational URL while the
+            // compiled profile endpoint performs the full pinned provenance proof.
+            runInterruptible(Dispatchers.IO) {
+                clientFactory.create(operationalNetwork).use { operational ->
+                    require(operational.chainId() == profile.chainId) {
+                        "Operational RPC chain ID mismatch"
+                    }
                 }
             }
-            clientFactory.create(trustedNetwork).use { trusted ->
-                validateTrustedProvenance(trusted, profile, payload)
-            }
+            validateTrustedProvenanceInterruptibly(trustedNetwork, profile, payload)
         }
 
         val paymentProfile = TerminalPaymentProfile(
             networkName = profile.networkName,
-            rpcUrl = rpcUrl,
+            // Persist only the non-secret catalog URL. Runtime resolution supplies any encrypted
+            // per-chain override immediately before a client is constructed.
+            rpcUrl = storedRpcUrl,
             chainId = profile.chainId,
             factoryAddress = profile.factory.value,
             receiverImplementationAddress = profile.receiverImplementation.value,
@@ -210,6 +237,20 @@ class TerminalProvisioner(
             token,
             requireNotNull(candidate.selectedPaymentProfile()),
         )
+    }
+
+    private suspend fun validateTrustedProvenanceInterruptibly(
+        network: NetworkConfig,
+        profile: KnownChainProfile,
+        payload: TerminalProvisioningPayload,
+    ): PaymentToken = runInterruptible(Dispatchers.IO) {
+        clientFactory.create(network).use { trusted ->
+            // validateWithEvidence anchors and verifies the trusted chain before provenance
+            // reads, so a standalone chainId round trip here would be redundant. The SDK may
+            // apply bounded throttle backoff inside this call; runInterruptible ensures locking
+            // Admin/setup cancels that wait before any candidate can be committed.
+            validateTrustedProvenance(trusted, profile, payload)
+        }
     }
 
     private fun validateTrustedProvenance(

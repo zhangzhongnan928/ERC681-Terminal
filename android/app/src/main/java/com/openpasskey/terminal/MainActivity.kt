@@ -56,6 +56,8 @@ private object DefaultLiveTerminalStackFactory : LiveTerminalStackFactory {
                 app.terminalResetCoordinator,
                 app.terminalLifecycleGate,
                 app.rpcWorkCoordinator,
+                app.rpcEndpointStore,
+                app.rpcEndpointVerifier,
             ),
         )[SettingsViewModel::class.java]
         val settlementViewModel = ViewModelProvider(

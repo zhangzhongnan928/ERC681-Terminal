@@ -137,6 +137,46 @@ class RpcWorkCoordinatorTest {
     }
 
     @Test
+    fun `exclusive interactive mutation drains old background work before trust-source commit`() =
+        runBlocking {
+            val coordinator = RpcWorkCoordinator(backgroundRetryMillis = 1)
+            val backgroundEntered = CompletableDeferred<Unit>()
+            val releaseBackground = CompletableDeferred<Unit>()
+            val exclusiveEntered = CompletableDeferred<Unit>()
+            val events = mutableListOf<String>()
+
+            val background = launch {
+                coordinator.withBackgroundOperation {
+                    events += "old-provider-read"
+                    backgroundEntered.complete(Unit)
+                    releaseBackground.await()
+                    events += "old-provider-commit"
+                    Unit
+                }
+            }
+            backgroundEntered.await()
+            val exclusive = launch {
+                coordinator.withExclusiveInteractiveOperation {
+                    events += "new-provider-commit"
+                    exclusiveEntered.complete(Unit)
+                }
+            }
+
+            delay(15)
+            assertFalse(exclusiveEntered.isCompleted)
+            assertEquals(null, coordinator.withBackgroundOperation { Unit })
+
+            releaseBackground.complete(Unit)
+            joinAll(background, exclusive)
+
+            assertEquals(
+                listOf("old-provider-read", "old-provider-commit", "new-provider-commit"),
+                events,
+            )
+            assertFalse(coordinator.interactive)
+        }
+
+    @Test
     fun `queued interactive work causes a later background unit to defer`() = runBlocking {
         val coordinator = RpcWorkCoordinator(backgroundRetryMillis = 1)
         val interactiveEntered = CompletableDeferred<Unit>()

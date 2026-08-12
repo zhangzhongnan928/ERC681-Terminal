@@ -14,6 +14,7 @@ import com.openpasskey.terminal.chain.TerminalConfigSnapshot
 import com.openpasskey.terminal.lifecycle.TerminalLifecycleGate
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
 import com.openpasskey.terminal.rpc.RpcWorkCoordinator
+import com.openpasskey.terminal.rpc.RpcEndpointResolver
 import com.openpasskey.terminal.rpc.RpcInteractiveReservation
 import com.openpasskey.terminal.data.model.Invoice
 import com.openpasskey.terminal.data.model.InvoiceStatus
@@ -30,6 +31,7 @@ import com.openpasskey.terminal.settlement.SettlementInvoiceIntent
 import com.openpasskey.terminal.settlement.SettlementPreflightRequest
 import com.openpasskey.terminal.settlement.SettlementReceiverSafetyRead
 import com.openpasskey.terminal.settlement.SettlementReceipt
+import com.openpasskey.terminal.settlement.SettlementRpcException
 import com.openpasskey.terminal.settlement.SweepProofClassification
 import com.openpasskey.terminal.settlement.VerifiedSweep
 import com.openpasskey.terminal.settlement.Web3jSettlementChainClient
@@ -55,6 +57,8 @@ data class PreparedSettlement(
     val chainId: Long,
     val networkName: String,
     val rpcUrl: String,
+    /** Credential-neutral process revision of the endpoint that produced this proof. */
+    val rpcEndpointGeneration: Long,
     val vaultAddress: String,
     val tokenAddress: String,
     val tokenSymbol: String,
@@ -133,9 +137,11 @@ class SettlementRepository internal constructor(
     private val chainConfigSnapshot: () -> TerminalConfigSnapshot,
     private val lifecycleGate: TerminalLifecycleGate,
     private val rpcWorkCoordinator: RpcWorkCoordinator = RpcWorkCoordinator(),
+    private val rpcEndpointResolver: RpcEndpointResolver = RpcEndpointResolver.PASSTHROUGH,
     private val clientFactory: (String) -> SettlementChainClient = ::Web3jSettlementChainClient,
     private val gson: Gson = Gson(),
     private val elapsedRealtimeMillis: () -> Long = SystemClock::elapsedRealtime,
+    private val historicalSnapshotValidationOverride: ((Invoice, String) -> Unit)? = null,
 ) {
     constructor(
         database: InvoiceDatabase,
@@ -143,6 +149,7 @@ class SettlementRepository internal constructor(
         chainConfig: ChainConfig,
         lifecycleGate: TerminalLifecycleGate,
         rpcWorkCoordinator: RpcWorkCoordinator = RpcWorkCoordinator(),
+        rpcEndpointResolver: RpcEndpointResolver = RpcEndpointResolver.PASSTHROUGH,
         clientFactory: (String) -> SettlementChainClient = ::Web3jSettlementChainClient,
         gson: Gson = Gson(),
         elapsedRealtimeMillis: () -> Long = SystemClock::elapsedRealtime,
@@ -152,6 +159,7 @@ class SettlementRepository internal constructor(
         chainConfigSnapshot = chainConfig::snapshot,
         lifecycleGate = lifecycleGate,
         rpcWorkCoordinator = rpcWorkCoordinator,
+        rpcEndpointResolver = rpcEndpointResolver,
         clientFactory = clientFactory,
         gson = gson,
         elapsedRealtimeMillis = elapsedRealtimeMillis,
@@ -210,6 +218,7 @@ class SettlementRepository internal constructor(
                 nowElapsedRealtimeMillis = elapsedRealtimeMillis(),
             )
             submissionMutex.withLock {
+                requireCurrentRpcEndpointGeneration(reviewed)
                 requireNoActiveOperatorTransaction(reviewed)
                 // Post-authentication work is intentionally only the live, mutable safety core.
                 // The pre-prompt proof supplied provenance and fees moments ago.
@@ -254,6 +263,7 @@ class SettlementRepository internal constructor(
                         authenticatedAtElapsedRealtimeMillis = authenticatedAtElapsedRealtimeMillis,
                         nowElapsedRealtimeMillis = elapsedRealtimeMillis(),
                     )
+                    requireCurrentRpcEndpointGeneration(fresh)
                     // Activate only the exact historical target just revalidated above, then use
                     // the constrained signer in the same local mutation critical section.
                     val signedBytes = walletAccess.activateAndSignSettlementTransaction(
@@ -365,10 +375,14 @@ class SettlementRepository internal constructor(
             require(!EvmAddress.parse(invoice.vaultAddress).isZero) { "Settlement vault must not be zero" }
             requirePinnedHistoricalInvoiceSnapshot(invoice)
         }
+        // One resolution binds historical validation, live preflight, and all reusable evidence
+        // in this prepare. The credential-bearing endpoint never enters PreparedSettlement.
+        val endpointResolution = rpcEndpointResolver.resolveCurrent(first.chainId, first.rpcUrl)
         val proofFingerprint = historicalSettlementProofFingerprint(first)
         val proofNow = elapsedRealtimeMillis()
         val reusableProofIsFresh = reusableHistoricalProof?.let { proof ->
-            proof.historicalProofFingerprint == proofFingerprint &&
+            proof.rpcEndpointGeneration == endpointResolution.generation &&
+                proof.historicalProofFingerprint == proofFingerprint &&
                 isElapsedProofFresh(
                     proof.historicalProofAtElapsedRealtimeMillis,
                     proofNow,
@@ -378,7 +392,8 @@ class SettlementRepository internal constructor(
         val historicalProofAt = if (reusableProofIsFresh) {
             requireNotNull(reusableHistoricalProof).historicalProofAtElapsedRealtimeMillis
         } else {
-            validateHistoricalSettlementSnapshot(first)
+            historicalSnapshotValidationOverride?.invoke(first, endpointResolution.endpoint)
+                ?: validateHistoricalSettlementSnapshot(first, endpointResolution.endpoint)
             proofNow
         }
         val wallet = walletAccess.snapshot()
@@ -394,7 +409,7 @@ class SettlementRepository internal constructor(
         val callData = SettlementAbi.encodeSweepSessions(intents, first.token)
         val confirmedObservedAmounts = invoices.map(Invoice::settlementObservedAmount)
 
-        clientFactory(first.rpcUrl).use { client ->
+        clientFactory(endpointResolution.endpoint).use { client ->
             val cursors = invoices.map(Invoice::settlementConfirmationCursor)
             val request = SettlementPreflightRequest(
                 operatorAddress = operator,
@@ -411,6 +426,7 @@ class SettlementRepository internal constructor(
             val canReuseGasEstimate = reusableGasEstimate.canReuseGasEstimateFor(
                 chainId = first.chainId,
                 rpcUrl = first.rpcUrl,
+                rpcEndpointGeneration = endpointResolution.generation,
                 vaultAddress = first.vaultAddress,
                 tokenAddress = first.token,
                 operatorAddress = operator,
@@ -491,11 +507,15 @@ class SettlementRepository internal constructor(
             require(balance >= requirement.requiredBalance) {
                 "Low gas balance: requires ${requirement.requiredBalance} wei including reserve; has $balance wei"
             }
+            check(rpcEndpointResolver.isCurrent(endpointResolution)) {
+                "RPC endpoint changed during settlement review; review it again"
+            }
             return PreparedSettlement(
                 invoiceIds = invoices.map(Invoice::invoiceId),
                 chainId = first.chainId,
                 networkName = first.networkName,
                 rpcUrl = first.rpcUrl,
+                rpcEndpointGeneration = endpointResolution.generation,
                 vaultAddress = EvmAddress.parse(first.vaultAddress).value,
                 tokenAddress = EvmAddress.parse(first.token).value,
                 tokenSymbol = first.tokenSymbol,
@@ -533,7 +553,7 @@ class SettlementRepository internal constructor(
         val raw = requireNotNull(transaction.signedRawTransaction) {
             "Signed transaction bytes are unavailable"
         }
-        clientFactory(transaction.rpcUrl).use { client ->
+        clientFor(transaction.chainId, transaction.rpcUrl).use { client ->
             val outcome = broadcastFreshSignedTransaction(client, raw, transaction.txHash)
             transaction = transaction.copy(
                 status = if (outcome.accepted) SettlementTransactionStatus.SUBMITTED
@@ -557,7 +577,7 @@ class SettlementRepository internal constructor(
             "Settlement transaction not found"
         }
         if (transaction.status !in ACTIVE_STATUSES) return transaction
-        clientFactory(transaction.rpcUrl).use { client ->
+        clientFor(transaction.chainId, transaction.rpcUrl).use { client ->
             when (transaction.status) {
                 SettlementTransactionStatus.SIGNED -> {
                     val raw = requireNotNull(transaction.signedRawTransaction) {
@@ -641,7 +661,7 @@ class SettlementRepository internal constructor(
                             receiptBlock = receipt.blockNumber,
                             error = finalHeadResult.exceptionOrNull()?.let { error ->
                                 "Unable to recheck final confirmation depth: " +
-                                    (error.message ?: "RPC read failed")
+                                    safeSettlementRpcError(error, "RPC read failed")
                             } ?: "Confirmation depth changed during finality verification; " +
                                 "waiting for the canonical head to reach block $target",
                             updatedAt = nowSeconds(),
@@ -695,7 +715,7 @@ class SettlementRepository internal constructor(
     ): SettlementTransaction {
         var transaction = requireNotNull(settlementDao.getById(id)) { "Settlement transaction not found" }
         if (transaction.status !in ACTIVE_STATUSES) return transaction
-        clientFactory(transaction.rpcUrl).use { client ->
+        clientFor(transaction.chainId, transaction.rpcUrl).use { client ->
             require(client.chainId() == transaction.chainId) { "RPC chain changed during recovery" }
             var receipt: SettlementReceipt? = null
             var broadcastAttemptedThisPass = false
@@ -715,7 +735,7 @@ class SettlementRepository internal constructor(
                         if (!pollForProgress) {
                             transaction = transaction.copy(
                                 status = SettlementTransactionStatus.SIGNED,
-                                error = error.message ?: "Broadcast result unknown",
+                                error = safeSettlementRpcError(error, "Broadcast result unknown"),
                                 updatedAt = nowSeconds(),
                             )
                             settlementDao.update(transaction)
@@ -724,11 +744,11 @@ class SettlementRepository internal constructor(
                         // A response can be lost after acceptance. Always query the deterministic
                         // local hash, and treat an exact "already known" response as submitted.
                         receipt = client.transactionReceipt(transaction.txHash)
-                        val alreadyKnown = isKnownTransactionResponse(error.message)
+                        val alreadyKnown = isKnownTransactionResponse(error)
                         if (receipt == null && !alreadyKnown) {
                             transaction = transaction.copy(
                                 status = SettlementTransactionStatus.SIGNED,
-                                error = error.message ?: "Broadcast result unknown",
+                                error = safeSettlementRpcError(error, "Broadcast result unknown"),
                                 updatedAt = nowSeconds()
                             )
                             settlementDao.update(transaction)
@@ -771,8 +791,11 @@ class SettlementRepository internal constructor(
                             "RPC returned a different transaction hash while rebroadcasting"
                         }
                     } catch (error: Exception) {
-                        if (!isKnownTransactionResponse(error.message)) {
-                            rebroadcastError = error.message ?: "Identical transaction rebroadcast failed"
+                        if (!isKnownTransactionResponse(error)) {
+                            rebroadcastError = safeSettlementRpcError(
+                                error,
+                                "Identical transaction rebroadcast failed",
+                            )
                         }
                     }
                 } else if (retainedRaw == null) {
@@ -842,7 +865,8 @@ class SettlementRepository internal constructor(
                     status = SettlementTransactionStatus.CONFIRMING,
                     receiptBlock = null,
                     error = canonicalHashResult.exceptionOrNull()?.let { error ->
-                        "Unable to verify the canonical receipt block: ${error.message ?: "RPC read failed"}"
+                        "Unable to verify the canonical receipt block: " +
+                            safeSettlementRpcError(error, "RPC read failed")
                     } ?: "Receipt block is missing or orphaned; waiting for canonical inclusion",
                     updatedAt = nowSeconds(),
                 )
@@ -858,9 +882,9 @@ class SettlementRepository internal constructor(
                 transaction = transaction.copy(
                     status = SettlementTransactionStatus.CONFIRMING,
                     receiptBlock = confirmedReceipt.blockNumber,
-                    error = finalHeadResult.exceptionOrNull()?.let { error ->
-                        "Unable to recheck final confirmation depth: " +
-                            (error.message ?: "RPC read failed")
+                        error = finalHeadResult.exceptionOrNull()?.let { error ->
+                            "Unable to recheck final confirmation depth: " +
+                                safeSettlementRpcError(error, "RPC read failed")
                     } ?: "Confirmation depth changed during finality verification; waiting for " +
                         "the canonical head to reach block $target",
                     updatedAt = nowSeconds(),
@@ -1013,7 +1037,7 @@ class SettlementRepository internal constructor(
         val latest = settlementDao.getById(transaction.id) ?: return
         if (latest.status !in ACTIVE_STATUSES) return
         settlementDao.update(latest.copy(
-            error = error.message ?: "Settlement recovery failed",
+            error = safeSettlementRpcError(error, "Settlement recovery failed"),
             updatedAt = nowSeconds()
         ))
     }
@@ -1059,7 +1083,14 @@ class SettlementRepository internal constructor(
             historicalSettlementProofFingerprint(invoices.first()) ==
                 prepared.historicalProofFingerprint,
         ) { "Historical settlement proof no longer matches the invoice snapshot" }
-        clientFactory(prepared.rpcUrl).use { client ->
+        val endpointResolution = rpcEndpointResolver.resolveCurrent(
+            prepared.chainId,
+            prepared.rpcUrl,
+        )
+        check(endpointResolution.generation == prepared.rpcEndpointGeneration) {
+            "RPC endpoint changed after settlement review; review it again"
+        }
+        clientFactory(endpointResolution.endpoint).use { client ->
             val cursors = invoices.map(Invoice::settlementConfirmationCursor)
             val live = client.settlementPreflight(
                 request = SettlementPreflightRequest(
@@ -1107,6 +1138,9 @@ class SettlementRepository internal constructor(
                 "Low gas balance: requires ${requirement.requiredBalance} wei including reserve; " +
                     "has ${live.nativeBalance} wei"
             }
+            check(rpcEndpointResolver.isCurrent(endpointResolution)) {
+                "RPC endpoint changed during settlement signing checks; review it again"
+            }
             return prepared.copy(
                 feeQuote = live.feeQuote,
                 maximumGasCost = requirement.maximumGasCost,
@@ -1118,11 +1152,14 @@ class SettlementRepository internal constructor(
     }
 
     /**
-     * Re-proves every security-sensitive historical snapshot field through the immutable shipped
-     * RPC endpoint. The stored endpoint is used later only for operational reads/broadcast after
-     * its chain ID and this provenance have independently passed.
+     * Re-proves every security-sensitive historical snapshot field through the currently approved
+     * per-chain endpoint while retaining immutable shipped deployment pins. Credential-bearing
+     * endpoint material is resolved only for this client and never copied into historical rows.
      */
-    private fun validateHistoricalSettlementSnapshot(invoice: Invoice) {
+    private fun validateHistoricalSettlementSnapshot(
+        invoice: Invoice,
+        resolvedRpcUrl: String,
+    ) {
         val profile = KnownChainPolicy.requireProfile(invoice.chainId)
         profile.requireValidCreate2Fixture()
         val pinnedNetwork = requirePinnedHistoricalInvoiceSnapshot(invoice)
@@ -1130,7 +1167,9 @@ class SettlementRepository internal constructor(
         val token = EvmAddress.parse(invoice.token)
 
         val rpc = ReadOnlyRpcClient(
-            pinnedNetwork,
+            pinnedNetwork.copy(
+                rpcUrl = resolvedRpcUrl,
+            ),
             connectTimeoutMillis = HISTORICAL_RPC_CONNECT_TIMEOUT_MILLIS,
             readTimeoutMillis = HISTORICAL_RPC_READ_TIMEOUT_MILLIS,
         )
@@ -1160,6 +1199,19 @@ class SettlementRepository internal constructor(
             "Operator is not authorized by the historical vault"
         }
     }
+
+    /** Compares only the process-local revision. The resolved credential is discarded immediately. */
+    private fun requireCurrentRpcEndpointGeneration(prepared: PreparedSettlement) {
+        val current = rpcEndpointResolver.resolveCurrent(prepared.chainId, prepared.rpcUrl)
+        check(
+            current.generation == prepared.rpcEndpointGeneration &&
+                rpcEndpointResolver.isCurrent(current),
+        ) { "RPC endpoint changed after settlement review; review it again" }
+    }
+
+    /** Resolves credential-bearing material only for the lifetime of this client construction. */
+    private fun clientFor(chainId: Long, fallbackRpcUrl: String): SettlementChainClient =
+        clientFactory(rpcEndpointResolver.resolve(chainId, fallbackRpcUrl))
 
     private suspend fun requireNoActiveOperatorTransaction(prepared: PreparedSettlement) {
         val active = settlementDao.getActiveForOperator(
@@ -1315,6 +1367,7 @@ internal fun isElapsedProofFresh(
 internal fun PreparedSettlement?.canReuseGasEstimateFor(
     chainId: Long,
     rpcUrl: String,
+    rpcEndpointGeneration: Long,
     vaultAddress: String,
     tokenAddress: String,
     operatorAddress: String,
@@ -1325,6 +1378,7 @@ internal fun PreparedSettlement?.canReuseGasEstimateFor(
 ): Boolean = this != null &&
     this.chainId == chainId &&
     this.rpcUrl == rpcUrl &&
+    this.rpcEndpointGeneration == rpcEndpointGeneration &&
     this.vaultAddress.equals(vaultAddress, true) &&
     this.tokenAddress.equals(tokenAddress, true) &&
     this.operatorAddress.equals(operatorAddress, true) &&
@@ -1407,20 +1461,36 @@ internal fun broadcastFreshSignedTransaction(
     }
     FreshSettlementBroadcastOutcome(accepted = true, error = null)
 } catch (error: Exception) {
-    val accepted = isKnownTransactionResponse(error.message)
+    val accepted = isKnownTransactionResponse(error)
     FreshSettlementBroadcastOutcome(
         accepted = accepted,
-        error = if (accepted) null else error.message ?: "Broadcast result unknown",
+        error = if (accepted) null else safeSettlementRpcError(error, "Broadcast result unknown"),
     )
 }
 
-private fun isKnownTransactionResponse(message: String?): Boolean =
-    message.orEmpty().lowercase().let { value ->
+private fun isKnownTransactionResponse(error: Throwable): Boolean =
+    (error as? SettlementRpcException)?.knownTransactionResponse == true ||
+        error.message.orEmpty().lowercase().let { value ->
         "already known" in value ||
             "known transaction" in value ||
             "already imported" in value ||
             "nonce too low" in value
     }
+
+/** Only transport-boundary messages from our redacting exception type may enter durable state. */
+internal fun safeSettlementRpcError(error: Throwable, fallback: String): String =
+    when {
+        error is SettlementRpcException && error.rpcCode != null ->
+            "RPC request failed with JSON-RPC error code ${error.rpcCode}"
+        error is IllegalArgumentException && error.message in SAFE_LOCAL_SETTLEMENT_ERRORS ->
+            requireNotNull(error.message)
+        else -> fallback
+    }
+
+private val SAFE_LOCAL_SETTLEMENT_ERRORS = setOf(
+    "RPC returned a different transaction hash",
+    "RPC returned a different transaction hash while rebroadcasting",
+)
 
 /**
  * Historical invoice snapshots and fresh on-chain authorization are the settlement authority.

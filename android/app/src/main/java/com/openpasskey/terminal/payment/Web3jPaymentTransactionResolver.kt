@@ -17,10 +17,15 @@ import kotlinx.coroutines.withContext
  * payment attribution, and the reusable SDK remains keyless and incapable of broadcasting.
  */
 class Web3jPaymentTransactionResolver : PaymentTransactionResolver {
-    override suspend fun resolve(invoice: Invoice): PaymentTransactionEvidence? =
+    override suspend fun resolve(
+        invoice: Invoice,
+        resolvedRpcUrl: String,
+    ): PaymentTransactionEvidence? =
         withContext(Dispatchers.IO) {
             val request = invoice.toPaymentEvidenceRequestOrNull() ?: return@withContext null
-            val client = ReadOnlyRpcClient(invoice.toEvidenceNetworkConfig())
+            val client = ReadOnlyRpcClient(
+                invoice.toEvidenceNetworkConfig(resolvedRpcUrl),
+            )
             PaymentEvidenceResolver(client).resolve(request)
         }
 }
@@ -45,9 +50,9 @@ internal fun Invoice.toPaymentEvidenceRequestOrNull(): PaymentEvidenceRequest? {
     )
 }
 
-private fun Invoice.toEvidenceNetworkConfig(): NetworkConfig = NetworkConfig(
+private fun Invoice.toEvidenceNetworkConfig(resolvedRpcUrl: String): NetworkConfig = NetworkConfig(
     chainId = chainId,
-    rpcUrl = rpcUrl,
+    rpcUrl = resolvedRpcUrl,
     factory = EvmAddress.parse(factoryAddress),
     receiverImplementation = EvmAddress.parse(receiverImplementationAddress),
     vault = EvmAddress.parse(vaultAddress),

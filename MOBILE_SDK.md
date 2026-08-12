@@ -124,6 +124,45 @@ of at most 60 seconds remains valid. Live mutable signing checks and the evidenc
 authentication and immediately before key use. Do not replace these rules with a general-purpose
 RPC cache.
 
+### Android production RPC configuration
+
+The Android app keeps immutable chain and OPK deployment pins separate from the replaceable
+transport endpoint. Endpoint resolution is per chain and ordered as follows:
+
+1. an administrator override encrypted with Android Keystore;
+2. a build-managed endpoint;
+3. the compiled public Base fallback in debug builds only.
+
+Set build-managed endpoints through `OPK_BASE_MAINNET_RPC_URL` and
+`OPK_BASE_SEPOLIA_RPC_URL`, or the equivalent Gradle properties `opkBaseMainnetRpcUrl` and
+`opkBaseSepoliaRpcUrl`. Do not put credential-bearing values in a tracked `gradle.properties`
+file. Admin/setup exposes a masked manual field, explicit reveal, and a QR scanner for long URLs.
+Android release builds may leave the build-managed values empty for per-terminal provisioning, but
+they reject an explicitly configured Base public RPC host and never use the public fallback. Before
+scanning a portal QR, Admin/setup must verify and save an endpoint for that QR's Base Mainnet or
+Base Sepolia network. Debug builds alone retain the rate-limited public fallback for development.
+The scanner accepts one exact HTTPS URL and only fills the field. Save performs chain and pinned
+deployment validation before the encrypted override becomes active. The ordinary provisioning QR
+grammar remains unchanged and rejects any RPC parameter.
+
+An administrator override is an explicit change to the terminal's read trust source for that
+chain. The pre-save checks prove that the server reports the expected chain and compiled OPK pins;
+they cannot make an untrusted RPC server honest. Restrict this control to merchant administrators
+and use a provider whose operational and security policy the merchant accepts.
+
+The encrypted store protects credentials at rest and prevents accidental copying into ordinary
+preferences, Room rows, receipts, or diagnostics. It cannot turn a client credential into a true
+secret on a rooted or otherwise controlled device. BuildConfig strings are also extractable.
+Production fleets should normally use a credential-free OPK gateway URL, give each terminal a
+revocable gateway credential, and keep Coinbase CDP or Alchemy server credentials at the gateway.
+If connecting directly to Coinbase, use only a CDP Client API Key, which is intended for mobile
+clients, and scope/rotate it as a public quota credential. Never use a CDP Secret API Key. For
+Alchemy, do not embed a permanent URL key in an APK. The direct terminal transport currently
+accepts URL endpoints only. An OPK gateway may authenticate upstream with a short-lived Alchemy
+JWT, but direct terminal JWT authentication is not implemented today. Never paste a JWT into the
+RPC URL field or encode one in its QR code. One provider project per environment and fleet shard
+avoids making one global quota or rotation event affect every terminal.
+
 ## Incoming customer transaction evidence
 
 The read-only SDKs can attribute the direct customer transaction that first made a receiver meet
@@ -333,7 +372,7 @@ the device-local operator key requires the merchant to revoke that operator and 
 generated address; the key is not backed up. Historical invoices do not change when the operator
 changes and may be swept by any currently authorized vault owner or operator. Because every
 published receiver remains payable forever, the apps allow destructive local key reset only before
-the first payment QR is issued. An allowed reset queries the immutable shipped RPC endpoint twice
+the first payment QR is issued. An allowed reset queries the active approved RPC endpoint twice
 and requires both latest and pending native balances to be exactly zero before deletion. Withdraw
 all gas first; a later deposit to the previously shared retired address can still be lost. After a
 QR is issued, retain the key and use portal authorization or terminal reprovisioning; a replacement
@@ -370,7 +409,7 @@ Outputs:
 - unsigned, minified release APK: `android/app/build/outputs/apk/release/app-release-unsigned.apk`
 - SDK JAR and sources: `android/erc681-sdk/build/libs/`
 - Maven repository: `android/erc681-sdk/build/repository/`
-- Maven coordinate: `com.openpasskey:opk-erc681-sdk:0.3.0`
+- Maven coordinate: `com.openpasskey:opk-erc681-sdk:0.3.1`
 
 Point a terminal project at the local repository and add the dependency:
 
@@ -380,7 +419,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.openpasskey:opk-erc681-sdk:0.3.0")
+    implementation("com.openpasskey:opk-erc681-sdk:0.3.1")
 }
 ```
 
@@ -633,11 +672,11 @@ invoice namespace.
 - Check the historical invoice profile's chain, contract links, payment-asset whitelist and native
   capability when applicable, operator authorization, confirmed
   receiver balances, simulation, gas estimate, current pending nonce, and conservative maximum fee.
-- Before sweeping an invoice from an earlier provisioning, re-derive its receiver and re-prove its
-  network label, known-chain factory/implementation pins, vault runtime/factory link, payment-asset
-  whitelist, capability, and metadata through the immutable shipped RPC. Separately chain-check the
-  stored operational RPC, recheck current EOA authorization/exact balances/simulation immediately
-  before signing, then atomically activate that historical chain/vault target for the constrained signer.
+- Before sweeping an invoice from an earlier provisioning, re-derive its receiver and use the
+  active approved RPC to re-prove its network label, known-chain factory/implementation pins,
+  vault runtime/factory link, payment-asset whitelist, capability, and metadata. Recheck current
+  EOA authorization, exact balances, and simulation immediately before signing, then atomically
+  activate that historical chain/vault target for the constrained signer.
 - Persist the exact signed raw transaction, hash, nonce, fees, calldata, and invoice set before
   calling `eth_sendRawTransaction`. Retry an ambiguous broadcast only with the same bytes and hash.
 - Keep payment state separate from settlement state. A sweep reducing the receiver's current
