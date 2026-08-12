@@ -107,7 +107,8 @@ private const val TOTAL_TEXT_SIZE = 24
 private const val FOOTER_TEXT_SIZE = 22
 private const val QR_SIZE = 5
 private const val QR_ERROR_CORRECTION_M = 1
-private const val FINAL_FEED = 48
+// Keep the BaseScan QR clear of the manual tear edge without reintroducing layout whitespace.
+private const val FINAL_FEED = 80
 
 /**
  * Receipt printer for iMin Printer SDK 2.x and the Swift 2 built-in 58 mm printer.
