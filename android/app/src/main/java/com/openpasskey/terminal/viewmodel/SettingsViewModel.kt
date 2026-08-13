@@ -5,7 +5,9 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.erc681.NetworkConfig
+import com.openpasskey.erc681.NetworkConfigurationException
 import com.openpasskey.erc681.ReadOnlyRpcClient
+import com.openpasskey.erc681.RpcException
 import com.openpasskey.erc681.RpcRateLimit
 import com.openpasskey.terminal.admin.AdminPinStore
 import com.openpasskey.terminal.admin.AdminPinVerification
@@ -112,10 +114,40 @@ internal fun shouldRestartActiveReadinessRefresh(
     refreshActive: Boolean,
 ): Boolean = refreshActive && trigger == ReadinessRefreshTrigger.INVOICE_FAILURE
 
+/** Low operator gas warns but never blocks a sale: funds land at the receiver regardless. */
+internal fun statusAllowsCheckout(status: TerminalSetupStatus): Boolean =
+    status == TerminalSetupStatus.READY || status == TerminalSetupStatus.AWAITING_GAS
+
 internal fun readinessResultWhenAutomaticRefreshDefers(
     configurationStillValidated: Boolean,
     setupStatus: TerminalSetupStatus,
-): Boolean = configurationStillValidated && setupStatus == TerminalSetupStatus.READY
+): Boolean = configurationStillValidated && statusAllowsCheckout(setupStatus)
+
+/**
+ * "The chain could not be asked" is not "the chain said no". Only an explicit on-chain verdict
+ * ([NetworkConfigurationException]) or a local invariant failure may demote a proven
+ * checkout-capable status; transport failures, throttles, and reorg brackets preserve it.
+ */
+internal fun shouldPreserveProvenReadiness(
+    error: Exception,
+    provenConfigurationUnchanged: Boolean,
+    provenStatus: TerminalSetupStatus,
+): Boolean = provenConfigurationUnchanged &&
+    statusAllowsCheckout(provenStatus) &&
+    error is RpcException &&
+    error !is NetworkConfigurationException
+
+internal fun preservedReadinessNoticeMessage(
+    provenStatus: TerminalSetupStatus,
+    networkPolicy: KnownChainProfile,
+): String {
+    val provenSummary = when (provenStatus) {
+        TerminalSetupStatus.AWAITING_GAS -> awaitingGasReadinessMessage(networkPolicy)
+        else -> "Terminal is ready to create payments."
+    }
+    return "$provenSummary The latest status re-check could not reach the RPC provider; " +
+        "showing the last validated result."
+}
 
 /** Main-thread callback ownership for one readiness generation. Cancellation is a false result. */
 internal class ReadinessRefreshCallbacks {
@@ -1452,6 +1484,10 @@ class SettingsViewModel(
         onComplete: ((Boolean) -> Unit)? = null,
         priority: ReadinessRpcPriority,
     ) {
+        // Captured before any invalidation or clearing so an unreachable provider can preserve
+        // the last proven result instead of demoting it to ERROR and blocking checkout.
+        val provenConfiguration = validatedConfiguration
+        val provenState = _state.value
         if (refreshJob?.isActive == true) {
             if (priority == ReadinessRpcPriority.INTERACTIVE &&
                 refreshPriority == ReadinessRpcPriority.AUTOMATIC
@@ -1467,6 +1503,7 @@ class SettingsViewModel(
         val wallet = walletStore.snapshot()
         val address = wallet.address
         val config = chainConfig.snapshot()
+        val provenConfigurationUnchanged = provenConfiguration == config
         if (priority == ReadinessRpcPriority.INTERACTIVE) validatedConfiguration = null
         if (wallet.availability != OperatorWalletAvailability.READY || address == null || !config.provisioned) {
             _state.value = load()
@@ -1599,16 +1636,39 @@ class SettingsViewModel(
                     },
                     isError = false,
                 )
-                completeReadinessCallbacks(ready = status == TerminalSetupStatus.READY)
+                completeReadinessCallbacks(ready = statusAllowsCheckout(status))
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
                 if (generation != refreshGeneration) return@launch
-                _state.value = load(
-                    terminalRpcFailureMessage(error, "Unable to validate terminal readiness"),
-                    isError = true,
-                )
-                completeReadinessCallbacks(ready = false)
+                if (shouldPreserveProvenReadiness(
+                        error,
+                        provenConfigurationUnchanged,
+                        provenState.setupStatus,
+                    )
+                ) {
+                    validatedConfiguration = config
+                    _state.value = load().copy(
+                        setupStatus = provenState.setupStatus,
+                        operatorBalanceWei = provenState.operatorBalanceWei,
+                        operatorAuthorized = provenState.operatorAuthorized,
+                        refreshingOperator = false,
+                        message = preservedReadinessNoticeMessage(
+                            provenState.setupStatus,
+                            networkPolicy,
+                        ),
+                        isError = false,
+                    )
+                    completeReadinessCallbacks(
+                        ready = statusAllowsCheckout(provenState.setupStatus),
+                    )
+                } else {
+                    _state.value = load(
+                        terminalRpcFailureMessage(error, "Unable to validate terminal readiness"),
+                        isError = true,
+                    )
+                    completeReadinessCallbacks(ready = false)
+                }
             } finally {
                 if (generation == refreshGeneration) {
                     refreshJob = null

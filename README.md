@@ -80,10 +80,13 @@ developer resources.
   Device lock, configuration or RPC changes, disabling the option, safety-limit failures, and
   operator reset revoke or block the grant. Late payments remain manual. Manual settlement keeps
   its existing review and per-use device authentication.
-- Vault authorization and native-token gas funding are also new-invoice readiness checks. The apps
-  freshly validate configuration, owner/operator authorization, and the selected network profile's
-  minimum native-gas reserve (`0.0001 ETH` on the shipped Base profiles) before creating each
-  customer invoice.
+- Vault authorization is also a new-invoice readiness check. The apps freshly validate
+  configuration and owner/operator authorization before creating each customer invoice. An
+  operator native-gas balance below the selected network profile's reserve (`0.0001 ETH` on the
+  shipped Base profiles) warns but no longer blocks checkout: customer funds land at the one-time
+  receiver regardless, and settlement waits until the operator is funded. A readiness re-check
+  that cannot reach the RPC provider preserves the last proven result instead of blocking
+  checkout; only an explicit on-chain rejection demotes it.
   Failure blocks only new invoice/QR creation; history,
   existing payment monitoring, settlement recovery, and setup remain available. Customer ERC-20
   and native payments still go only to one-time receiver addresses.

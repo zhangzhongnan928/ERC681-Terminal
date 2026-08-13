@@ -141,9 +141,21 @@ class CheckoutAmountInputTest {
                 hasSelectedToken = true,
             ),
         )
-        assertFalse(
+        // Low gas warns but never blocks a sale: the customer's funds land at the receiver
+        // regardless, and settlement waits for funding.
+        assertTrue(
             isCheckoutReady(
                 TerminalSetupStatus.AWAITING_GAS,
+                configurationValidated = true,
+                refreshing = false,
+                readinessInvalidated = false,
+                operatorWalletReady = true,
+                hasSelectedToken = true,
+            ),
+        )
+        assertFalse(
+            isCheckoutReady(
+                TerminalSetupStatus.AWAITING_AUTHORIZATION,
                 configurationValidated = true,
                 refreshing = false,
                 readinessInvalidated = false,
@@ -156,6 +168,16 @@ class CheckoutAmountInputTest {
         assertFalse(readyWith(readinessInvalidated = true))
         assertFalse(readyWith(operatorWalletReady = false))
         assertFalse(readyWith(hasSelectedToken = false))
+    }
+
+    @Test
+    fun `only proven checkout-capable statuses may release checkout`() {
+        TerminalSetupStatus.entries.forEach { status ->
+            assertEquals(
+                status == TerminalSetupStatus.READY || status == TerminalSetupStatus.AWAITING_GAS,
+                statusAllowsCheckout(status),
+            )
+        }
     }
 
     private fun readyWith(

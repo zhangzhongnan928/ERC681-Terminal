@@ -1006,11 +1006,8 @@ internal fun requireTerminalReadiness(
     check(readiness.authorized) {
         "Authorize this terminal operator on the provisioned vault before creating a payment QR"
     }
-    val networkPolicy = KnownChainPolicy.requireProfile(settings.chainId)
-    check(readiness.nativeBalance >= networkPolicy.minimumOperatorNativeReserve) {
-        "Fund the terminal operator with at least " +
-            "${networkPolicy.minimumOperatorNativeReserveDisplay()} before creating a payment QR"
-    }
+    // Low operator gas never blocks a sale: the customer's funds land at the freshly derived
+    // receiver regardless, and settlement waits until the operator is funded.
 }
 
 internal fun requireInvoiceStateUnchanged(

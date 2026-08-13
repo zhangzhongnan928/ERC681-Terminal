@@ -110,9 +110,14 @@ the selected payment profile:
 - the saved profile, known-network deployment pins, payment-asset whitelist, metadata, and any
   required native capability validate;
 - the EOA is that profile's vault owner or an authorized operator; and
-- its native balance on that profile's chain meets the compiled network reserve
-  (`100000000000000` wei, or `0.0001 ETH`, on Base Mainnet and Base Sepolia); and
 - the profile's confirmation depth meets that network's compiled minimum.
+
+A native balance below the compiled network reserve (`100000000000000` wei, or `0.0001 ETH`, on
+Base Mainnet and Base Sepolia) warns but does not block checkout: customer funds land at the
+one-time receiver regardless, and settlement waits until the operator is funded. A readiness
+re-check that cannot reach the RPC provider preserves the last proven result; only an explicit
+on-chain rejection (revoked authorization, de-whitelisted asset, configuration mismatch) demotes
+the terminal out of checkout.
 
 The same device EOA can be authorized by multiple vaults and has the same address on every EVM
 chain. Authorization is still vault-specific, and gas funding is chain-specific. An unready profile

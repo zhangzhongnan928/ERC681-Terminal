@@ -247,8 +247,10 @@ cursors still match the request after resolution.
 
 1. Require the device operator wallet and freshly validate the RPC chain, deployed code,
    factory/implementation link, vault/factory link, payment-asset whitelist, metadata and native
-   capability when applicable, vault
-   owner/operator authorization, and the minimum native gas reserve.
+   capability when applicable, and vault
+   owner/operator authorization. The minimum native gas reserve is checked too; on Android a low
+   balance warns without blocking invoice creation (settlement waits for funding), while iOS still
+   requires it.
 2. Use the operator public address as `terminalIdentifier`, and generate
    `invoiceId = keccak256(abi.encode(terminalIdentifier, timestamp, nonce))`.
 3. Derive the receiver locally with the protocol's 88-byte CREATE2 init code. Do not trust an RPC response for this address.
@@ -280,10 +282,13 @@ are supplementary state and do not replace canonical event proof.
 invoice namespace. The reusable SDK does not require that namespace to have a private key. The
 shipped Android and iOS apps apply the stricter application policy described above: they always
 pass the device operator EOA public address for new invoices and fail invoice creation unless that
-wallet exists, is authorized by the selected profile's vault, and meets the selected network's
-compiled minimum native-gas reserve. Both shipped Base profiles currently require
+wallet exists and is authorized by the selected profile's vault. On Android, a balance below the
+selected network's compiled minimum native-gas reserve warns without blocking invoice creation
+(customer funds land at the one-time receiver regardless, and settlement waits for funding); iOS
+still requires the reserve before each new invoice. Both shipped Base profiles currently use
 `100000000000000` wei, or `0.0001 ETH`; another enabled EVM network may use a different native
-currency, decimals, and reserve. These checks run again when preparing a settlement.
+currency, decimals, and reserve. These checks run again when preparing a settlement, where the
+reserve remains required.
 
 ## Known EVM networks
 
@@ -364,7 +369,8 @@ address with that vault's administrative `grantOperator` flow (the vault owner i
 accepted), then scan its operator-bound provisioning QR. Repeated scans add or update profiles; they
 do not erase unrelated profiles. Fund that same EOA with at least the compiled native-gas reserve
 shown for each selected network (`0.0001 ETH` on both shipped Base profiles). Until the selected
-profile passes all checks, the app does not create its invoice or customer QR.
+profile passes authorization and configuration validation, the app does not create its invoice or
+customer QR; on Android a low gas balance only warns, while settlement still waits for funding.
 The app shows the entire address, offers Copy, and displays this address-only funding QR:
 
 ```text
@@ -662,8 +668,8 @@ implementation.
 3. Send at least the selected network's compiled native-gas reserve to the operator address for gas
    only (`0.0001 ETH` on both shipped Base profiles). Do not send customer payment tokens to it. The Settings UI
    displays the exact address, chain, funding QR, balance, authorization state, and readiness
-   result. Authorization and the per-network minimum balance are required before each new invoice
-   and checked again before a sweep.
+   result. Authorization is required before each new invoice; the per-network minimum balance
+   warns when low on Android (iOS still requires it) and remains required before a sweep.
 
 Existing invoice records preserve the invoice ID and receiver derived from their historical
 namespace; iOS also preserves that namespace per invoice. The app does not expose or reuse a global
