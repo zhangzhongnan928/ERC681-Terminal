@@ -111,21 +111,28 @@ private struct CheckoutView: View {
                             readiness: model.terminalReadiness
                         ) {
                         case let .checkout(status):
-                            CheckoutReadyView(
-                                amount: $amount,
-                                tokenSymbol: model.settings.tokenSymbol,
-                                tokenDecimals: Int(model.settings.tokenDecimals) ?? 0,
-                                chainID: model.settings.chainID,
-                                networkName: model.settings.displayedPaymentProfile.networkName,
-                                isTestnet: model.settings.displayedPaymentProfile.isTestnet,
-                                status: status,
-                                isSubmitting: isSubmitting,
-                                isInteractionEnabled: allowsQRCreation
-                            ) { displayAmount in
-                                isSubmitting = true
-                                Task {
-                                    await model.createSale(displayAmount: displayAmount)
-                                    isSubmitting = false
+                            VStack(spacing: 0) {
+                                if let warning = model.terminalReadiness.lowGasCheckoutWarning {
+                                    CheckoutLowGasWarningView(message: warning)
+                                        .padding(.horizontal)
+                                        .padding(.bottom, 8)
+                                }
+                                CheckoutReadyView(
+                                    amount: $amount,
+                                    tokenSymbol: model.settings.tokenSymbol,
+                                    tokenDecimals: Int(model.settings.tokenDecimals) ?? 0,
+                                    chainID: model.settings.chainID,
+                                    networkName: model.settings.displayedPaymentProfile.networkName,
+                                    isTestnet: model.settings.displayedPaymentProfile.isTestnet,
+                                    status: status,
+                                    isSubmitting: isSubmitting,
+                                    isInteractionEnabled: allowsQRCreation
+                                ) { displayAmount in
+                                    isSubmitting = true
+                                    Task {
+                                        await model.createSale(displayAmount: displayAmount)
+                                        isSubmitting = false
+                                    }
                                 }
                             }
                         case let .checking(kind):
@@ -152,7 +159,7 @@ private struct CheckoutView: View {
             && !model.isProvisioning
             && !model.isRefreshingReadiness
             && !model.operationBusy
-            && model.terminalReadiness.isReady
+            && model.terminalReadiness.allowsCheckout
     }
 
     private var allowsProfileSelection: Bool {
@@ -485,18 +492,18 @@ enum CheckoutPresentationState: Equatable {
             return .checkout(.preparing)
         }
         if isRefreshingReadiness {
-            if readiness.isReady {
+            if readiness.allowsCheckout {
                 return .checkout(.checking)
             }
             return .checking(.readiness)
         }
         if isBusy {
-            if readiness.isReady {
+            if readiness.allowsCheckout {
                 return .checkout(.checking)
             }
             return .checking(.readiness)
         }
-        if readiness.isReady {
+        if readiness.allowsCheckout {
             return .checkout(.ready)
         }
         return .blocked(readiness)
@@ -607,6 +614,21 @@ private struct CheckoutStatusHeader: View {
         case .checking: .orange
         case .preparing: .blue
         }
+    }
+}
+
+private struct CheckoutLowGasWarningView: View {
+    let message: String
+
+    var body: some View {
+        Label(message, systemImage: "fuelpump.fill")
+            .font(.footnote)
+            .foregroundStyle(.orange)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+            .accessibilityIdentifier("checkoutLowGasWarning")
     }
 }
 

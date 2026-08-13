@@ -18,6 +18,20 @@ enum TerminalReadiness: Equatable {
 
     var isReady: Bool { self == .ready }
 
+    /// Low operator gas warns but never blocks a sale: customer funds land at the one-time
+    /// receiver regardless, and settlement (which keeps its reserve check) waits for funding.
+    var allowsCheckout: Bool {
+        if case .gasRequired = self { return true }
+        return isReady
+    }
+
+    var lowGasCheckoutWarning: String? {
+        guard case let .gasRequired(_, required, symbol, decimals) = self else { return nil }
+        return "Operator gas is low. Checkout still works; fund the operator to at least "
+            + "\(TokenAmount(rawValue: required, decimals: decimals).displayString()) \(symbol) "
+            + "so settlement can run."
+    }
+
     var title: String {
         switch self {
         case .walletRequired: "Create operator wallet"

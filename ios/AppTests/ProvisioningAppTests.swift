@@ -1828,6 +1828,9 @@ final class ProvisioningAppTests: XCTestCase {
             ),
             .authorizationRequired
         )
+        XCTAssertFalse(TerminalReadiness.authorizationRequired.allowsCheckout)
+        XCTAssertFalse(TerminalReadiness.statusCheckRequired.allowsCheckout)
+        XCTAssertFalse(TerminalReadiness.validationRequired.allowsCheckout)
 
         let oneBelowReserve = known.minimumOperatorNativeReserve
             .subtractingReportingOverflow(UInt256(1))
@@ -1839,13 +1842,14 @@ final class ProvisioningAppTests: XCTestCase {
             isVaultOwner: false,
             isLowGas: true
         )
+        let underfundedReadiness = TerminalReadiness.evaluate(
+            settings: settings,
+            operatorAddress: operatorAddress,
+            validatedFingerprint: settings.validationFingerprint,
+            operatorStatus: underfunded
+        )
         XCTAssertEqual(
-            TerminalReadiness.evaluate(
-                settings: settings,
-                operatorAddress: operatorAddress,
-                validatedFingerprint: settings.validationFingerprint,
-                operatorStatus: underfunded
-            ),
+            underfundedReadiness,
             .gasRequired(
                 available: underfunded.balance,
                 required: known.minimumOperatorNativeReserve,
@@ -1853,6 +1857,14 @@ final class ProvisioningAppTests: XCTestCase {
                 nativeCurrencyDecimals: known.nativeCurrencyDecimals
             )
         )
+        // Low gas warns but never blocks a sale: customer funds land at the one-time receiver
+        // regardless, and settlement (which keeps its reserve check) waits for funding.
+        XCTAssertTrue(underfundedReadiness.allowsCheckout)
+        let lowGasWarning = try XCTUnwrap(underfundedReadiness.lowGasCheckoutWarning)
+        XCTAssertTrue(lowGasWarning.contains("Checkout still works"))
+        XCTAssertTrue(lowGasWarning.contains("0.0001"))
+        XCTAssertTrue(lowGasWarning.contains(known.nativeCurrencySymbol))
+        XCTAssertFalse(lowGasWarning.contains("wei"))
 
         let ready = OperatorChainStatus(
             chainID: known.chainID,
@@ -1861,15 +1873,67 @@ final class ProvisioningAppTests: XCTestCase {
             isVaultOwner: false,
             isLowGas: false
         )
-        XCTAssertEqual(
-            TerminalReadiness.evaluate(
-                settings: settings,
-                operatorAddress: operatorAddress,
-                validatedFingerprint: settings.validationFingerprint,
-                operatorStatus: ready
-            ),
-            .ready
+        let readyReadiness = TerminalReadiness.evaluate(
+            settings: settings,
+            operatorAddress: operatorAddress,
+            validatedFingerprint: settings.validationFingerprint,
+            operatorStatus: ready
         )
+        XCTAssertEqual(readyReadiness, .ready)
+        XCTAssertTrue(readyReadiness.allowsCheckout)
+        XCTAssertNil(readyReadiness.lowGasCheckoutWarning)
+    }
+
+    @MainActor
+    func testTransientStatusRefreshFailurePreservesProvenCheckoutCapableStatus() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        AppPreferences.saveSettings(AppSettings())
+        let profile = TerminalKnownChainProfile.baseMainnet
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let script = OperatorStatusScript(
+            provenBalance: profile.minimumOperatorNativeReserve
+        )
+        let model = AppModel(
+            container: try appTestContainer(),
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.readiness-preservation-tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(address: operatorAddress),
+            provisioningValidator: SuccessfulProvisioningValidator(),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            operatorStatusReader: { configuration, _ in
+                try await script.next(chainID: configuration.chainID)
+            }
+        )
+        model.unlockAdmin(with: "123456")
+        let payload = try TerminalProvisioningPayload(
+            chainID: profile.chainID,
+            vault: profile.create2TestVector.vault,
+            token: NativeAsset.address,
+            operatorAddress: operatorAddress
+        )
+        await model.provision(payload)
+        XCTAssertTrue(model.terminalReadiness.allowsCheckout)
+
+        // A transient read is not evidence: the proven checkout-capable status is preserved.
+        await script.failNext(with: URLError(.timedOut))
+        await model.refreshOperatorStatus()
+        XCTAssertTrue(model.terminalReadiness.allowsCheckout)
+        XCTAssertEqual(model.operatorStatusMessage, AppModel.preservedOperatorStatusNotice)
+
+        // A successful re-check clears the preservation notice.
+        await model.refreshOperatorStatus()
+        XCTAssertTrue(model.terminalReadiness.isReady)
+        XCTAssertNil(model.operatorStatusMessage)
+
+        // A terminal (non-retryable) failure still demotes and blocks checkout.
+        await script.failNext(
+            with: PaymentMonitorError.wrongChain(expected: profile.chainID, actual: 1)
+        )
+        await model.refreshOperatorStatus()
+        XCTAssertFalse(model.terminalReadiness.allowsCheckout)
+        XCTAssertEqual(model.terminalReadiness, .statusCheckRequired)
     }
 
     func testAdminPINFormatAndThrottlePolicy() {
@@ -4102,6 +4166,34 @@ private actor OperationalConfigurationProbe {
     }
 
     func endpoint() -> URL? { value?.rpcEndpoints.first }
+}
+
+/// Serves a proven operator status by default and fails exactly one read on demand.
+private actor OperatorStatusScript {
+    private let provenBalance: UInt256
+    private var nextError: (any Error)?
+
+    init(provenBalance: UInt256) {
+        self.provenBalance = provenBalance
+    }
+
+    func failNext(with error: any Error) {
+        nextError = error
+    }
+
+    func next(chainID: UInt64) throws -> OperatorChainStatus {
+        if let error = nextError {
+            nextError = nil
+            throw error
+        }
+        return OperatorChainStatus(
+            chainID: chainID,
+            balance: provenBalance,
+            isAuthorizedOperator: true,
+            isVaultOwner: false,
+            isLowGas: false
+        )
+    }
 }
 
 private actor SuccessfulProvisioningValidator: TerminalProvisioningValidating {

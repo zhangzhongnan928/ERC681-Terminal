@@ -160,6 +160,8 @@ jobs:
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testFailedLegacyMigrationNeverUsesOrReportsPersistedFallback \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testActiveMonitorPreservesLastVerifiedObservationAcrossTransientFailure \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testActiveMonitorKeepsWrongChainTerminalAndCancellationSilent \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testTransientStatusRefreshFailurePreservesProvenCheckoutCapableStatus \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testReadinessRequiresCurrentValidationAuthorizationAndMinimumGas \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testFirstRunWalletCreationRemainsAvailableBeforeAdminPIN \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testNewPaymentRouteUsesKnownNetworkDefaultWithoutLeakingFallbackFinality \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testReprovisioningSamePaymentRoutePreservesRaisedFinality \

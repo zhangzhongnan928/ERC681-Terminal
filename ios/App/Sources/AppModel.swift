@@ -925,7 +925,7 @@ final class AppModel: ObservableObject {
                 validatedFingerprint: settingsSnapshot.validationFingerprint,
                 operatorStatus: liveStatus
             )
-            guard readiness.isReady else {
+            guard readiness.allowsCheckout else {
                 throw AppSafetyError.terminalNotReady(readiness.detail)
             }
             guard freshness.receiverCode.isEmpty else {
@@ -1334,8 +1334,8 @@ final class AppModel: ObservableObject {
             operatorStatusMessage = "Scan the portal provisioning QR to bind a vault."
             return
         }
+        let settingsSnapshot = settings
         do {
-            let settingsSnapshot = settings
             let configuration = try operationalConfiguration(
                 for: settingsSnapshot.configuration()
             )
@@ -1349,10 +1349,24 @@ final class AppModel: ObservableObject {
             operatorStatus = status
             operatorStatusMessage = nil
         } catch {
+            // "The chain could not be asked" is not "the chain said no". A transient read
+            // failure preserves the last proven checkout-capable status for the unchanged
+            // configuration; only an explicit verdict or a local failure demotes it.
+            if settings == settingsSnapshot,
+               self.operatorAddress == operatorAddress,
+               PaymentMonitorRetryPolicy.shouldRetry(error),
+               terminalReadiness.allowsCheckout {
+                operatorStatusMessage = Self.preservedOperatorStatusNotice
+                return
+            }
             operatorStatus = nil
             operatorStatusMessage = error.localizedDescription
         }
     }
+
+    static let preservedOperatorStatusNotice =
+        "The latest status re-check could not reach the RPC provider; "
+            + "showing the last validated result."
 
     func prepareSettlement(
         for invoices: [StoredInvoice],
