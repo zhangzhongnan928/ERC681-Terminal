@@ -30,6 +30,12 @@ typealias PaymentObservationSampling = @Sendable (
     _ sweepableCursors: [PaymentConfirmationCursor]
 ) async throws -> PaymentObservation
 
+typealias RPCEndpointValidation = @Sendable (
+    _ chainID: UInt64,
+    _ endpoint: URL,
+    _ configurations: [TerminalConfiguration]
+) async throws -> Void
+
 enum AdminPINConfigurationState: Equatable {
     case configured
     case notConfigured
@@ -38,6 +44,9 @@ enum AdminPINConfigurationState: Equatable {
 
 @MainActor
 final class AppModel: ObservableObject {
+    private static let legacyRPCEndpointMigrationFailureMessage =
+        "A saved RPC endpoint could not be migrated to Keychain. Its old value was kept but will not be used. Restore Keychain access, then configure or remove the dedicated endpoint in Settings."
+
     @Published var settings: AppSettings {
         didSet {
             // A corrupt persisted catalog is kept byte-for-byte until the device admin explicitly
@@ -70,6 +79,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var operatorStatusMessage: String?
     @Published private(set) var validatedConfigurationFingerprint: String?
     @Published private(set) var provisioningMessage: String?
+    @Published private(set) var rpcEndpointMessage: String?
     @Published private(set) var isProvisioning = false
     @Published private(set) var adminPINConfigurationState: AdminPINConfigurationState
     @Published private(set) var adminUnlocked: Bool
@@ -77,6 +87,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var autoSweepReviewSequence: UInt64 = 0
     @Published private(set) var autoSweepMessage: String?
     @Published private(set) var settingsRecoveryRequired = false
+    @Published private(set) var rpcEndpointStatuses = [UInt64: RPCEndpointConfigurationStatus]()
     @Published var errorMessage: String?
 
     private let container: ModelContainer
@@ -85,6 +96,8 @@ final class AppModel: ObservableObject {
     private let provisioningValidator: any TerminalProvisioningValidating
     private let historicalConfigurationValidator: any HistoricalTerminalConfigurationValidating
     private let adminPINStore: any AdminPINManaging
+    private let rpcEndpointStore: any RPCEndpointManaging
+    private let rpcEndpointValidation: RPCEndpointValidation
     private let persistMainContext: (ModelContext) throws -> Void
     private let currentConfigurationValidation: @Sendable (
         TerminalConfiguration
@@ -102,6 +115,7 @@ final class AppModel: ObservableObject {
     private var settlementCoordinator: SettlementCoordinator?
     private var settlementCoordinatorKey: String?
     private var preparedConfiguration: TerminalConfiguration?
+    private var preparedPersistentConfiguration: TerminalConfiguration?
     private var preparedConfirmationSnapshots: [SweepableConfirmationSnapshot]?
     private let lifecycleOperationGate = AppModelOperationGate()
     private let foregroundInvoiceReconciliationGate = ForegroundInvoiceReconciliationGate()
@@ -120,6 +134,7 @@ final class AppModel: ObservableObject {
     private var suppressedAutoSweepFingerprints = Set<String>()
     private var autoSweepRetryAfter = [String: Date]()
     private var autoSweepAttemptGate = AutoSweepAttemptGate()
+    private var rpcEndpointMigrationFailures = [UInt64: String]()
 
     init(
         container: ModelContainer,
@@ -128,6 +143,22 @@ final class AppModel: ObservableObject {
         provisioningValidator: any TerminalProvisioningValidating = TerminalProvisioner(),
         historicalConfigurationValidator: any HistoricalTerminalConfigurationValidating = TerminalProvisioner(),
         adminPINStore: any AdminPINManaging = KeychainAdminPINStore(),
+        rpcEndpointStore: any RPCEndpointManaging = KeychainRPCEndpointStore(),
+        rpcEndpointValidation: @escaping RPCEndpointValidation = { chainID, endpoint, configurations in
+            let rpc = try EthereumRPCClientPool.shared.client(for: endpoint)
+            let actualChainID = try await rpc.chainID()
+            guard actualChainID == chainID else {
+                throw ConfigurationValidationError.wrongChain(
+                    expected: chainID,
+                    actual: actualChainID
+                )
+            }
+            let historicalValidator = TerminalProvisioner()
+            for configuration in configurations {
+                let operational = try configuration.replacingRPCEndpoint(with: endpoint)
+                _ = try await historicalValidator.validateHistoricalConfiguration(operational)
+            }
+        },
         persistMainContext: @escaping (ModelContext) throws -> Void = { try $0.save() },
         currentConfigurationValidation: @escaping @Sendable (
             TerminalConfiguration
@@ -166,6 +197,8 @@ final class AppModel: ObservableObject {
         self.provisioningValidator = provisioningValidator
         self.historicalConfigurationValidator = historicalConfigurationValidator
         self.adminPINStore = adminPINStore
+        self.rpcEndpointStore = rpcEndpointStore
+        self.rpcEndpointValidation = rpcEndpointValidation
         self.persistMainContext = persistMainContext
         self.currentConfigurationValidation = currentConfigurationValidation
         self.operatorStatusReader = operatorStatusReader
@@ -220,7 +253,10 @@ final class AppModel: ObservableObject {
         operatorAddress = try? self.operatorWalletLifecycle.existingAddress()
         if settingsRecoveryRequired {
             errorMessage = settingsRecoveryMessage
+        } else {
+            migrateLegacyRPCEndpointsIfNeeded()
         }
+        refreshRPCEndpointStatuses()
     }
 
     var terminalReadiness: TerminalReadiness {
@@ -239,6 +275,128 @@ final class AppModel: ObservableObject {
     var adminPINConfigurationUnavailableMessage: String? {
         guard case let .unavailable(message) = adminPINConfigurationState else { return nil }
         return message
+    }
+
+    func rpcEndpointStatus(for chainID: UInt64) -> RPCEndpointConfigurationStatus {
+        rpcEndpointStatuses[chainID] ?? .builtIn
+    }
+
+    @discardableResult
+    func updateRPCEndpoint(_ rawValue: String, for chainID: UInt64) async -> Bool {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return false
+        }
+        guard adminPINConfigured, adminUnlocked else {
+            errorMessage = "Unlock Admin before changing an RPC endpoint."
+            return false
+        }
+        guard let adminSession = adminSessionGate.capture() else {
+            errorMessage = AppSafetyError.adminSessionExpired.localizedDescription
+            return false
+        }
+        guard TerminalKnownChainProfile.profile(for: chainID) != nil else {
+            errorMessage = AppSettingsError.unsupportedChain.localizedDescription
+            return false
+        }
+        guard activeRequest == nil, preparedSettlement == nil else {
+            errorMessage = "Close the active payment or settlement review before changing an RPC endpoint."
+            return false
+        }
+        let endpoint: URL
+        do {
+            endpoint = try RPCEndpointURLParser.parse(rawValue)
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+        guard beginExclusiveOperation() else {
+            errorMessage = AppSettlementError.operationInProgress.localizedDescription
+            return false
+        }
+        defer { endExclusiveOperation() }
+
+        let settingsSnapshot = settings
+        var endpointSaved = false
+        do {
+            await backgroundRPCWorkGate.waitUntilIdle()
+            let configurations = try settingsSnapshot.configurations().filter {
+                $0.chainID == chainID
+            }
+            try await rpcEndpointValidation(chainID, endpoint, configurations)
+            guard settings == settingsSnapshot else {
+                throw AppSafetyError.configurationChanged
+            }
+            try adminSessionGate.requireCurrent(adminSession)
+            try rpcEndpointStore.save(endpoint, for: chainID)
+            endpointSaved = true
+            rpcEndpointMigrationFailures.removeValue(forKey: chainID)
+            try normalizePersistedRPCEndpoints(for: [chainID])
+            rpcEndpointStatuses[chainID] = .configured(
+                provider: RPCEndpointURLParser.providerLabel(for: endpoint)
+            )
+            invalidateRPCDependentState()
+            rpcEndpointMessage = "Dedicated RPC endpoint verified and saved in this device's Keychain."
+            errorMessage = nil
+            return true
+        } catch {
+            refreshRPCEndpointStatuses()
+            rpcEndpointMessage = endpointSaved
+                ? "The dedicated endpoint was saved, but legacy transport metadata cleanup did not complete. The app will retry on its next launch."
+                : "RPC endpoint was not changed."
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func removeRPCEndpoint(for chainID: UInt64) async -> Bool {
+        guard !settingsRecoveryRequired else {
+            errorMessage = settingsRecoveryMessage
+            return false
+        }
+        guard adminPINConfigured, adminUnlocked else {
+            errorMessage = "Unlock Admin before changing an RPC endpoint."
+            return false
+        }
+        guard let adminSession = adminSessionGate.capture() else {
+            errorMessage = AppSafetyError.adminSessionExpired.localizedDescription
+            return false
+        }
+        guard TerminalKnownChainProfile.profile(for: chainID) != nil else {
+            errorMessage = AppSettingsError.unsupportedChain.localizedDescription
+            return false
+        }
+        guard activeRequest == nil, preparedSettlement == nil else {
+            errorMessage = "Close the active payment or settlement review before changing an RPC endpoint."
+            return false
+        }
+        guard beginExclusiveOperation() else {
+            errorMessage = AppSettlementError.operationInProgress.localizedDescription
+            return false
+        }
+        defer { endExclusiveOperation() }
+
+        do {
+            await backgroundRPCWorkGate.waitUntilIdle()
+            try adminSessionGate.requireCurrent(adminSession)
+            // Keep the active Keychain value until every old fallback copy has been scrubbed. If
+            // local persistence fails, the endpoint remains configured and removal can be retried.
+            try normalizePersistedRPCEndpoints(for: [chainID])
+            try adminSessionGate.requireCurrent(adminSession)
+            try rpcEndpointStore.removeEndpoint(for: chainID)
+            rpcEndpointMigrationFailures.removeValue(forKey: chainID)
+            rpcEndpointStatuses[chainID] = .builtIn
+            invalidateRPCDependentState()
+            rpcEndpointMessage = "Dedicated endpoint removed. This network now uses its built-in public RPC."
+            errorMessage = nil
+            return true
+        } catch {
+            refreshRPCEndpointStatuses()
+            rpcEndpointMessage = "RPC endpoint was not changed."
+            errorMessage = error.localizedDescription
+            return false
+        }
     }
 
     var canAccessAdmin: Bool {
@@ -606,13 +764,13 @@ final class AppModel: ObservableObject {
                 confirmationPolicy: .init(
                     requiredBlocks: knownNetwork.defaultConfirmationBlocks
                 ),
-                rpcEndpointOverride: existingRPCOverride(
-                    for: payload.chainID,
-                    settings: original
-                )
+                rpcEndpointOverride: try rpcEndpointStore.endpoint(for: payload.chainID)
+            )
+            let persistentConfiguration = try derived.configuration.replacingRPCEndpoint(
+                with: knownNetwork.rpcEndpoint
             )
             let candidate = try original.applying(
-                derived.configuration,
+                persistentConfiguration,
                 boundTo: operatorAddress
             )
             guard settings == original else { throw AppSafetyError.configurationChanged }
@@ -664,7 +822,9 @@ final class AppModel: ObservableObject {
         defer { isBusy = false }
         let snapshot = settings
         do {
-            let configuration = try snapshot.configuration()
+            let configuration = try operationalConfiguration(
+                for: snapshot.configuration()
+            )
             try await validate(
                 configuration,
                 fingerprint: snapshot.validationFingerprint,
@@ -699,7 +859,8 @@ final class AppModel: ObservableObject {
             guard settingsSnapshot.isProvisioned else {
                 throw AppSafetyError.provisioningRequired
             }
-            let configuration = try settingsSnapshot.configuration()
+            let persistentConfiguration = try settingsSnapshot.configuration()
+            let configuration = try operationalConfiguration(for: persistentConfiguration)
             guard let operatorAddress else {
                 throw AppSafetyError.operatorWalletRequired
             }
@@ -785,7 +946,7 @@ final class AppModel: ObservableObject {
             container.mainContext.insert(
                 try StoredInvoice(
                     request: request,
-                    configuration: configuration,
+                    configuration: persistentConfiguration,
                     publicationCursor: publicationCursor,
                     receiptProfile: settingsSnapshot.merchantReceiptProfile,
                     receiptNumber: try nextReceiptNumber(),
@@ -837,8 +998,11 @@ final class AppModel: ObservableObject {
                 invoice.beginForegroundReconciliation(at: now)
                 do {
                     let request = try invoice.paymentRequest()
-                    let configuration = try invoice.configurationSnapshot()
-                    try validateSnapshot(request, against: configuration)
+                    let persistentConfiguration = try invoice.configurationSnapshot()
+                    try validateSnapshot(request, against: persistentConfiguration)
+                    let configuration = try operationalConfiguration(
+                        for: persistentConfiguration
+                    )
                     candidates.append(
                         ForegroundInvoiceReconciliationCandidate(
                             invoiceID: invoice.invoiceID,
@@ -1172,7 +1336,9 @@ final class AppModel: ObservableObject {
         }
         do {
             let settingsSnapshot = settings
-            let configuration = try settingsSnapshot.configuration()
+            let configuration = try operationalConfiguration(
+                for: settingsSnapshot.configuration()
+            )
             let status = try await fetchOperatorStatus(
                 configuration: configuration,
                 operatorAddress: operatorAddress
@@ -1218,14 +1384,17 @@ final class AppModel: ObservableObject {
             }
 
             let requests = try invoices.map { try $0.paymentRequest() }
-            let configurations = try invoices.map { try $0.configurationSnapshot() }
-            guard let configuration = configurations.first,
-                  configurations.allSatisfy({ $0 == configuration }),
+            let persistentConfigurations = try invoices.map {
+                try $0.configurationSnapshot()
+            }
+            guard let persistentConfiguration = persistentConfigurations.first,
+                  persistentConfigurations.allSatisfy({ $0 == persistentConfiguration }),
                   let firstRequest = requests.first
             else { throw AppSettlementError.mixedSnapshots }
-            for (request, snapshot) in zip(requests, configurations) {
+            for (request, snapshot) in zip(requests, persistentConfigurations) {
                 try validateSnapshot(request, against: snapshot)
             }
+            let configuration = try operationalConfiguration(for: persistentConfiguration)
             guard let operatorAddress else { throw OperatorWalletError.walletNotCreated }
             guard invoiceOperatorSnapshotsMatch(
                 requests.map(\.terminalIdentifier.address),
@@ -1309,6 +1478,7 @@ final class AppModel: ObservableObject {
             }
             preparedSettlement = prepared
             preparedConfiguration = configuration
+            preparedPersistentConfiguration = persistentConfiguration
             preparedConfirmationSnapshots = confirmationSnapshots
             preparedSettlementValidationProof = PreparedSettlementValidationProof(
                 configuration: configuration,
@@ -1471,6 +1641,7 @@ final class AppModel: ObservableObject {
     func confirmPreparedSettlement() async {
         guard let preparedSettlement,
               let configuration = preparedConfiguration,
+              let persistentConfiguration = preparedPersistentConfiguration,
               let expectedSnapshots = preparedConfirmationSnapshots,
               let operatorAddress
         else { return }
@@ -1567,7 +1738,7 @@ final class AppModel: ObservableObject {
             let stored = try StoredSettlement(
                 signed: signed,
                 prepared: preparedSettlement,
-                rpcURL: configuration.rpcEndpoints[0],
+                rpcURL: persistentConfiguration.rpcEndpoints[0],
                 tokenSymbol: token.symbol,
                 tokenDecimals: token.decimals,
                 requiredConfirmations: configuration.confirmationPolicy.requiredBlocks
@@ -1635,10 +1806,11 @@ final class AppModel: ObservableObject {
                     try Task.checkCancellation()
                     guard let currentAddress = operatorAddress,
                           currentAddress.hex == record.operatorAddress,
-                          let endpoint = URL(string: record.rpcURL),
+                          let chainID = UInt64(exactly: record.chainID),
                           let required = UInt64(exactly: record.requiredConfirmations),
                           let nonce = UInt64(exactly: record.nonce)
                     else { throw AppSettlementError.walletMismatch }
+                    let endpoint = try operationalEndpoint(for: chainID)
                     let rpc = try OperatorRPCClientPool.shared.client(for: endpoint)
                     let coordinator = SettlementCoordinator(
                         rpc: rpc,
@@ -2263,11 +2435,153 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func existingRPCOverride(
-        for chainID: UInt64,
-        settings: AppSettings
-    ) -> URL? {
-        settings.rpcOverride(for: chainID)
+    /// Older releases stored custom per-network transport URLs in UserDefaults and immutable
+    /// history snapshots. Move the endpoint that the old release would have selected into
+    /// Keychain before deleting any redundant copy. A failed chain remains untouched and is
+    /// explicitly unavailable, while runtime transport still fails over only to compiled pins.
+    private func migrateLegacyRPCEndpointsIfNeeded() {
+        let legacyOverrides = settings.legacyRPCEndpointOverrides()
+        var failures = [UInt64: String]()
+        for legacy in legacyOverrides {
+            do {
+                if try rpcEndpointStore.endpoint(for: legacy.chainID) == nil {
+                    let endpoint = try RPCEndpointURLParser.parse(legacy.rawValue)
+                    try rpcEndpointStore.save(endpoint, for: legacy.chainID)
+                }
+            } catch {
+                failures[legacy.chainID] = Self.legacyRPCEndpointMigrationFailureMessage
+            }
+        }
+        rpcEndpointMigrationFailures = failures
+
+        let knownChains = Set(TerminalKnownChainProfile.all.map(\.chainID))
+        let normalizableChains = knownChains.subtracting(failures.keys)
+        let requiresNormalization = !legacyOverrides.isEmpty
+            || AppPreferences.requiresLegacyRPCHistoryNormalization
+        guard requiresNormalization else { return }
+        do {
+            let didNormalize = try normalizePersistedRPCEndpoints(
+                for: normalizableChains
+            )
+            if failures.isEmpty {
+                _ = AppPreferences.recordLegacyRPCHistoryNormalization()
+            }
+            if didNormalize, !legacyOverrides.isEmpty, failures.isEmpty {
+                rpcEndpointMessage = "The legacy dedicated RPC endpoint was moved to this device's Keychain, and old local copies were removed."
+            }
+        } catch {
+            rpcEndpointMessage = error.localizedDescription
+            errorMessage = error.localizedDescription
+        }
+
+        if !failures.isEmpty {
+            rpcEndpointMessage = Self.legacyRPCEndpointMigrationFailureMessage
+            errorMessage = Self.legacyRPCEndpointMigrationFailureMessage
+        }
+    }
+
+    /// Normalizes only chains whose active override is already safe in Keychain, or which have no
+    /// legacy override. Settings are persisted before SwiftData history, so any interruption is
+    /// retryable and can never remove the sole active endpoint copy before Keychain owns it.
+    @discardableResult
+    private func normalizePersistedRPCEndpoints(
+        for chainIDs: Set<UInt64>
+    ) throws -> Bool {
+        guard !chainIDs.isEmpty else { return false }
+        var didNormalize = false
+        let normalizedSettings = settings.normalizingPersistedRPCEndpoints(
+            for: chainIDs
+        )
+        if normalizedSettings != settings {
+            guard AppPreferences.saveSettings(normalizedSettings) else {
+                throw RPCEndpointMigrationError.settingsPersistenceFailed
+            }
+            settings = normalizedSettings
+            didNormalize = true
+        }
+
+        do {
+            let invoices = try container.mainContext.fetch(FetchDescriptor<StoredInvoice>())
+            let settlements = try container.mainContext.fetch(
+                FetchDescriptor<StoredSettlement>()
+            )
+            var historyChanged = false
+            for invoice in invoices {
+                guard let chainID = UInt64(exactly: invoice.chainID),
+                      chainIDs.contains(chainID),
+                      let known = TerminalKnownChainProfile.profile(for: chainID),
+                      invoice.rpcURL != known.rpcEndpoint.absoluteString
+                else { continue }
+                invoice.rpcURL = known.rpcEndpoint.absoluteString
+                historyChanged = true
+            }
+            for settlement in settlements {
+                guard let chainID = UInt64(exactly: settlement.chainID),
+                      chainIDs.contains(chainID),
+                      let known = TerminalKnownChainProfile.profile(for: chainID),
+                      settlement.rpcURL != known.rpcEndpoint.absoluteString
+                else { continue }
+                settlement.rpcURL = known.rpcEndpoint.absoluteString
+                historyChanged = true
+            }
+            if historyChanged {
+                try saveMainContextOrRollback()
+                didNormalize = true
+            }
+        } catch {
+            throw RPCEndpointMigrationError.historyPersistenceFailed
+        }
+        return didNormalize
+    }
+
+    private func operationalEndpoint(for chainID: UInt64) throws -> URL {
+        guard let known = TerminalKnownChainProfile.profile(for: chainID) else {
+            throw AppSettingsError.unsupportedChain
+        }
+        return try rpcEndpointStore.endpoint(for: chainID) ?? known.rpcEndpoint
+    }
+
+    private func operationalConfiguration(
+        for persistentConfiguration: TerminalConfiguration
+    ) throws -> TerminalConfiguration {
+        let endpoint = try operationalEndpoint(for: persistentConfiguration.chainID)
+        guard endpoint != persistentConfiguration.rpcEndpoints[0] else {
+            return persistentConfiguration
+        }
+        return try persistentConfiguration.replacingRPCEndpoint(with: endpoint)
+    }
+
+    private func refreshRPCEndpointStatuses() {
+        var refreshed = [UInt64: RPCEndpointConfigurationStatus]()
+        for profile in TerminalKnownChainProfile.all {
+            if let migrationFailure = rpcEndpointMigrationFailures[profile.chainID] {
+                refreshed[profile.chainID] = .unavailable(migrationFailure)
+                continue
+            }
+            do {
+                if let endpoint = try rpcEndpointStore.endpoint(for: profile.chainID) {
+                    refreshed[profile.chainID] = .configured(
+                        provider: RPCEndpointURLParser.providerLabel(for: endpoint)
+                    )
+                } else {
+                    refreshed[profile.chainID] = .builtIn
+                }
+            } catch {
+                refreshed[profile.chainID] = .unavailable(error.localizedDescription)
+            }
+        }
+        rpcEndpointStatuses = refreshed
+    }
+
+    private func invalidateRPCDependentState() {
+        validatedConfigurationFingerprint = nil
+        configurationValidationProof = nil
+        preparedSettlementValidationProof = nil
+        validationMessage = "On-chain validation required"
+        settlementCoordinator = nil
+        settlementCoordinatorKey = nil
+        operatorStatus = nil
+        operatorStatusMessage = "RPC endpoint changed. Refresh readiness before accepting payments."
     }
 
     private func coordinator(
@@ -2323,6 +2637,7 @@ final class AppModel: ObservableObject {
     private func clearPreparedSettlementState() {
         preparedSettlement = nil
         preparedConfiguration = nil
+        preparedPersistentConfiguration = nil
         preparedConfirmationSnapshots = nil
         preparedSettlementValidationProof = nil
         preparedAutoSweepFingerprint = nil
@@ -2484,7 +2799,9 @@ final class AppModel: ObservableObject {
               forceRevalidation || !invoice.hasIncomingPaymentEvidence
         else { return }
         let paymentRequest = try invoice.paymentRequest()
-        let configuration = try invoice.configurationSnapshot()
+        let configuration = try operationalConfiguration(
+            for: invoice.configurationSnapshot()
+        )
         let evidenceRequest = try PaymentEvidenceRequest(
             chainID: paymentRequest.chainID,
             receiver: paymentRequest.receiver,

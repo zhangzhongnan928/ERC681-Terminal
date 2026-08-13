@@ -112,33 +112,21 @@ public struct TerminalProvisioner:
         } else {
             operationalEndpoint = profile.rpcEndpoint
         }
-        let operationalRPC = try rpcFactory(operationalEndpoint)
-        let operationalChainID = try await operationalRPC.chainID()
-        guard operationalChainID == profile.chainID else {
+        let rpc = try rpcFactory(operationalEndpoint)
+        let actualChainID = try await rpc.chainID()
+        guard actualChainID == profile.chainID else {
             throw ConfigurationValidationError.wrongChain(
                 expected: profile.chainID,
-                actual: operationalChainID
+                actual: actualChainID
             )
         }
 
-        // A persisted override is useful for operations, but it is not a deployment trust
-        // anchor. All provisioning provenance comes from the immutable endpoint shipped with
-        // the known-chain profile.
-        let trustedRPC: any EthereumReadRPC
-        if operationalEndpoint == profile.rpcEndpoint {
-            trustedRPC = operationalRPC
-        } else {
-            trustedRPC = try rpcFactory(profile.rpcEndpoint)
-        }
-        let trustedChainID = try await trustedRPC.chainID()
-        guard trustedChainID == profile.chainID else {
-            throw ConfigurationValidationError.wrongChain(
-                expected: profile.chainID,
-                actual: trustedChainID
-            )
-        }
-
-        let vaultRuntimeCode = try await trustedRPC.code(at: payload.vault, block: .latest)
+        // The administrator-selected provider is transport, not a deployment trust anchor.
+        // Every value read through it remains constrained by the immutable chain, factory,
+        // implementation, CREATE2, and vault-runtime hashes compiled into the known profile.
+        // Keeping every read on the operational endpoint also means a rate-limited public fallback
+        // cannot break provisioning after a dedicated endpoint has been configured.
+        let vaultRuntimeCode = try await rpc.code(at: payload.vault, block: .latest)
         let actualVaultRuntimeCodeHash = Keccak256.hash(vaultRuntimeCode)
         guard actualVaultRuntimeCodeHash == profile.vaultRuntimeCodeHash else {
             throw TerminalProvisioningValidationError.vaultRuntimeCodeHashMismatch(
@@ -150,7 +138,7 @@ public struct TerminalProvisioner:
         // These latest-state reads are bootstrap hints only. The configuration assembled from
         // them is not trusted or persisted until ConfigurationValidator reproduces every code,
         // linkage, whitelist, and metadata dependency at one canonical fixed head below.
-        let factoryData = try await trustedRPC.call(
+        let factoryData = try await rpc.call(
             to: payload.vault,
             data: ABI.encodeCall(selector: ABI.factorySelector),
             block: .latest
@@ -163,7 +151,7 @@ public struct TerminalProvisioner:
             )
         }
 
-        let implementationData = try await trustedRPC.call(
+        let implementationData = try await rpc.call(
             to: derivedFactory,
             data: ABI.encodeCall(selector: ABI.implementationSelector),
             block: .latest
@@ -179,7 +167,7 @@ public struct TerminalProvisioner:
         let tokenDecimals: UInt8
         let tokenSymbol: String
         if NativeAsset.isNative(payload.token) {
-            let nativeAssetData = try await trustedRPC.call(
+            let nativeAssetData = try await rpc.call(
                 to: payload.vault,
                 data: ABI.encodeCall(selector: ABI.nativeAssetSelector),
                 block: .latest
@@ -194,7 +182,7 @@ public struct TerminalProvisioner:
             tokenDecimals = profile.nativeCurrencyDecimals
             tokenSymbol = profile.nativeCurrencySymbol
         } else {
-            let decimalsData = try await trustedRPC.call(
+            let decimalsData = try await rpc.call(
                 to: payload.token,
                 data: ABI.encodeCall(selector: ABI.decimalsSelector),
                 block: .latest
@@ -204,7 +192,7 @@ public struct TerminalProvisioner:
             else { throw ConfigurationValidationError.invalidDecimals }
             tokenDecimals = decodedDecimals
 
-            let symbolData = try await trustedRPC.call(
+            let symbolData = try await rpc.call(
                 to: payload.token,
                 data: ABI.encodeCall(selector: ABI.symbolSelector),
                 block: .latest
@@ -216,7 +204,7 @@ public struct TerminalProvisioner:
             }
         }
 
-        let whitelistData = try await trustedRPC.call(
+        let whitelistData = try await rpc.call(
             to: payload.vault,
             data: ABI.encodeCall(
                 selector: ABI.isPaymentTokenSelector,
@@ -245,7 +233,7 @@ public struct TerminalProvisioner:
             confirmationPolicy: confirmationPolicy,
             create2TestVector: profile.create2TestVector
         )
-        let detailed = try await ConfigurationValidator(rpc: trustedRPC)
+        let detailed = try await ConfigurationValidator(rpc: rpc)
             .validateDetailed(configuration)
         // Pin the exact vault bytes covered by the validator's final canonical-head identity
         // check. The earlier latest-state hash is only an early counterfeit-vault rejection and
@@ -288,16 +276,12 @@ public struct TerminalProvisioner:
                 )
         else { throw TerminalProvisioningValidationError.historicalDeploymentPinMismatch }
 
-        // The saved endpoint remains the operational endpoint for balances and broadcasts, but
-        // it is not a provenance authority. Check that it still serves the expected chain, then
-        // prove contract code, linkage, whitelist, and token metadata through the immutable
-        // endpoint shipped in the known-chain profile.
-        // Legacy invoices did not persist the profile-wide test vector. Reconstitute it from the
-        // immutable profile so historical validation performs the same derivation self-test as
-        // fresh provisioning without trusting local snapshot data.
-        let trustedConfiguration = try TerminalConfiguration(
+        // The saved endpoint is transport, while the immutable profile remains the source of every
+        // deployment pin. Legacy invoices did not persist the profile-wide test vector, so restore
+        // it before running the same fixed-head validation used for fresh provisioning.
+        let validationConfiguration = try TerminalConfiguration(
             chainID: configuration.chainID,
-            rpcEndpoints: [profile.rpcEndpoint],
+            rpcEndpoints: configuration.rpcEndpoints,
             protocolVersion: configuration.protocolVersion,
             deployment: configuration.deployment,
             tokens: configuration.tokens,
@@ -305,38 +289,9 @@ public struct TerminalProvisioner:
             create2TestVector: profile.create2TestVector
         )
 
-        let operationalRPC = try rpcFactory(configuration.rpcEndpoints[0])
-        let trustedRPC: any EthereumReadRPC
-        if configuration.rpcEndpoints[0] == profile.rpcEndpoint {
-            trustedRPC = operationalRPC
-        } else {
-            trustedRPC = try rpcFactory(profile.rpcEndpoint)
-        }
-
-        // A distinct saved endpoint is checked for network identity in parallel with the trusted
-        // endpoint's fixed-head proof. When both URLs are identical the trusted proof's anchor is
-        // also the operational check, avoiding a duplicate chain read. The detailed validator
-        // returns the exact vault code included in that proof, avoiding a duplicate code read.
-        let detailed: DetailedConfigurationValidation
-        if configuration.rpcEndpoints[0] == profile.rpcEndpoint {
-            detailed = try await ConfigurationValidator(rpc: trustedRPC)
-                .validateDetailed(trustedConfiguration)
-        } else {
-            async let operationalChainID = operationalRPC.chainID()
-            async let trustedValidation = ConfigurationValidator(rpc: trustedRPC)
-                .validateDetailed(trustedConfiguration)
-            let (actualOperationalChainID, resolvedValidation) = try await (
-                operationalChainID,
-                trustedValidation
-            )
-            guard actualOperationalChainID == profile.chainID else {
-                throw ConfigurationValidationError.wrongChain(
-                    expected: profile.chainID,
-                    actual: actualOperationalChainID
-                )
-            }
-            detailed = resolvedValidation
-        }
+        let rpc = try rpcFactory(configuration.rpcEndpoints[0])
+        let detailed = try await ConfigurationValidator(rpc: rpc)
+            .validateDetailed(validationConfiguration)
 
         let actualVaultRuntimeCodeHash = Keccak256.hash(detailed.vaultRuntimeCode)
         guard actualVaultRuntimeCodeHash == profile.vaultRuntimeCodeHash else {

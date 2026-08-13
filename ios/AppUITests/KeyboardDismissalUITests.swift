@@ -103,6 +103,19 @@ final class KeyboardDismissalUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Create local admin PIN"].exists)
     }
 
+    func testRPCURLSettingIsDiscoverableInTerminalSetup() {
+        app.tabBars.buttons["Settings"].tap()
+        XCTAssertTrue(app.navigationBars["Terminal Setup"].waitForExistence(timeout: 5))
+
+        let rpcURLField = app.secureTextFields["rpcURLField"]
+        for _ in 0..<8 where !rpcURLField.exists {
+            app.swipeUp()
+        }
+
+        XCTAssertTrue(rpcURLField.exists)
+        XCTAssertEqual(rpcURLField.value as? String, "New HTTPS RPC URL")
+    }
+
     func testReadyCheckoutFixtureSupportsExactKeypadAmountAndAccessibleQRAction() {
         app.terminate()
         app.launchEnvironment["OPK_UI_TEST_CHECKOUT_FIXTURE"] = "ready"
