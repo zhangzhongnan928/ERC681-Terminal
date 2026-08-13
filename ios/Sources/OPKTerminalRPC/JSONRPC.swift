@@ -237,6 +237,29 @@ enum JSONRPCError: Error, Equatable, Sendable {
     case server(RPCServerError)
 }
 
+extension JSONRPCError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case let .invalidHTTPStatus(statusCode) where statusCode == 429:
+            "The RPC endpoint rate limit was exceeded (HTTP 429). Configure a dedicated RPC URL in Settings and try again."
+        case let .invalidHTTPStatus(statusCode) where statusCode == 401 || statusCode == 403:
+            "The RPC endpoint rejected its credentials (HTTP \(statusCode)). Check the RPC URL in Settings."
+        case let .invalidHTTPStatus(statusCode):
+            "The RPC endpoint returned HTTP \(statusCode). Check the RPC URL in Settings or try another endpoint."
+        case .remoteResponseDecodeFailure:
+            "The RPC endpoint returned unreadable data. Check the RPC URL in Settings or try another endpoint."
+        case .malformedResponse:
+            "The RPC endpoint returned a malformed JSON-RPC response. Check the RPC URL in Settings or try another endpoint."
+        case .mismatchedID:
+            "The RPC endpoint returned a response for the wrong request. Try another RPC endpoint."
+        case let .batchLimitExceeded(maximum):
+            "The RPC request exceeded the safe batch limit of \(maximum)."
+        case let .server(error):
+            "The RPC server rejected the request (JSON-RPC code \(error.code)). Check the endpoint or try again."
+        }
+    }
+}
+
 private struct JSONRPCRequest: Encodable {
     let jsonrpc = "2.0"
     let id: UInt64

@@ -87,13 +87,15 @@ capability proof.
 Base Mainnet (`8453`) and Base Sepolia (`84532`) are enabled in this release. The Swift
 payment-profile catalog remains EVM-generic, but every other chain is rejected before RPC use.
 Existing provisioned profiles and immutable invoice history are never translated between chains.
-The compiled public Base RPC endpoints establish network identity but are rate-limited and are not
-production-capacity guarantees, so a reviewed operational provider should be provisioned for live
-merchant volume. Multiple vault/payment-asset profiles
+The compiled public Base RPC endpoints are rate-limited fallbacks, not production-capacity
+guarantees. Admin/setup provides a masked per-network HTTPS RPC editor. A candidate must report the
+selected chain and, for existing payment profiles, pass the compiled OPK deployment checks before it
+is saved in the device-only Keychain. The provisioning QR never supplies an RPC URL. Credential-bearing
+URLs are used only as runtime transport and are not copied into settings, invoices, settlements,
+receipts, or status text. Multiple vault/payment-asset profiles
 can coexist, while one selected profile supplies the exact configuration snapshot saved with each
-invoice and validated before presenting a QR. RPC
-URLs must use HTTPS, except loopback HTTP for local development, and embedded URL credentials and
-fragments are rejected.
+invoice and validated before presenting a QR. Admin-entered RPC URLs must use HTTPS, and embedded
+user information and fragments are rejected.
 
 One payment profile binds exactly one EVM chain, vault, and ERC-20 or native payment asset. Up to 32
 canonical

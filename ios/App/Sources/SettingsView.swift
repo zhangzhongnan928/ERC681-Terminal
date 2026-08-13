@@ -8,6 +8,7 @@ private enum SettingsFocusField: Hashable {
     case unlockPIN
     case merchantName
     case merchantABN
+    case rpcURL
     case vault
     case token
 }
@@ -40,6 +41,11 @@ struct SettingsView: View {
     @State private var confirmationBlocksDraft = 1
     @State private var merchantReceiptNameDraft = ""
     @State private var merchantReceiptABNDraft = ""
+    @State private var rpcChainID = TerminalKnownChainProfile.baseMainnet.chainID
+    @State private var rpcURLDraft = ""
+    @State private var isRPCURLVisible = false
+    @State private var isConfirmingRPCUpdate = false
+    @State private var isConfirmingRPCRemoval = false
     @State private var isPresentingProvisioningScanner = false
     @State private var isConfirmingWalletReset = false
     @State private var isConfirmingUnreadableSettingsReset = false
@@ -111,12 +117,44 @@ struct SettingsView: View {
                 Text("This removes \(profile.displayName) for \(profile.detail) from this terminal only. Historical invoices and settlements remain available, and on-chain operator authorization is not revoked.")
             }
         }
+        .confirmationDialog(
+            "Trust this RPC provider?",
+            isPresented: $isConfirmingRPCUpdate,
+            titleVisibility: .visible
+        ) {
+            Button("Verify and save endpoint") {
+                focusedField = nil
+                Task {
+                    if await model.updateRPCEndpoint(rpcURLDraft, for: rpcChainID) {
+                        rpcURLDraft = ""
+                        isRPCURLVisible = false
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This provider will receive this terminal's read-only chain queries and signed settlement broadcasts for the selected network. The app will verify the network before saving the URL in this device's Keychain.")
+        }
+        .confirmationDialog(
+            "Use the built-in public RPC?",
+            isPresented: $isConfirmingRPCRemoval,
+            titleVisibility: .visible
+        ) {
+            Button("Remove dedicated endpoint", role: .destructive) {
+                focusedField = nil
+                Task { await model.removeRPCEndpoint(for: rpcChainID) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The dedicated endpoint will be removed from Keychain. Public endpoints can be rate-limited and are intended as a fallback.")
+        }
         .onAppear {
             if manualVault.isEmpty { manualVault = model.settings.vault }
             if manualToken.isEmpty { manualToken = model.settings.tokenAddress }
             if let selectedChainID = UInt64(model.settings.chainID),
                TerminalKnownChainProfile.profile(for: selectedChainID) != nil {
                 manualChainID = selectedChainID
+                rpcChainID = selectedChainID
             }
             syncConfirmationBlocksDraft()
             syncMerchantReceiptDraft()
@@ -170,6 +208,98 @@ struct SettingsView: View {
         }
     }
 
+    private var rpcEndpointSection: some View {
+        Section("3. RPC endpoints") {
+            Picker("Network", selection: $rpcChainID) {
+                ForEach(TerminalKnownChainProfile.all, id: \.chainID) { profile in
+                    Text(profile.networkName).tag(profile.chainID)
+                }
+            }
+            .accessibilityIdentifier("rpcNetworkPicker")
+
+            let status = model.rpcEndpointStatus(for: rpcChainID)
+            LabeledContent("Status", value: status.summary)
+                .accessibilityIdentifier("rpcEndpointStatus")
+            if case let .unavailable(message) = status {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+            if let profile = TerminalKnownChainProfile.profile(for: rpcChainID) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Built-in public fallback")
+                        .font(.caption.weight(.semibold))
+                    Text(profile.rpcEndpoint.absoluteString)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+
+            HStack {
+                Group {
+                    if isRPCURLVisible {
+                        TextField("New HTTPS RPC URL", text: $rpcURLDraft)
+                    } else {
+                        SecureField("New HTTPS RPC URL", text: $rpcURLDraft)
+                    }
+                }
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .focused($focusedField, equals: .rpcURL)
+                .accessibilityIdentifier("rpcURLField")
+
+                Button {
+                    isRPCURLVisible.toggle()
+                } label: {
+                    Label(
+                        isRPCURLVisible ? "Hide RPC URL" : "Show RPC URL",
+                        systemImage: isRPCURLVisible ? "eye.slash" : "eye"
+                    )
+                    .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("toggleRPCURLVisibility")
+            }
+            .disabled(!model.adminPINConfigured || model.operationBusy || model.isProvisioning)
+
+            Button("Verify and save dedicated RPC") {
+                focusedField = nil
+                isConfirmingRPCUpdate = true
+            }
+            .disabled(
+                rpcURLDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || !model.adminPINConfigured
+                    || model.operationBusy
+                    || model.isProvisioning
+                    || model.isRefreshingReadiness
+            )
+            .accessibilityIdentifier("saveRPCURLButton")
+
+            if status != .builtIn {
+                Button("Use built-in public RPC", role: .destructive) {
+                    focusedField = nil
+                    isConfirmingRPCRemoval = true
+                }
+                .disabled(
+                    model.operationBusy
+                        || model.isProvisioning
+                        || model.isRefreshingReadiness
+                )
+                .accessibilityIdentifier("removeRPCURLButton")
+            }
+            if let message = model.rpcEndpointMessage {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Text("Dedicated URLs are verified against the selected chain, stored only in this device's Keychain, and intentionally not displayed again after saving. Public endpoints can be rate-limited.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     @ViewBuilder
     private var adminContent: some View {
         operatorSetupSection
@@ -206,7 +336,9 @@ struct SettingsView: View {
             }
         }
 
-        Section("3. Import portal setup") {
+        rpcEndpointSection
+
+        Section("4. Import portal setup") {
             Text("Each QR adds or updates one chain, vault, and token profile for this terminal's public operator. Existing payment profiles are preserved. RPC and deployment trust anchors never come from the QR.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -326,7 +458,7 @@ struct SettingsView: View {
                 )
                 LabeledContent("Symbol", value: model.settings.tokenSymbol)
                 LabeledContent("Decimals", value: model.settings.tokenDecimals)
-                LabeledContent("RPC", value: model.settings.rpcURL)
+                LabeledContent("Built-in RPC", value: model.settings.rpcURL)
                 LabeledContent(
                     "Confirmations",
                     value: "\(model.settings.confirmationBlocks) block"
@@ -411,7 +543,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
         }
 
-        Section("4. Readiness") {
+        Section("5. Readiness") {
             if model.settings.isProvisioned {
                 LabeledContent(
                     "Selected route",

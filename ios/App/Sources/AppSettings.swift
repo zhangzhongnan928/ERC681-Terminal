@@ -606,22 +606,6 @@ struct AppSettings: Codable, Equatable {
         return "ethereum:\(operatorAddress.hex)@\(chainID)"
     }
 
-    func rpcOverride(for chainID: UInt64) -> URL? {
-        guard let trusted = TerminalKnownChainProfile.profile(for: chainID) else { return nil }
-        let matchingProfiles = paymentProfiles.filter { $0.chainID == String(chainID) }
-        let selectedFirst = matchingProfiles.sorted {
-            ($0.id == selectedPaymentProfileID ? 0 : 1)
-                < ($1.id == selectedPaymentProfileID ? 0 : 1)
-        }
-        return selectedFirst.lazy.compactMap { profile -> URL? in
-            guard let endpoint = URL(string: profile.rpcURL),
-                  endpoint != trusted.rpcEndpoint,
-                  (try? RPCURLPolicy.validate(endpoint)) != nil
-            else { return nil }
-            return endpoint
-        }.first
-    }
-
     var validationFingerprint: String {
         displayedPaymentProfile.validationFingerprint
     }

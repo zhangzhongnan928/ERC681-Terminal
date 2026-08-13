@@ -163,6 +163,16 @@ JWT, but direct terminal JWT authentication is not implemented today. Never past
 RPC URL field or encode one in its QR code. One provider project per environment and fleet shard
 avoids making one global quota or rotation event affect every terminal.
 
+### iOS production RPC configuration
+
+iOS Admin/setup exposes a masked per-network HTTPS editor with explicit trust confirmation. Saving
+first checks the reported chain and revalidates every existing profile for that network against the
+compiled OPK pins, then stores the URL in a non-synchronizing, device-only Keychain item. Fresh
+provisioning performs the complete pinned deployment proof through that selected endpoint. The URL
+is runtime transport only: credential-bearing values are not written to `AppSettings`, SwiftData
+invoice or settlement rows, receipts, logs, or long-lived status text. Removing the item explicitly
+returns that network to the visibly labeled, rate-limited compiled public fallback.
+
 ## Incoming customer transaction evidence
 
 The read-only SDKs can attribute the direct customer transaction that first made a receiver meet

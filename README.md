@@ -124,10 +124,18 @@ Saving an administrator override deliberately changes that chain's read trust so
 checks the endpoint's reported chain and compiled OPK deployment pins, but no client can prevent a
 chosen RPC server from fabricating responses. Configure only a provider the merchant trusts.
 
+iOS Admin/setup provides the same per-network separation between replaceable RPC transport and
+compiled chain/deployment pins. It verifies a masked HTTPS candidate before saving it as a
+non-synchronizing, device-only Keychain item. The active iOS endpoint is applied to provisioning,
+payment monitoring, receipt evidence, and settlement without copying a credential-bearing URL into
+ordinary settings or immutable history. The compiled public Base endpoint remains a visibly labeled,
+rate-limited fallback and can be restored only through an explicit Admin action.
+
 Provider URLs can contain client credentials and are therefore never copied into the normal chain
-catalog, invoices, settlement history, receipts, logs, or long-lived ViewModel/status state. The
+catalog, invoices, settlement history, receipts, logs, or long-lived status text. The
 secure editor holds the submitted value only as ephemeral local UI state. Admin overrides are
-encrypted with an Android Keystore key. BuildConfig values and direct provider credentials remain
+encrypted with an Android Keystore key or stored as device-only iOS Keychain items. BuildConfig
+values and direct provider credentials remain
 extractable from a sufficiently controlled client, so they must be revocable client credentials,
 never server secrets. Prefer a credential-free OPK gateway URL for fleet builds. A Coinbase CDP Client API Key
 is an acceptable direct-mobile fallback because Coinbase documents that key type for client-side

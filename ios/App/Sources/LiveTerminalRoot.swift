@@ -32,6 +32,9 @@ struct LiveTerminalRoot: View {
                 ),
                 adminPINStore: KeychainAdminPINStore(
                     service: "com.openpasskey.terminal.admin-pin.ui-tests.\(namespace)"
+                ),
+                rpcEndpointStore: KeychainRPCEndpointStore(
+                    service: "com.openpasskey.terminal.rpc-endpoint.ui-tests.\(namespace)"
                 )
             )
         } else {

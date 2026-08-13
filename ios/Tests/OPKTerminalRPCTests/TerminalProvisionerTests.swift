@@ -514,53 +514,12 @@ final class TerminalProvisionerTests: XCTestCase {
         )
         XCTAssertEqual(
             probe.calls,
-            [override, TerminalKnownChainProfile.baseSepolia.rpcEndpoint]
+            [override]
         )
         XCTAssertEqual(result.configuration.rpcEndpoints, [override])
     }
 
-    func testHistoricalConfigurationUsesTrustedProfileRPCForProvenance() async throws {
-        let profile = TerminalKnownChainProfile.baseSepolia
-        let operationalEndpoint = URL(string: "https://rpc.example.invalid")!
-        let configuration = try TerminalConfiguration(
-            chainID: profile.chainID,
-            rpcEndpoints: [operationalEndpoint],
-            protocolVersion: profile.protocolVersion,
-            deployment: try OPKDeployment(
-                factory: profile.factory,
-                receiverImplementation: profile.receiverImplementation,
-                vault: vault
-            ),
-            tokens: [try PaymentToken(address: token, symbol: "AUD", decimals: 18)],
-            confirmationPolicy: .init(requiredBlocks: 2),
-            create2TestVector: nil
-        )
-        // The saved operational endpoint can report the correct chain while lying about every
-        // contract. Historical provenance must not ask it any contract getter.
-        let operationalRPC = ProvisioningRPC(
-            vault: vault,
-            token: token,
-            vaultRuntimeCode: Data([0x60, 0x00]),
-            symbolResult: ABI.word(UInt64(1)),
-            whitelisted: false
-        )
-        let trustedRPC = ProvisioningRPC(vault: vault, token: token)
-        let probe = RPCFactoryProbe()
-        let report = try await TerminalProvisioner(rpcFactory: { endpoint in
-            probe.record(endpoint)
-            return endpoint == profile.rpcEndpoint ? trustedRPC : operationalRPC
-        }).validateHistoricalConfiguration(configuration)
-
-        XCTAssertEqual(report.chainID, profile.chainID)
-        XCTAssertTrue(report.checks.contains { $0.name == "CREATE2 vector" })
-        XCTAssertEqual(probe.calls, [operationalEndpoint, profile.rpcEndpoint])
-        let operationalGetterCalls = await operationalRPC.getterCallCount
-        let trustedGetterCalls = await trustedRPC.getterCallCount
-        XCTAssertEqual(operationalGetterCalls, 0)
-        XCTAssertGreaterThan(trustedGetterCalls, 0)
-    }
-
-    func testHistoricalConfigurationUsesThreeTrustedWavesWithoutDuplicateChainOrCodeReads() async throws {
+    func testHistoricalConfigurationValidatesPinnedStateThroughOperationalRPC() async throws {
         let profile = TerminalKnownChainProfile.baseSepolia
         let operationalEndpoint = URL(string: "https://rpc.example.invalid")!
         let configuration = try TerminalConfiguration(
@@ -577,22 +536,49 @@ final class TerminalProvisionerTests: XCTestCase {
             create2TestVector: nil
         )
         let operationalRPC = ProvisioningRPC(vault: vault, token: token)
-        let trustedRPC = HistoricalBatchedRPC(vault: vault, token: token)
-
+        let probe = RPCFactoryProbe()
         let report = try await TerminalProvisioner(rpcFactory: { endpoint in
-            if endpoint == profile.rpcEndpoint { return trustedRPC }
+            probe.record(endpoint)
             return operationalRPC
         }).validateHistoricalConfiguration(configuration)
 
         XCTAssertEqual(report.chainID, profile.chainID)
-        let trustedBatchSizes = await trustedRPC.batchSizes
-        XCTAssertEqual(trustedBatchSizes, [2, 9, 1])
-        let directChainReads = await trustedRPC.directChainReads
-        let directCodeReads = await trustedRPC.directCodeReads
+        XCTAssertTrue(report.checks.contains { $0.name == "CREATE2 vector" })
+        XCTAssertEqual(probe.calls, [operationalEndpoint])
+        let operationalGetterCalls = await operationalRPC.getterCallCount
+        XCTAssertGreaterThan(operationalGetterCalls, 0)
+    }
+
+    func testHistoricalConfigurationUsesThreeOperationalWavesWithoutDuplicateReads() async throws {
+        let profile = TerminalKnownChainProfile.baseSepolia
+        let operationalEndpoint = URL(string: "https://rpc.example.invalid")!
+        let configuration = try TerminalConfiguration(
+            chainID: profile.chainID,
+            rpcEndpoints: [operationalEndpoint],
+            protocolVersion: profile.protocolVersion,
+            deployment: try OPKDeployment(
+                factory: profile.factory,
+                receiverImplementation: profile.receiverImplementation,
+                vault: vault
+            ),
+            tokens: [try PaymentToken(address: token, symbol: "AUD", decimals: 18)],
+            confirmationPolicy: .init(requiredBlocks: 2),
+            create2TestVector: nil
+        )
+        let operationalRPC = HistoricalBatchedRPC(vault: vault, token: token)
+
+        let report = try await TerminalProvisioner(rpcFactory: { endpoint in
+            XCTAssertEqual(endpoint, operationalEndpoint)
+            return operationalRPC
+        }).validateHistoricalConfiguration(configuration)
+
+        XCTAssertEqual(report.chainID, profile.chainID)
+        let batchSizes = await operationalRPC.batchSizes
+        XCTAssertEqual(batchSizes, [2, 9, 1])
+        let directChainReads = await operationalRPC.directChainReads
+        let directCodeReads = await operationalRPC.directCodeReads
         XCTAssertEqual(directChainReads, 0)
         XCTAssertEqual(directCodeReads, 0)
-        let operationalGetterCalls = await operationalRPC.getterCallCount
-        XCTAssertEqual(operationalGetterCalls, 0)
     }
 
     func testHistoricalConfigurationSameEndpointDoesNotDuplicateOperationalChainRead() async throws {

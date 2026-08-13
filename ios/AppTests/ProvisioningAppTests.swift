@@ -2,10 +2,238 @@ import XCTest
 @testable import OPKTerminalApp
 import OPKTerminalCore
 @testable import OPKTerminalOperator
-import OPKTerminalRPC
+@testable import OPKTerminalRPC
 import SwiftData
 
 final class ProvisioningAppTests: XCTestCase {
+    func testDedicatedRPCEndpointParserRequiresHTTPSAndDoesNotExposeCustomHost() throws {
+        XCTAssertThrowsError(try RPCEndpointURLParser.parse("http://rpc.example.com")) {
+            XCTAssertEqual($0 as? RPCEndpointStoreError, .invalidURL)
+        }
+        XCTAssertThrowsError(try RPCEndpointURLParser.parse("https://user@rpc.example.com")) {
+            XCTAssertEqual($0 as? RPCEndpointStoreError, .invalidURL)
+        }
+
+        let endpoint = try RPCEndpointURLParser.parse(
+            "  https://private-tenant.example.com/v1/secret?key=value  "
+        )
+
+        XCTAssertEqual(
+            endpoint.absoluteString,
+            "https://private-tenant.example.com/v1/secret?key=value"
+        )
+        XCTAssertEqual(
+            RPCEndpointURLParser.providerLabel(for: endpoint),
+            "Custom HTTPS provider"
+        )
+    }
+
+    func testDedicatedRPCEndpointKeychainStoreRoundTripsAndRemovesURL() throws {
+        let chainID = TerminalKnownChainProfile.baseMainnet.chainID
+        let store = KeychainRPCEndpointStore(
+            service: "com.openpasskey.terminal.rpc-endpoint.tests.\(UUID())"
+        )
+        let endpoint = try XCTUnwrap(
+            URL(string: "https://base-mainnet.g.alchemy.com/v2/keychain-secret")
+        )
+        defer { try? store.removeEndpoint(for: chainID) }
+
+        XCTAssertNil(try store.endpoint(for: chainID))
+        try store.save(endpoint, for: chainID)
+        XCTAssertEqual(try store.endpoint(for: chainID), endpoint)
+
+        try store.removeEndpoint(for: chainID)
+        XCTAssertNil(try store.endpoint(for: chainID))
+    }
+
+    @MainActor
+    func testDedicatedRPCEndpointIsCommittedOnlyAfterChainValidation() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        AppPreferences.saveSettings(AppSettings())
+        let endpointStore = InMemoryRPCEndpointStore()
+        let validation = RPCEndpointValidationProbe()
+        let model = AppModel(
+            container: try appTestContainer(),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            rpcEndpointStore: endpointStore,
+            rpcEndpointValidation: { chainID, endpoint, configurations in
+                await validation.record(
+                    chainID: chainID,
+                    endpoint: endpoint,
+                    configurationCount: configurations.count
+                )
+            }
+        )
+        model.unlockAdmin(with: "123456")
+        let chainID = TerminalKnownChainProfile.baseMainnet.chainID
+
+        let didSave = await model.updateRPCEndpoint(
+            "https://base-mainnet.g.alchemy.com/v2/secret",
+            for: chainID
+        )
+
+        XCTAssertTrue(didSave)
+        XCTAssertEqual(
+            try endpointStore.endpoint(for: chainID)?.absoluteString,
+            "https://base-mainnet.g.alchemy.com/v2/secret"
+        )
+        XCTAssertEqual(
+            model.rpcEndpointStatus(for: chainID),
+            .configured(provider: "Alchemy")
+        )
+        let captured = await validation.snapshot()
+        XCTAssertEqual(captured?.chainID, chainID)
+        XCTAssertEqual(captured?.configurationCount, 0)
+    }
+
+    @MainActor
+    func testFailedDedicatedRPCEndpointValidationPreservesExistingKeychainValue() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        AppPreferences.saveSettings(AppSettings())
+        let chainID = TerminalKnownChainProfile.baseMainnet.chainID
+        let endpointStore = InMemoryRPCEndpointStore()
+        try endpointStore.save(
+            XCTUnwrap(URL(string: "https://mainnet.infura.io/v3/original")),
+            for: chainID
+        )
+        let model = AppModel(
+            container: try appTestContainer(),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            rpcEndpointStore: endpointStore,
+            rpcEndpointValidation: { chainID, _, _ in
+                throw ConfigurationValidationError.wrongChain(
+                    expected: chainID,
+                    actual: 1
+                )
+            }
+        )
+        model.unlockAdmin(with: "123456")
+
+        let didSave = await model.updateRPCEndpoint(
+            "https://base-mainnet.g.alchemy.com/v2/replacement",
+            for: chainID
+        )
+
+        XCTAssertFalse(didSave)
+        XCTAssertEqual(
+            try endpointStore.endpoint(for: chainID)?.absoluteString,
+            "https://mainnet.infura.io/v3/original"
+        )
+        XCTAssertEqual(
+            model.rpcEndpointStatus(for: chainID),
+            .configured(provider: "Infura")
+        )
+        XCTAssertEqual(
+            model.errorMessage,
+            "The RPC reported chain 1, but chain \(chainID) is required."
+        )
+    }
+
+    @MainActor
+    func testProvisioningRPCFailureShowsActionableEndpointMessage() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        AppPreferences.saveSettings(AppSettings())
+
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let model = AppModel(
+            container: try ModelContainer(
+                for: StoredInvoice.self,
+                StoredSettlement.self,
+                StoredCanonicalSweepProof.self,
+                configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+            ),
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.rpc-error-tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(address: operatorAddress),
+            provisioningValidator: RPCFailureProvisioningValidator(),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            rpcEndpointStore: InMemoryRPCEndpointStore()
+        )
+        model.unlockAdmin(with: "123456")
+        let configuration = try model.settings.configuration()
+        let payload = try TerminalProvisioningPayload(
+            chainID: configuration.chainID,
+            vault: configuration.deployment.vault,
+            token: configuration.tokens[0].address,
+            operatorAddress: operatorAddress
+        )
+
+        await model.provision(payload)
+
+        XCTAssertEqual(
+            model.errorMessage,
+            "The RPC endpoint rate limit was exceeded (HTTP 429). Configure a dedicated RPC URL in Settings and try again."
+        )
+        XCTAssertEqual(
+            model.provisioningMessage,
+            "Provisioning rejected. Existing settings were not changed."
+        )
+        XCTAssertFalse(model.settings.isProvisioned)
+    }
+
+    @MainActor
+    func testProvisioningUsesKeychainEndpointWithoutPersistingCredentialURL() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        AppPreferences.saveSettings(AppSettings())
+        let profile = TerminalKnownChainProfile.baseMainnet
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let endpoint = try XCTUnwrap(
+            URL(string: "https://base-mainnet.g.alchemy.com/v2/private-key")
+        )
+        let endpointStore = InMemoryRPCEndpointStore()
+        try endpointStore.save(endpoint, for: profile.chainID)
+        let provisioning = SuccessfulProvisioningValidator()
+        let statusProbe = OperationalConfigurationProbe()
+        let model = AppModel(
+            container: try appTestContainer(),
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.rpc-provisioning-tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(address: operatorAddress),
+            provisioningValidator: provisioning,
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            rpcEndpointStore: endpointStore,
+            operatorStatusReader: { configuration, _ in
+                await statusProbe.record(configuration)
+                return OperatorChainStatus(
+                    chainID: configuration.chainID,
+                    balance: profile.minimumOperatorNativeReserve,
+                    isAuthorizedOperator: true,
+                    isVaultOwner: false,
+                    isLowGas: false
+                )
+            }
+        )
+        model.unlockAdmin(with: "123456")
+        let payload = try TerminalProvisioningPayload(
+            chainID: profile.chainID,
+            vault: profile.create2TestVector.vault,
+            token: NativeAsset.address,
+            operatorAddress: operatorAddress
+        )
+
+        await model.provision(payload)
+
+        let receivedOverride = await provisioning.receivedOverride()
+        let statusEndpoint = await statusProbe.endpoint()
+        XCTAssertEqual(receivedOverride, endpoint)
+        XCTAssertEqual(statusEndpoint, endpoint)
+        XCTAssertEqual(model.settings.rpcURL, profile.rpcEndpoint.absoluteString)
+        XCTAssertEqual(
+            AppPreferences.loadSettings().rpcURL,
+            profile.rpcEndpoint.absoluteString
+        )
+        let persistedJSON = try XCTUnwrap(
+            String(data: JSONEncoder().encode(model.settings), encoding: .utf8)
+        )
+        XCTAssertFalse(persistedJSON.contains("private-key"))
+    }
+
     func testFreshSettingsDefaultToBaseMainnetWithoutProvisioning() throws {
         let mainnet = TerminalKnownChainProfile.baseMainnet
         let settings = AppSettings()
@@ -3680,6 +3908,108 @@ final class ProvisioningAppTests: XCTestCase {
     }
 }
 
+@MainActor
+private func appTestContainer() throws -> ModelContainer {
+    try ModelContainer(
+        for: StoredInvoice.self,
+        StoredSettlement.self,
+        StoredCanonicalSweepProof.self,
+        configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+    )
+}
+
+private actor RPCEndpointValidationProbe {
+    struct Snapshot: Sendable {
+        let chainID: UInt64
+        let endpoint: URL
+        let configurationCount: Int
+    }
+
+    private var value: Snapshot?
+
+    func record(chainID: UInt64, endpoint: URL, configurationCount: Int) {
+        value = Snapshot(
+            chainID: chainID,
+            endpoint: endpoint,
+            configurationCount: configurationCount
+        )
+    }
+
+    func snapshot() -> Snapshot? { value }
+}
+
+private actor OperationalConfigurationProbe {
+    private var value: TerminalConfiguration?
+
+    func record(_ configuration: TerminalConfiguration) {
+        value = configuration
+    }
+
+    func endpoint() -> URL? { value?.rpcEndpoints.first }
+}
+
+private actor SuccessfulProvisioningValidator: TerminalProvisioningValidating {
+    private var capturedOverride: URL?
+
+    func deriveAndValidate(
+        _ payload: TerminalProvisioningPayload,
+        expectedOperator: EthereumAddress,
+        confirmationPolicy: ConfirmationPolicy,
+        rpcEndpointOverride: URL?
+    ) async throws -> ProvisionedTerminalConfiguration {
+        guard payload.operatorAddress == expectedOperator,
+              let profile = TerminalKnownChainProfile.profile(for: payload.chainID),
+              NativeAsset.isNative(payload.token)
+        else { throw AppSettingsError.invalidValue }
+        capturedOverride = rpcEndpointOverride
+        let configuration = try TerminalConfiguration(
+            chainID: profile.chainID,
+            rpcEndpoints: [rpcEndpointOverride ?? profile.rpcEndpoint],
+            protocolVersion: profile.protocolVersion(for: payload.token),
+            deployment: OPKDeployment(
+                factory: profile.factory,
+                receiverImplementation: profile.receiverImplementation,
+                vault: payload.vault
+            ),
+            tokens: [PaymentToken(
+                address: NativeAsset.address,
+                symbol: profile.nativeCurrencySymbol,
+                decimals: profile.nativeCurrencyDecimals
+            )],
+            confirmationPolicy: confirmationPolicy,
+            create2TestVector: profile.create2TestVector
+        )
+        return ProvisionedTerminalConfiguration(
+            profile: profile,
+            configuration: configuration,
+            validationReport: ConfigurationValidationReport(
+                chainID: profile.chainID,
+                checks: []
+            )
+        )
+    }
+
+    func receivedOverride() -> URL? { capturedOverride }
+}
+
+private final class InMemoryRPCEndpointStore: RPCEndpointManaging, @unchecked Sendable {
+    private let lock = NSLock()
+    private var endpoints = [UInt64: URL]()
+
+    func endpoint(for chainID: UInt64) throws -> URL? {
+        lock.withLock { endpoints[chainID] }
+    }
+
+    func save(_ endpoint: URL, for chainID: UInt64) throws {
+        let validated = try RPCEndpointURLParser.parse(endpoint.absoluteString)
+        lock.withLock { endpoints[chainID] = validated }
+    }
+
+    func removeEndpoint(for chainID: UInt64) throws {
+        lock.withLock { endpoints.removeValue(forKey: chainID) }
+    }
+}
+
 private final class InMemoryAdminPINStore: AdminPINManaging, @unchecked Sendable {
     private let pin: String
 
@@ -3881,6 +4211,17 @@ private actor BlockingProvisioningValidator: TerminalProvisioningValidating {
         derivationReleased = true
         releaseContinuation?.resume()
         releaseContinuation = nil
+    }
+}
+
+private struct RPCFailureProvisioningValidator: TerminalProvisioningValidating {
+    func deriveAndValidate(
+        _ payload: TerminalProvisioningPayload,
+        expectedOperator: EthereumAddress,
+        confirmationPolicy: ConfirmationPolicy,
+        rpcEndpointOverride: URL?
+    ) async throws -> ProvisionedTerminalConfiguration {
+        throw JSONRPCError.invalidHTTPStatus(429)
     }
 }
 

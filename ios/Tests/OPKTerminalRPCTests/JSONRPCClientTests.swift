@@ -240,6 +240,26 @@ final class JSONRPCClientTests: XCTestCase {
         XCTAssertFalse(first === (try pool.client(for: secondEndpoint)))
     }
 
+    func testJSONRPCErrorsDescribeEndpointRemediationWithoutFoundationCaseNumbers() {
+        XCTAssertEqual(
+            JSONRPCError.invalidHTTPStatus(429).localizedDescription,
+            "The RPC endpoint rate limit was exceeded (HTTP 429). Configure a dedicated RPC URL in Settings and try again."
+        )
+        XCTAssertEqual(
+            JSONRPCError.invalidHTTPStatus(403).localizedDescription,
+            "The RPC endpoint rejected its credentials (HTTP 403). Check the RPC URL in Settings."
+        )
+        XCTAssertEqual(
+            JSONRPCError.remoteResponseDecodeFailure.localizedDescription,
+            "The RPC endpoint returned unreadable data. Check the RPC URL in Settings or try another endpoint."
+        )
+        XCTAssertFalse(
+            JSONRPCError.invalidHTTPStatus(500).localizedDescription.contains(
+                "OPKTerminalRPC.JSONRPCError"
+            )
+        )
+    }
+
     func testTaskLocalDeadlineBoundsPhysicalRequestTimeout() async throws {
         let transport = QueueTransport([
             #"{"jsonrpc":"2.0","id":1,"result":"0x14a34"}"#,

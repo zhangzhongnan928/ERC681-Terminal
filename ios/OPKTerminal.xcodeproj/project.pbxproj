@@ -42,6 +42,7 @@
 		E8ED3530BDCEEAD129C18608 /* SettingsRecoveryAndSettlementGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8576D4EB72C210318311796 /* SettingsRecoveryAndSettlementGuardTests.swift */; };
 		E9FEADCFEDC07B1690B88069 /* OPKTerminalApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA8D918A4F1E641C77252BF8 /* OPKTerminalApp.swift */; };
 		EC5F9A8541A9D58DFA3EA101 /* ReviewerDemo.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0C2EFE579DBE6C55543E894 /* ReviewerDemo.swift */; };
+		EC88663CC9EED45FC4A37D67 /* RPCEndpointStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8245908B09572F18B5D0B276 /* RPCEndpointStore.swift */; };
 		F535BE593283483F324B74A8 /* BaseScanExplorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 527D6776BC0C765C33BA81AB /* BaseScanExplorer.swift */; };
 		F71F83A66D812664E182B08E /* ConfigurationAddressScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFBB39B22012F5CB338817C2 /* ConfigurationAddressScanner.swift */; };
 		FAE99C53F80A7601E337156E /* StoreScreenshotUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F4C3E2A1BF43A3EA3879BC5 /* StoreScreenshotUITests.swift */; };
@@ -85,6 +86,7 @@
 		756E5FDEC605676AF960EE9B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		78F1B7CE154D7DEE04117BA2 /* ProvisioningAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProvisioningAppTests.swift; sourceTree = "<group>"; };
 		7CD63D4CA27B2E403B065503 /* LiveTerminalRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveTerminalRoot.swift; sourceTree = "<group>"; };
+		8245908B09572F18B5D0B276 /* RPCEndpointStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RPCEndpointStore.swift; sourceTree = "<group>"; };
 		8E3F863FCEC9BC0A02204386 /* ReceiptParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiptParityTests.swift; sourceTree = "<group>"; };
 		9910C38E5E9E44403E568A58 /* TerminalLaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalLaunch.swift; sourceTree = "<group>"; };
 		A4989A551BB01926EC91CF2B /* StoredSettlement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoredSettlement.swift; sourceTree = "<group>"; };
@@ -187,6 +189,7 @@
 				E3EE0042E49B32B5DB658963 /* ReceiptDocument.swift */,
 				3A0043190BB7D300CCCFC365 /* ReceiptView.swift */,
 				B0C2EFE579DBE6C55543E894 /* ReviewerDemo.swift */,
+				8245908B09572F18B5D0B276 /* RPCEndpointStore.swift */,
 				756E5FDEC605676AF960EE9B /* SettingsView.swift */,
 				60225D816DE46A29E091EF08 /* SettlementBatchGrouping.swift */,
 				ADC1BA20DF852782F0A85D8E /* SettlementView.swift */,
@@ -375,6 +378,7 @@
 				55524B8FD1BC7FF27AA2FFC5 /* OperatorResetSafety.swift in Sources */,
 				70628CA399A12AFA065C7E29 /* PaymentEvidenceAdapter.swift in Sources */,
 				D956810EF9C3953161BF677F /* QRCodeImage.swift in Sources */,
+				EC88663CC9EED45FC4A37D67 /* RPCEndpointStore.swift in Sources */,
 				A45DA6E0B0363870909B5CFB /* ReceiptDocument.swift in Sources */,
 				5D5DB856C034DAC6F4E3CC77 /* ReceiptView.swift in Sources */,
 				EC5F9A8541A9D58DFA3EA101 /* ReviewerDemo.swift in Sources */,
