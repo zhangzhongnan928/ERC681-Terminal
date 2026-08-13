@@ -44,6 +44,9 @@ enum AdminPINConfigurationState: Equatable {
 
 @MainActor
 final class AppModel: ObservableObject {
+    private static let legacyRPCEndpointMigrationFailureMessage =
+        "A saved RPC endpoint could not be migrated to Keychain. Its old value was kept but will not be used. Restore Keychain access, then configure or remove the dedicated endpoint in Settings."
+
     @Published var settings: AppSettings {
         didSet {
             // A corrupt persisted catalog is kept byte-for-byte until the device admin explicitly
@@ -131,6 +134,7 @@ final class AppModel: ObservableObject {
     private var suppressedAutoSweepFingerprints = Set<String>()
     private var autoSweepRetryAfter = [String: Date]()
     private var autoSweepAttemptGate = AutoSweepAttemptGate()
+    private var rpcEndpointMigrationFailures = [UInt64: String]()
 
     init(
         container: ModelContainer,
@@ -249,6 +253,8 @@ final class AppModel: ObservableObject {
         operatorAddress = try? self.operatorWalletLifecycle.existingAddress()
         if settingsRecoveryRequired {
             errorMessage = settingsRecoveryMessage
+        } else {
+            migrateLegacyRPCEndpointsIfNeeded()
         }
         refreshRPCEndpointStatuses()
     }
@@ -311,6 +317,7 @@ final class AppModel: ObservableObject {
         defer { endExclusiveOperation() }
 
         let settingsSnapshot = settings
+        var endpointSaved = false
         do {
             await backgroundRPCWorkGate.waitUntilIdle()
             let configurations = try settingsSnapshot.configurations().filter {
@@ -322,6 +329,9 @@ final class AppModel: ObservableObject {
             }
             try adminSessionGate.requireCurrent(adminSession)
             try rpcEndpointStore.save(endpoint, for: chainID)
+            endpointSaved = true
+            rpcEndpointMigrationFailures.removeValue(forKey: chainID)
+            try normalizePersistedRPCEndpoints(for: [chainID])
             rpcEndpointStatuses[chainID] = .configured(
                 provider: RPCEndpointURLParser.providerLabel(for: endpoint)
             )
@@ -331,7 +341,9 @@ final class AppModel: ObservableObject {
             return true
         } catch {
             refreshRPCEndpointStatuses()
-            rpcEndpointMessage = "RPC endpoint was not changed."
+            rpcEndpointMessage = endpointSaved
+                ? "The dedicated endpoint was saved, but legacy transport metadata cleanup did not complete. The app will retry on its next launch."
+                : "RPC endpoint was not changed."
             errorMessage = error.localizedDescription
             return false
         }
@@ -368,7 +380,12 @@ final class AppModel: ObservableObject {
         do {
             await backgroundRPCWorkGate.waitUntilIdle()
             try adminSessionGate.requireCurrent(adminSession)
+            // Keep the active Keychain value until every old fallback copy has been scrubbed. If
+            // local persistence fails, the endpoint remains configured and removal can be retried.
+            try normalizePersistedRPCEndpoints(for: [chainID])
+            try adminSessionGate.requireCurrent(adminSession)
             try rpcEndpointStore.removeEndpoint(for: chainID)
+            rpcEndpointMigrationFailures.removeValue(forKey: chainID)
             rpcEndpointStatuses[chainID] = .builtIn
             invalidateRPCDependentState()
             rpcEndpointMessage = "Dedicated endpoint removed. This network now uses its built-in public RPC."
@@ -1789,15 +1806,11 @@ final class AppModel: ObservableObject {
                     try Task.checkCancellation()
                     guard let currentAddress = operatorAddress,
                           currentAddress.hex == record.operatorAddress,
-                          let persistentEndpoint = URL(string: record.rpcURL),
                           let chainID = UInt64(exactly: record.chainID),
                           let required = UInt64(exactly: record.requiredConfirmations),
                           let nonce = UInt64(exactly: record.nonce)
                     else { throw AppSettlementError.walletMismatch }
-                    let endpoint = try operationalEndpoint(
-                        for: chainID,
-                        fallback: persistentEndpoint
-                    )
+                    let endpoint = try operationalEndpoint(for: chainID)
                     let rpc = try OperatorRPCClientPool.shared.client(for: endpoint)
                     let coordinator = SettlementCoordinator(
                         rpc: rpc,
@@ -2422,20 +2435,116 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func operationalEndpoint(
-        for chainID: UInt64,
-        fallback: URL
-    ) throws -> URL {
-        try rpcEndpointStore.endpoint(for: chainID) ?? fallback
+    /// Older releases stored custom per-network transport URLs in UserDefaults and immutable
+    /// history snapshots. Move the endpoint that the old release would have selected into
+    /// Keychain before deleting any redundant copy. A failed chain remains untouched and is
+    /// explicitly unavailable, while runtime transport still fails over only to compiled pins.
+    private func migrateLegacyRPCEndpointsIfNeeded() {
+        let legacyOverrides = settings.legacyRPCEndpointOverrides()
+        var failures = [UInt64: String]()
+        for legacy in legacyOverrides {
+            do {
+                if try rpcEndpointStore.endpoint(for: legacy.chainID) == nil {
+                    let endpoint = try RPCEndpointURLParser.parse(legacy.rawValue)
+                    try rpcEndpointStore.save(endpoint, for: legacy.chainID)
+                }
+            } catch {
+                failures[legacy.chainID] = Self.legacyRPCEndpointMigrationFailureMessage
+            }
+        }
+        rpcEndpointMigrationFailures = failures
+
+        let knownChains = Set(TerminalKnownChainProfile.all.map(\.chainID))
+        let normalizableChains = knownChains.subtracting(failures.keys)
+        let requiresNormalization = !legacyOverrides.isEmpty
+            || AppPreferences.requiresLegacyRPCHistoryNormalization
+        guard requiresNormalization else { return }
+        do {
+            let didNormalize = try normalizePersistedRPCEndpoints(
+                for: normalizableChains
+            )
+            if failures.isEmpty {
+                _ = AppPreferences.recordLegacyRPCHistoryNormalization()
+            }
+            if didNormalize, !legacyOverrides.isEmpty, failures.isEmpty {
+                rpcEndpointMessage = "The legacy dedicated RPC endpoint was moved to this device's Keychain, and old local copies were removed."
+            }
+        } catch {
+            rpcEndpointMessage = error.localizedDescription
+            errorMessage = error.localizedDescription
+        }
+
+        if !failures.isEmpty {
+            rpcEndpointMessage = Self.legacyRPCEndpointMigrationFailureMessage
+            errorMessage = Self.legacyRPCEndpointMigrationFailureMessage
+        }
+    }
+
+    /// Normalizes only chains whose active override is already safe in Keychain, or which have no
+    /// legacy override. Settings are persisted before SwiftData history, so any interruption is
+    /// retryable and can never remove the sole active endpoint copy before Keychain owns it.
+    @discardableResult
+    private func normalizePersistedRPCEndpoints(
+        for chainIDs: Set<UInt64>
+    ) throws -> Bool {
+        guard !chainIDs.isEmpty else { return false }
+        var didNormalize = false
+        let normalizedSettings = settings.normalizingPersistedRPCEndpoints(
+            for: chainIDs
+        )
+        if normalizedSettings != settings {
+            guard AppPreferences.saveSettings(normalizedSettings) else {
+                throw RPCEndpointMigrationError.settingsPersistenceFailed
+            }
+            settings = normalizedSettings
+            didNormalize = true
+        }
+
+        do {
+            let invoices = try container.mainContext.fetch(FetchDescriptor<StoredInvoice>())
+            let settlements = try container.mainContext.fetch(
+                FetchDescriptor<StoredSettlement>()
+            )
+            var historyChanged = false
+            for invoice in invoices {
+                guard let chainID = UInt64(exactly: invoice.chainID),
+                      chainIDs.contains(chainID),
+                      let known = TerminalKnownChainProfile.profile(for: chainID),
+                      invoice.rpcURL != known.rpcEndpoint.absoluteString
+                else { continue }
+                invoice.rpcURL = known.rpcEndpoint.absoluteString
+                historyChanged = true
+            }
+            for settlement in settlements {
+                guard let chainID = UInt64(exactly: settlement.chainID),
+                      chainIDs.contains(chainID),
+                      let known = TerminalKnownChainProfile.profile(for: chainID),
+                      settlement.rpcURL != known.rpcEndpoint.absoluteString
+                else { continue }
+                settlement.rpcURL = known.rpcEndpoint.absoluteString
+                historyChanged = true
+            }
+            if historyChanged {
+                try saveMainContextOrRollback()
+                didNormalize = true
+            }
+        } catch {
+            throw RPCEndpointMigrationError.historyPersistenceFailed
+        }
+        return didNormalize
+    }
+
+    private func operationalEndpoint(for chainID: UInt64) throws -> URL {
+        guard let known = TerminalKnownChainProfile.profile(for: chainID) else {
+            throw AppSettingsError.unsupportedChain
+        }
+        return try rpcEndpointStore.endpoint(for: chainID) ?? known.rpcEndpoint
     }
 
     private func operationalConfiguration(
         for persistentConfiguration: TerminalConfiguration
     ) throws -> TerminalConfiguration {
-        let endpoint = try operationalEndpoint(
-            for: persistentConfiguration.chainID,
-            fallback: persistentConfiguration.rpcEndpoints[0]
-        )
+        let endpoint = try operationalEndpoint(for: persistentConfiguration.chainID)
         guard endpoint != persistentConfiguration.rpcEndpoints[0] else {
             return persistentConfiguration
         }
@@ -2445,6 +2554,10 @@ final class AppModel: ObservableObject {
     private func refreshRPCEndpointStatuses() {
         var refreshed = [UInt64: RPCEndpointConfigurationStatus]()
         for profile in TerminalKnownChainProfile.all {
+            if let migrationFailure = rpcEndpointMigrationFailures[profile.chainID] {
+                refreshed[profile.chainID] = .unavailable(migrationFailure)
+                continue
+            }
             do {
                 if let endpoint = try rpcEndpointStore.endpoint(for: profile.chainID) {
                     refreshed[profile.chainID] = .configured(

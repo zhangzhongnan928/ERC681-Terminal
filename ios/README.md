@@ -96,6 +96,9 @@ receipts, or status text. Multiple vault/payment-asset profiles
 can coexist, while one selected profile supplies the exact configuration snapshot saved with each
 invoice and validated before presenting a QR. Admin-entered RPC URLs must use HTTPS, and embedded
 user information and fragments are rejected.
+An upgrade migrates any valid endpoint left by an older release into Keychain before scrubbing its
+redundant settings and history copies. Failed migration leaves the saved value intact for retry,
+marks that network unavailable instead of built-in, and never uses the old URL as a runtime fallback.
 
 One payment profile binds exactly one EVM chain, vault, and ERC-20 or native payment asset. Up to 32
 canonical

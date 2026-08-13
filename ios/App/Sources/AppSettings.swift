@@ -264,6 +264,13 @@ struct AppSettingsMigrationNotice: Codable, Equatable {
     let adjustedConfirmationProfileIDs: [String]
 }
 
+/// A transport override written by an older app version before dedicated RPC URLs moved to the
+/// device-only Keychain. The raw value stays private to the migration path and is never rendered.
+struct LegacyRPCEndpointOverride: Equatable {
+    let chainID: UInt64
+    let rawValue: String
+}
+
 struct AppSettings: Codable, Equatable {
     private static let schemaVersion = 5
     // A receipt fingerprint is normally well below the per-entry byte ceiling. Five hundred and
@@ -604,6 +611,61 @@ struct AppSettings: Codable, Equatable {
               chainID <= UInt64(Int64.max)
         else { return nil }
         return "ethereum:\(operatorAddress.hex)@\(chainID)"
+    }
+
+    /// Reproduces the legacy per-network precedence so an upgrade preserves the endpoint that the
+    /// previous release would have used. The selected route wins, then the remaining catalog
+    /// order, with the unprovisioned fallback considered last.
+    func legacyRPCEndpointOverrides() -> [LegacyRPCEndpointOverride] {
+        var orderedProfiles = paymentProfiles
+        if let selectedPaymentProfileID,
+           let selectedIndex = orderedProfiles.firstIndex(where: {
+               $0.id == selectedPaymentProfileID
+           }) {
+            let selected = orderedProfiles.remove(at: selectedIndex)
+            orderedProfiles.insert(selected, at: 0)
+        }
+        orderedProfiles.append(fallbackProfile)
+
+        var capturedChains = Set<UInt64>()
+        var overrides = [LegacyRPCEndpointOverride]()
+        for profile in orderedProfiles {
+            guard let chainID = UInt64(profile.chainID),
+                  let known = TerminalKnownChainProfile.profile(for: chainID),
+                  !capturedChains.contains(chainID)
+            else { continue }
+            if let endpoint = URL(string: profile.rpcURL), endpoint == known.rpcEndpoint {
+                continue
+            }
+            capturedChains.insert(chainID)
+            overrides.append(
+                LegacyRPCEndpointOverride(chainID: chainID, rawValue: profile.rpcURL)
+            )
+        }
+        return overrides
+    }
+
+    /// RPC endpoints are runtime transport, not immutable payment configuration. Once an old
+    /// override is safe in Keychain, replace every redundant UserDefaults copy with its compiled
+    /// public fallback while preserving deployment pins, assets, selection, and finality policy.
+    func normalizingPersistedRPCEndpoints(
+        for chainIDs: Set<UInt64>
+    ) -> AppSettings {
+        guard !chainIDs.isEmpty else { return self }
+        var candidate = self
+        for index in candidate.paymentProfiles.indices {
+            guard let chainID = UInt64(candidate.paymentProfiles[index].chainID),
+                  chainIDs.contains(chainID),
+                  let known = TerminalKnownChainProfile.profile(for: chainID)
+            else { continue }
+            candidate.paymentProfiles[index].rpcURL = known.rpcEndpoint.absoluteString
+        }
+        if let chainID = UInt64(candidate.fallbackProfile.chainID),
+           chainIDs.contains(chainID),
+           let known = TerminalKnownChainProfile.profile(for: chainID) {
+            candidate.fallbackProfile.rpcURL = known.rpcEndpoint.absoluteString
+        }
+        return candidate
     }
 
     var validationFingerprint: String {
@@ -997,6 +1059,7 @@ struct AppSettingsLoadResult {
 enum AppPreferences {
     private static let settingsKey = "opk.app.settings.v1"
     private static let quarantineKey = "opk.app.settings.quarantine.v1"
+    private static let rpcHistoryNormalizationKey = "opk.app.rpc-history-normalization.v1"
 
     static func loadSettings() -> AppSettings {
         loadSettingsResult().settings
@@ -1042,13 +1105,26 @@ enum AppPreferences {
     @discardableResult
     static func saveSettings(_ settings: AppSettings) -> Bool {
         guard let data = try? JSONEncoder().encode(settings) else { return false }
-        UserDefaults.standard.set(data, forKey: settingsKey)
-        return true
+        let defaults = UserDefaults.standard
+        defaults.set(data, forKey: settingsKey)
+        return defaults.data(forKey: settingsKey) == data
+    }
+
+    static var requiresLegacyRPCHistoryNormalization: Bool {
+        UserDefaults.standard.integer(forKey: rpcHistoryNormalizationKey) < 1
+    }
+
+    @discardableResult
+    static func recordLegacyRPCHistoryNormalization() -> Bool {
+        let defaults = UserDefaults.standard
+        defaults.set(1, forKey: rpcHistoryNormalizationKey)
+        return defaults.integer(forKey: rpcHistoryNormalizationKey) == 1
     }
 
 #if DEBUG
     static func resetForUITesting() {
         UserDefaults.standard.removeObject(forKey: settingsKey)
+        UserDefaults.standard.removeObject(forKey: rpcHistoryNormalizationKey)
     }
 #endif
 }

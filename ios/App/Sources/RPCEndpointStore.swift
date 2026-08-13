@@ -38,6 +38,22 @@ extension RPCEndpointStoreError: LocalizedError {
     }
 }
 
+enum RPCEndpointMigrationError: Error, Equatable {
+    case settingsPersistenceFailed
+    case historyPersistenceFailed
+}
+
+extension RPCEndpointMigrationError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .settingsPersistenceFailed:
+            "The legacy RPC endpoint was secured in Keychain, but its old settings copy could not be removed. The app will retry on its next launch."
+        case .historyPersistenceFailed:
+            "Legacy RPC transport metadata could not be removed from local history. The app will retry on its next launch."
+        }
+    }
+}
+
 enum RPCEndpointURLParser {
     static let maximumUTF8Bytes = 8_192
 

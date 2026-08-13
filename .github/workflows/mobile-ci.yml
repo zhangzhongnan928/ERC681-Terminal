@@ -154,6 +154,10 @@ jobs:
             -parallel-testing-enabled NO \
             -skip-testing:OPKTerminalAppUITests \
             test \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testLaunchMigratesLegacyRPCEndpointAndScrubsPersistedTransportURLs \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testLegacyMigrationPreservesExistingKeychainEndpoint \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testRemovingMigratedEndpointCannotReactivateLegacyOverride \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testFailedLegacyMigrationNeverUsesOrReportsPersistedFallback \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testActiveMonitorPreservesLastVerifiedObservationAcrossTransientFailure \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testActiveMonitorKeepsWrongChainTerminalAndCancellationSilent \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testFirstRunWalletCreationRemainsAvailableBeforeAdminPIN \

@@ -130,6 +130,10 @@ non-synchronizing, device-only Keychain item. The active iOS endpoint is applied
 payment monitoring, receipt evidence, and settlement without copying a credential-bearing URL into
 ordinary settings or immutable history. The compiled public Base endpoint remains a visibly labeled,
 rate-limited fallback and can be restored only through an explicit Admin action.
+On upgrade, an endpoint saved by an older iOS release is copied into Keychain before its redundant
+settings, invoice, and settlement URL fields are replaced with the compiled fallback. If Keychain
+migration fails, the old value is retained for retry but is neither reported as built-in nor used as
+runtime transport.
 
 Provider URLs can contain client credentials and are therefore never copied into the normal chain
 catalog, invoices, settlement history, receipts, logs, or long-lived status text. The

@@ -132,6 +132,162 @@ final class ProvisioningAppTests: XCTestCase {
     }
 
     @MainActor
+    func testLaunchMigratesLegacyRPCEndpointAndScrubsPersistedTransportURLs() throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        let profile = TerminalKnownChainProfile.baseSepolia
+        let legacyEndpoint = try XCTUnwrap(
+            URL(string: "https://base-sepolia.g.alchemy.com/v2/legacy-private-key")
+        )
+        var legacySettings = try legacyFlatSettings(
+            confirmationBlocks: String(profile.defaultConfirmationBlocks),
+            provisionedOperatorAddress: "0x1111111111111111111111111111111111111111"
+        )
+        legacySettings.rpcURL = legacyEndpoint.absoluteString
+        XCTAssertTrue(AppPreferences.saveSettings(legacySettings))
+
+        let container = try appTestContainer()
+        let invoice = try storedInvoice()
+        invoice.rpcURL = "https://base-mainnet.g.alchemy.com/v2/invoice-private-key"
+        let settlement = try storedPendingSettlement(
+            transactionHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+        settlement.rpcURL = "https://base-mainnet.g.alchemy.com/v2/settlement-private-key"
+        container.mainContext.insert(invoice)
+        container.mainContext.insert(settlement)
+        try container.mainContext.save()
+        let endpointStore = InMemoryRPCEndpointStore()
+
+        let model = AppModel(
+            container: container,
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            rpcEndpointStore: endpointStore
+        )
+
+        XCTAssertEqual(try endpointStore.endpoint(for: profile.chainID), legacyEndpoint)
+        XCTAssertEqual(model.settings.rpcURL, profile.rpcEndpoint.absoluteString)
+        XCTAssertEqual(
+            AppPreferences.loadSettings().rpcURL,
+            profile.rpcEndpoint.absoluteString
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(container.mainContext.fetch(FetchDescriptor<StoredInvoice>()).first)
+                .rpcURL,
+            TerminalKnownChainProfile.baseMainnet.rpcEndpoint.absoluteString
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(container.mainContext.fetch(FetchDescriptor<StoredSettlement>()).first)
+                .rpcURL,
+            TerminalKnownChainProfile.baseMainnet.rpcEndpoint.absoluteString
+        )
+        let persistedSettings = try XCTUnwrap(
+            String(data: JSONEncoder().encode(AppPreferences.loadSettings()), encoding: .utf8)
+        )
+        XCTAssertFalse(persistedSettings.contains("legacy-private-key"))
+    }
+
+    @MainActor
+    func testLegacyMigrationPreservesExistingKeychainEndpoint() throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        let profile = TerminalKnownChainProfile.baseSepolia
+        var legacySettings = try legacyFlatSettings(
+            confirmationBlocks: String(profile.defaultConfirmationBlocks),
+            provisionedOperatorAddress: "0x1111111111111111111111111111111111111111"
+        )
+        legacySettings.rpcURL = "https://mainnet.infura.io/v3/stale-legacy-key"
+        XCTAssertTrue(AppPreferences.saveSettings(legacySettings))
+        let currentEndpoint = try XCTUnwrap(
+            URL(string: "https://base-sepolia.g.alchemy.com/v2/current-keychain-key")
+        )
+        let endpointStore = InMemoryRPCEndpointStore()
+        try endpointStore.save(currentEndpoint, for: profile.chainID)
+
+        let model = AppModel(
+            container: try appTestContainer(),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            rpcEndpointStore: endpointStore
+        )
+
+        XCTAssertEqual(try endpointStore.endpoint(for: profile.chainID), currentEndpoint)
+        XCTAssertEqual(model.settings.rpcURL, profile.rpcEndpoint.absoluteString)
+        XCTAssertEqual(
+            model.rpcEndpointStatus(for: profile.chainID),
+            .configured(provider: "Alchemy")
+        )
+    }
+
+    @MainActor
+    func testRemovingMigratedEndpointCannotReactivateLegacyOverride() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        let profile = TerminalKnownChainProfile.baseSepolia
+        let legacyEndpoint = "https://base-sepolia.g.alchemy.com/v2/legacy-private-key"
+        var legacySettings = try legacyFlatSettings(
+            confirmationBlocks: String(profile.defaultConfirmationBlocks),
+            provisionedOperatorAddress: "0x1111111111111111111111111111111111111111"
+        )
+        legacySettings.rpcURL = legacyEndpoint
+        XCTAssertTrue(AppPreferences.saveSettings(legacySettings))
+        let endpointStore = InMemoryRPCEndpointStore()
+        let configurationProbe = OperationalConfigurationProbe()
+        let model = AppModel(
+            container: try appTestContainer(),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            rpcEndpointStore: endpointStore,
+            currentConfigurationValidation: { configuration in
+                await configurationProbe.record(configuration)
+            }
+        )
+        model.unlockAdmin(with: "123456")
+
+        let didRemove = await model.removeRPCEndpoint(for: profile.chainID)
+        XCTAssertTrue(didRemove)
+        XCTAssertNil(try endpointStore.endpoint(for: profile.chainID))
+        XCTAssertEqual(model.settings.rpcURL, profile.rpcEndpoint.absoluteString)
+
+        let validationSucceeded = await model.validateConfiguration()
+        let operationalEndpoint = await configurationProbe.endpoint()
+        XCTAssertTrue(validationSucceeded)
+        XCTAssertEqual(operationalEndpoint, profile.rpcEndpoint)
+    }
+
+    @MainActor
+    func testFailedLegacyMigrationNeverUsesOrReportsPersistedFallback() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        let profile = TerminalKnownChainProfile.baseSepolia
+        let legacyEndpoint = "https://base-sepolia.g.alchemy.com/v2/legacy-private-key"
+        var legacySettings = try legacyFlatSettings(
+            confirmationBlocks: String(profile.defaultConfirmationBlocks),
+            provisionedOperatorAddress: "0x1111111111111111111111111111111111111111"
+        )
+        legacySettings.rpcURL = legacyEndpoint
+        XCTAssertTrue(AppPreferences.saveSettings(legacySettings))
+        let configurationProbe = OperationalConfigurationProbe()
+
+        let model = AppModel(
+            container: try appTestContainer(),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            rpcEndpointStore: SaveFailingRPCEndpointStore(),
+            currentConfigurationValidation: { configuration in
+                await configurationProbe.record(configuration)
+            }
+        )
+
+        XCTAssertEqual(model.settings.rpcURL, legacyEndpoint)
+        guard case let .unavailable(message) = model.rpcEndpointStatus(for: profile.chainID) else {
+            return XCTFail("A failed legacy migration must not be reported as built-in")
+        }
+        XCTAssertFalse(message.contains("legacy-private-key"))
+        let validationSucceeded = await model.validateConfiguration()
+        let operationalEndpoint = await configurationProbe.endpoint()
+        XCTAssertTrue(validationSucceeded)
+        XCTAssertEqual(operationalEndpoint, profile.rpcEndpoint)
+    }
+
+    @MainActor
     func testProvisioningRPCFailureShowsActionableEndpointMessage() async throws {
         let savedSettings = AppPreferences.loadSettings()
         defer { AppPreferences.saveSettings(savedSettings) }
@@ -4008,6 +4164,16 @@ private final class InMemoryRPCEndpointStore: RPCEndpointManaging, @unchecked Se
     func removeEndpoint(for chainID: UInt64) throws {
         lock.withLock { endpoints.removeValue(forKey: chainID) }
     }
+}
+
+private final class SaveFailingRPCEndpointStore: RPCEndpointManaging, @unchecked Sendable {
+    func endpoint(for chainID: UInt64) throws -> URL? { nil }
+
+    func save(_ endpoint: URL, for chainID: UInt64) throws {
+        throw RPCEndpointStoreError.keychainFailure(errSecNotAvailable)
+    }
+
+    func removeEndpoint(for chainID: UInt64) throws {}
 }
 
 private final class InMemoryAdminPINStore: AdminPINManaging, @unchecked Sendable {
