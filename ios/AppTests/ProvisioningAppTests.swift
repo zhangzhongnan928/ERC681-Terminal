@@ -1915,25 +1915,115 @@ final class ProvisioningAppTests: XCTestCase {
         )
         await model.provision(payload)
         XCTAssertTrue(model.terminalReadiness.allowsCheckout)
+        XCTAssertNil(model.preservedReadinessNotice)
 
         // A transient read is not evidence: the proven checkout-capable status is preserved.
-        await script.failNext(with: URLError(.timedOut))
-        await model.refreshOperatorStatus()
-        XCTAssertTrue(model.terminalReadiness.allowsCheckout)
-        XCTAssertEqual(model.operatorStatusMessage, AppModel.preservedOperatorStatusNotice)
+        // The production status path throws OperatorRPCError, so provider throttles and
+        // gateway failures must be classified explicitly, not only URLError.
+        let transientErrors: [any Error] = [
+            URLError(.timedOut),
+            OperatorRPCError.invalidHTTPStatus(429),
+            OperatorRPCError.invalidHTTPStatus(503),
+            OperatorRPCError.server(code: -32_005, message: "limit exceeded"),
+            OperatorRPCError.server(code: -32_016, message: "over rate limit"),
+        ]
+        for error in transientErrors {
+            await script.failNext(with: error)
+            await model.refreshOperatorStatus()
+            XCTAssertTrue(model.terminalReadiness.allowsCheckout, "\(error)")
+            XCTAssertEqual(model.operatorStatusMessage, AppModel.preservedOperatorStatusNotice)
+            XCTAssertEqual(
+                model.preservedReadinessNotice,
+                AppModel.preservedOperatorStatusNotice,
+                "\(error)"
+            )
+        }
 
         // A successful re-check clears the preservation notice.
         await model.refreshOperatorStatus()
         XCTAssertTrue(model.terminalReadiness.isReady)
         XCTAssertNil(model.operatorStatusMessage)
+        XCTAssertNil(model.preservedReadinessNotice)
 
-        // A terminal (non-retryable) failure still demotes and blocks checkout.
+        // Protocol violations and terminal failures still demote and block checkout.
+        await script.failNext(with: OperatorRPCError.malformedResponse)
+        await model.refreshOperatorStatus()
+        XCTAssertFalse(model.terminalReadiness.allowsCheckout)
+        XCTAssertEqual(model.terminalReadiness, .statusCheckRequired)
+        XCTAssertNil(model.preservedReadinessNotice)
+
+        await model.refreshOperatorStatus()
+        XCTAssertTrue(model.terminalReadiness.isReady)
         await script.failNext(
             with: PaymentMonitorError.wrongChain(expected: profile.chainID, actual: 1)
         )
         await model.refreshOperatorStatus()
         XCTAssertFalse(model.terminalReadiness.allowsCheckout)
         XCTAssertEqual(model.terminalReadiness, .statusCheckRequired)
+    }
+
+    @MainActor
+    func testExpiredProofTransientValidationFailurePreservesCheckout() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        AppPreferences.saveSettings(AppSettings())
+        let profile = TerminalKnownChainProfile.baseMainnet
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let clock = MutableValidationClock(start: Date(timeIntervalSince1970: 1_000_000))
+        let validationScript = ConfigurationValidationScript()
+        let statusScript = OperatorStatusScript(
+            provenBalance: profile.minimumOperatorNativeReserve
+        )
+        let model = AppModel(
+            container: try appTestContainer(),
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.expired-proof-tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(address: operatorAddress),
+            provisioningValidator: SuccessfulProvisioningValidator(),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            currentConfigurationValidation: { _ in try await validationScript.next() },
+            operatorStatusReader: { configuration, _ in
+                try await statusScript.next(chainID: configuration.chainID)
+            },
+            validationNow: { clock.now() },
+            configurationValidationTTL: 300
+        )
+        model.unlockAdmin(with: "123456")
+        let payload = try TerminalProvisioningPayload(
+            chainID: profile.chainID,
+            vault: profile.create2TestVector.vault,
+            token: NativeAsset.address,
+            operatorAddress: operatorAddress
+        )
+        await model.provision(payload)
+        XCTAssertTrue(model.terminalReadiness.allowsCheckout)
+        XCTAssertNil(model.preservedReadinessNotice)
+
+        // Expire the cached validation proof, then fail both re-reads transiently: the proven
+        // fingerprint and operator status must survive together, keeping checkout open.
+        clock.advance(by: 3_600)
+        await validationScript.failNext(with: OperatorRPCError.invalidHTTPStatus(429))
+        await statusScript.failNext(
+            with: OperatorRPCError.server(code: -32_005, message: "limit exceeded")
+        )
+        await model.refreshReadiness()
+        XCTAssertTrue(model.terminalReadiness.allowsCheckout)
+        XCTAssertEqual(
+            model.preservedReadinessNotice,
+            AppModel.preservedOperatorStatusNotice
+        )
+
+        // A fully successful pass re-proves both and clears the notice.
+        await model.refreshReadiness()
+        XCTAssertTrue(model.terminalReadiness.isReady)
+        XCTAssertNil(model.preservedReadinessNotice)
+
+        // A terminal validation failure still demotes and blocks checkout.
+        clock.advance(by: 3_600)
+        await validationScript.failNext(with: OperatorRPCError.malformedResponse)
+        await model.refreshReadiness()
+        XCTAssertFalse(model.terminalReadiness.allowsCheckout)
     }
 
     func testAdminPINFormatAndThrottlePolicy() {
@@ -4166,6 +4256,44 @@ private actor OperationalConfigurationProbe {
     }
 
     func endpoint() -> URL? { value?.rpcEndpoints.first }
+}
+
+/// Succeeds by default and fails exactly one configuration re-validation on demand.
+private actor ConfigurationValidationScript {
+    private var nextError: (any Error)?
+
+    func failNext(with error: any Error) {
+        nextError = error
+    }
+
+    func next() throws {
+        if let error = nextError {
+            nextError = nil
+            throw error
+        }
+    }
+}
+
+/// A settable wall clock for expiring cached validation proofs deterministically.
+private final class MutableValidationClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: Date
+
+    init(start: Date) {
+        current = start
+    }
+
+    func now() -> Date {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+
+    func advance(by interval: TimeInterval) {
+        lock.lock()
+        defer { lock.unlock() }
+        current = current.addingTimeInterval(interval)
+    }
 }
 
 /// Serves a proven operator status by default and fails exactly one read on demand.

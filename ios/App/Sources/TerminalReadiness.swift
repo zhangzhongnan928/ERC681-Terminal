@@ -1,5 +1,32 @@
 import OPKTerminalCore
 import OPKTerminalOperator
+import OPKTerminalRPC
+
+/// Classifies production readiness-read failures for which "the chain could not be asked":
+/// repeating the read may succeed with no configuration or trust change. Protocol violations
+/// (malformed or mismatched responses), explicit verdicts, and unknown errors remain terminal.
+/// The operator-status path throws `OperatorRPCError`; everything else defers to the payment
+/// monitor's classification of `JSONRPCError`, `URLError`, and deadline failures.
+enum ReadinessRetryPolicy {
+    static func isTransient(_ error: any Error) -> Bool {
+        if let operatorError = error as? OperatorRPCError {
+            switch operatorError {
+            case let .invalidHTTPStatus(status):
+                return status == 408
+                    || status == 425
+                    || status == 429
+                    || (500...599).contains(status)
+            case let .server(code, _):
+                // -32005 is the widely used Ethereum provider "limit exceeded" error;
+                // -32016 is used by some public providers for an over-rate-limit response.
+                return code == -32_005 || code == -32_016
+            case .malformedResponse, .mismatchedID:
+                return false
+            }
+        }
+        return PaymentMonitorRetryPolicy.shouldRetry(error)
+    }
+}
 
 enum TerminalReadiness: Equatable {
     case walletRequired

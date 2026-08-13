@@ -112,6 +112,11 @@ private struct CheckoutView: View {
                         ) {
                         case let .checkout(status):
                             VStack(spacing: 0) {
+                                if let notice = model.preservedReadinessNotice {
+                                    CheckoutStaleReadinessNoticeView(message: notice)
+                                        .padding(.horizontal)
+                                        .padding(.bottom, 8)
+                                }
                                 if let warning = model.terminalReadiness.lowGasCheckoutWarning {
                                     CheckoutLowGasWarningView(message: warning)
                                         .padding(.horizontal)
@@ -614,6 +619,24 @@ private struct CheckoutStatusHeader: View {
         case .checking: .orange
         case .preparing: .blue
         }
+    }
+}
+
+private struct CheckoutStaleReadinessNoticeView: View {
+    let message: String
+
+    var body: some View {
+        Label(message, systemImage: "arrow.clockwise.circle")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                Color(.secondarySystemGroupedBackground),
+                in: RoundedRectangle(cornerRadius: 12)
+            )
+            .accessibilityIdentifier("checkoutStaleReadinessNotice")
     }
 }
 

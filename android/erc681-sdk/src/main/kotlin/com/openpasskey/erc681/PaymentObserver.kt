@@ -137,7 +137,7 @@ class PaymentObserver(private val chain: ReadOnlyChainClient) {
             "Canonical block $block became unavailable while sampling payment balance"
         }
         if (!blockHash.equals(blockHashBefore, ignoreCase = true)) {
-            throw RpcException("Canonical block $block changed while sampling payment balance")
+            throw RpcCanonicalBlockException("Canonical block $block changed while sampling payment balance")
         }
         val savedCursorHash = savedCursorBlock?.takeIf { it < block }?.let { cursor ->
             runCatching { chain.blockHash(cursor) }.getOrNull()
@@ -146,7 +146,7 @@ class PaymentObserver(private val chain: ReadOnlyChainClient) {
             "Canonical block $block became unavailable after validating confirmation cursors"
         }
         if (!finalBlockHash.equals(blockHash, ignoreCase = true)) {
-            throw RpcException("Canonical block $block changed while validating confirmation cursors")
+            throw RpcCanonicalBlockException("Canonical block $block changed while validating confirmation cursors")
         }
         return PaymentReadSample(
             blockNumber = block,

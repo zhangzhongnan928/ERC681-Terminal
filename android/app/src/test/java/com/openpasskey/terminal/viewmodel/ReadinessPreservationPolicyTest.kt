@@ -1,24 +1,33 @@
 package com.openpasskey.terminal.viewmodel
 
 import com.openpasskey.erc681.NetworkConfigurationException
+import com.openpasskey.erc681.RpcCallDeadlineException
+import com.openpasskey.erc681.RpcCanonicalBlockException
 import com.openpasskey.erc681.RpcException
 import com.openpasskey.erc681.RpcHttpRateLimitException
+import com.openpasskey.erc681.RpcHttpTransientStatusException
 import com.openpasskey.erc681.RpcRateLimitResponseException
+import com.openpasskey.erc681.RpcResponseException
+import com.openpasskey.erc681.RpcTransportException
 import com.openpasskey.terminal.provisioning.KnownChainPolicy
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ReadinessPreservationPolicyTest {
     @Test
-    fun `transient rpc failures preserve a proven checkout-capable status`() {
+    fun `only typed transient failures preserve a proven checkout-capable status`() {
         listOf(
-            RpcException("JSON-RPC transport failed"),
-            RpcException("Canonical block 100 changed during network validation"),
+            RpcTransportException(),
+            RpcCallDeadlineException(),
+            RpcHttpTransientStatusException(503),
             RpcHttpRateLimitException(),
             RpcRateLimitResponseException(-32016, "rate limit exceeded"),
+            RpcCanonicalBlockException("Canonical block 100 changed during network validation"),
         ).forEach { error ->
             assertTrue(
+                error.javaClass.simpleName,
                 shouldPreserveProvenReadiness(
                     error,
                     provenConfigurationUnchanged = true,
@@ -28,7 +37,7 @@ class ReadinessPreservationPolicyTest {
         }
         assertTrue(
             shouldPreserveProvenReadiness(
-                RpcException("JSON-RPC transport failed"),
+                RpcTransportException(),
                 provenConfigurationUnchanged = true,
                 provenStatus = TerminalSetupStatus.AWAITING_GAS,
             ),
@@ -36,13 +45,20 @@ class ReadinessPreservationPolicyTest {
     }
 
     @Test
-    fun `an explicit on-chain verdict or local invariant failure is never preserved over`() {
+    fun `verdicts malformed responses and generic rpc errors are never preserved over`() {
         listOf(
             NetworkConfigurationException("Payment asset 0x0 is not whitelisted by vault"),
             NetworkConfigurationException("RPC chain ID 1 does not match configured chain ID 8453"),
+            RpcException("JSON-RPC response is not valid JSON"),
+            RpcException("JSON-RPC batch response is not an array"),
+            RpcException("RPC HTTP response body is empty"),
+            RpcException("RPC HTTP request failed with status 404"),
+            RpcResponseException(-32000, "execution reverted"),
+            RpcResponseException(-32601, "method not found"),
             IllegalStateException("Factory pin mismatch"),
         ).forEach { error ->
             assertFalse(
+                error.javaClass.simpleName + ": " + error.message,
                 shouldPreserveProvenReadiness(
                     error,
                     provenConfigurationUnchanged = true,
@@ -56,7 +72,7 @@ class ReadinessPreservationPolicyTest {
     fun `nothing proven for this configuration means nothing to preserve`() {
         assertFalse(
             shouldPreserveProvenReadiness(
-                RpcException("JSON-RPC transport failed"),
+                RpcTransportException(),
                 provenConfigurationUnchanged = false,
                 provenStatus = TerminalSetupStatus.READY,
             ),
@@ -68,7 +84,7 @@ class ReadinessPreservationPolicyTest {
         ).forEach { status ->
             assertFalse(
                 shouldPreserveProvenReadiness(
-                    RpcException("JSON-RPC transport failed"),
+                    RpcTransportException(),
                     provenConfigurationUnchanged = true,
                     provenStatus = status,
                 ),
@@ -77,19 +93,68 @@ class ReadinessPreservationPolicyTest {
     }
 
     @Test
-    fun `deferred automatic refresh releases both checkout-capable proven states`() {
-        assertTrue(
+    fun `deferred automatic refresh reports a preserved result never a fresh one`() {
+        assertEquals(
+            ReadinessRefreshResult.PRESERVED,
+            readinessResultWhenAutomaticRefreshDefers(
+                configurationStillValidated = true,
+                setupStatus = TerminalSetupStatus.READY,
+            ),
+        )
+        assertEquals(
+            ReadinessRefreshResult.PRESERVED,
             readinessResultWhenAutomaticRefreshDefers(
                 configurationStillValidated = true,
                 setupStatus = TerminalSetupStatus.AWAITING_GAS,
             ),
         )
-        assertFalse(
+        assertEquals(
+            ReadinessRefreshResult.NOT_READY,
+            readinessResultWhenAutomaticRefreshDefers(
+                configurationStillValidated = false,
+                setupStatus = TerminalSetupStatus.READY,
+            ),
+        )
+        assertEquals(
+            ReadinessRefreshResult.NOT_READY,
             readinessResultWhenAutomaticRefreshDefers(
                 configurationStillValidated = true,
                 setupStatus = TerminalSetupStatus.AWAITING_AUTHORIZATION,
             ),
         )
+    }
+
+    @Test
+    fun `only a fresh proof clears an invoice failure`() {
+        assertTrue(ReadinessRefreshResult.FRESH_READY.clearsInvoiceFailure())
+        assertFalse(ReadinessRefreshResult.PRESERVED.clearsInvoiceFailure())
+        assertFalse(ReadinessRefreshResult.NOT_READY.clearsInvoiceFailure())
+    }
+
+    @Test
+    fun `a preserved result keeps a failed invoice state closed`() {
+        val failed = CreateInvoiceState().withRepositoryFailure("Token is not whitelisted")
+
+        val afterPreserved = failed.afterReadinessRefresh(
+            ReadinessRefreshResult.PRESERVED.clearsInvoiceFailure(),
+        )
+        assertTrue(afterPreserved.readinessInvalidated)
+        assertEquals("Token is not whitelisted", afterPreserved.repositoryFailure)
+
+        val afterFresh = failed.afterReadinessRefresh(
+            ReadinessRefreshResult.FRESH_READY.clearsInvoiceFailure(),
+        )
+        assertFalse(afterFresh.readinessInvalidated)
+    }
+
+    @Test
+    fun `checkout-capable statuses are READY and AWAITING_GAS only`() {
+        TerminalSetupStatus.entries.forEach { status ->
+            assertEquals(
+                status == TerminalSetupStatus.READY || status == TerminalSetupStatus.AWAITING_GAS,
+                statusAllowsCheckout(status),
+            )
+        }
     }
 
     @Test

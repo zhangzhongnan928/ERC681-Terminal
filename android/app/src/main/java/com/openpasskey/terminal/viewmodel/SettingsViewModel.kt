@@ -5,10 +5,9 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.erc681.NetworkConfig
-import com.openpasskey.erc681.NetworkConfigurationException
 import com.openpasskey.erc681.ReadOnlyRpcClient
-import com.openpasskey.erc681.RpcException
 import com.openpasskey.erc681.RpcRateLimit
+import com.openpasskey.erc681.RpcTransientFailure
 import com.openpasskey.terminal.admin.AdminPinStore
 import com.openpasskey.terminal.admin.AdminPinVerification
 import com.openpasskey.terminal.chain.ChainConfig
@@ -118,15 +117,32 @@ internal fun shouldRestartActiveReadinessRefresh(
 internal fun statusAllowsCheckout(status: TerminalSetupStatus): Boolean =
     status == TerminalSetupStatus.READY || status == TerminalSetupStatus.AWAITING_GAS
 
+/**
+ * How a readiness pass concluded. [FRESH_READY] is a live on-chain proof; [PRESERVED] means the
+ * chain could not be asked and the last proven checkout-capable result is still standing in.
+ * Only a fresh proof may clear a live invoice-creation failure.
+ */
+internal enum class ReadinessRefreshResult { FRESH_READY, PRESERVED, NOT_READY }
+
+/** Only a fresh successful on-chain proof may clear a live invoice-creation failure. */
+internal fun ReadinessRefreshResult.clearsInvoiceFailure(): Boolean =
+    this == ReadinessRefreshResult.FRESH_READY
+
 internal fun readinessResultWhenAutomaticRefreshDefers(
     configurationStillValidated: Boolean,
     setupStatus: TerminalSetupStatus,
-): Boolean = configurationStillValidated && statusAllowsCheckout(setupStatus)
+): ReadinessRefreshResult = if (configurationStillValidated && statusAllowsCheckout(setupStatus)) {
+    ReadinessRefreshResult.PRESERVED
+} else {
+    ReadinessRefreshResult.NOT_READY
+}
 
 /**
- * "The chain could not be asked" is not "the chain said no". Only an explicit on-chain verdict
- * ([NetworkConfigurationException]) or a local invariant failure may demote a proven
- * checkout-capable status; transport failures, throttles, and reorg brackets preserve it.
+ * "The chain could not be asked" is not "the chain said no". Only the SDK's typed transient
+ * failures (transport interruption, call deadline, transient HTTP status, provider throttle,
+ * canonical-block movement) preserve a proven checkout-capable status. Everything else —
+ * explicit on-chain verdicts, malformed or protocol-violating responses, arbitrary JSON-RPC
+ * errors, and local invariant failures — demotes it.
  */
 internal fun shouldPreserveProvenReadiness(
     error: Exception,
@@ -134,8 +150,7 @@ internal fun shouldPreserveProvenReadiness(
     provenStatus: TerminalSetupStatus,
 ): Boolean = provenConfigurationUnchanged &&
     statusAllowsCheckout(provenStatus) &&
-    error is RpcException &&
-    error !is NetworkConfigurationException
+    error is RpcTransientFailure
 
 internal fun preservedReadinessNoticeMessage(
     provenStatus: TerminalSetupStatus,
@@ -149,22 +164,22 @@ internal fun preservedReadinessNoticeMessage(
         "showing the last validated result."
 }
 
-/** Main-thread callback ownership for one readiness generation. Cancellation is a false result. */
+/** Main-thread callback ownership for one readiness generation. Cancellation is NOT_READY. */
 internal class ReadinessRefreshCallbacks {
-    private val callbacks = mutableListOf<(Boolean) -> Unit>()
+    private val callbacks = mutableListOf<(ReadinessRefreshResult) -> Unit>()
 
-    fun add(callback: (Boolean) -> Unit) {
+    fun add(callback: (ReadinessRefreshResult) -> Unit) {
         callbacks += callback
     }
 
-    fun complete(ready: Boolean) {
+    fun complete(result: ReadinessRefreshResult) {
         if (callbacks.isEmpty()) return
         val pending = callbacks.toList()
         callbacks.clear()
-        pending.forEach { callback -> callback(ready) }
+        pending.forEach { callback -> callback(result) }
     }
 
-    fun cancel() = complete(ready = false)
+    fun cancel() = complete(ReadinessRefreshResult.NOT_READY)
 }
 
 data class SettingsState(
@@ -1454,17 +1469,17 @@ class SettingsViewModel(
         priority = ReadinessRpcPriority.INTERACTIVE,
     )
 
-    fun refreshOperatorStatus(onComplete: (Boolean) -> Unit) =
+    internal fun refreshOperatorStatus(onComplete: (ReadinessRefreshResult) -> Unit) =
         refreshOperatorStatusInternal(onComplete, ReadinessRpcPriority.INTERACTIVE)
 
     fun refreshOperatorStatusAutomatically() = refreshOperatorStatusInternal(
         priority = ReadinessRpcPriority.AUTOMATIC,
     )
 
-    fun refreshOperatorStatusAutomatically(onComplete: (Boolean) -> Unit) =
+    internal fun refreshOperatorStatusAutomatically(onComplete: (ReadinessRefreshResult) -> Unit) =
         refreshOperatorStatusInternal(onComplete, ReadinessRpcPriority.AUTOMATIC)
 
-    fun refreshOperatorStatusAfterInvoiceFailure(onComplete: (Boolean) -> Unit) {
+    internal fun refreshOperatorStatusAfterInvoiceFailure(onComplete: (ReadinessRefreshResult) -> Unit) {
         if (shouldRestartActiveReadinessRefresh(
                 ReadinessRefreshTrigger.INVOICE_FAILURE,
                 refreshJob?.isActive == true,
@@ -1475,13 +1490,13 @@ class SettingsViewModel(
         refreshOperatorStatusInternal(onComplete, ReadinessRpcPriority.INTERACTIVE)
     }
 
-    fun refreshOperatorStatusAfterProfileSelection(onComplete: (Boolean) -> Unit) {
+    internal fun refreshOperatorStatusAfterProfileSelection(onComplete: (ReadinessRefreshResult) -> Unit) {
         invalidateReadinessRefresh()
         refreshOperatorStatusInternal(onComplete, ReadinessRpcPriority.INTERACTIVE)
     }
 
     private fun refreshOperatorStatusInternal(
-        onComplete: ((Boolean) -> Unit)? = null,
+        onComplete: ((ReadinessRefreshResult) -> Unit)? = null,
         priority: ReadinessRpcPriority,
     ) {
         // Captured before any invalidation or clearing so an unreachable provider can preserve
@@ -1507,7 +1522,7 @@ class SettingsViewModel(
         if (priority == ReadinessRpcPriority.INTERACTIVE) validatedConfiguration = null
         if (wallet.availability != OperatorWalletAvailability.READY || address == null || !config.provisioned) {
             _state.value = load()
-            completeReadinessCallbacks(ready = false)
+            completeReadinessCallbacks(ReadinessRefreshResult.NOT_READY)
             return
         }
         if (config.provisionedOperatorAddress?.equals(address, true) != true) {
@@ -1515,14 +1530,14 @@ class SettingsViewModel(
                 "Provisioned operator does not match the local terminal wallet",
                 isError = true,
             )
-            completeReadinessCallbacks(ready = false)
+            completeReadinessCallbacks(ReadinessRefreshResult.NOT_READY)
             return
         }
         val networkPolicy = try {
             KnownChainPolicy.requireProfile(config.chainId)
         } catch (error: Exception) {
             _state.value = load(error.message ?: "Unsupported terminal network", isError = true)
-            completeReadinessCallbacks(ready = false)
+            completeReadinessCallbacks(ReadinessRefreshResult.NOT_READY)
             return
         }
         // Profile selection is owned by ChainConfig and may have changed from Checkout. Reflect
@@ -1593,7 +1608,7 @@ class SettingsViewModel(
                     // exhausted its bounded lease. Preserve the last proven ready state verbatim.
                     if (generation != refreshGeneration) return@launch
                     completeReadinessCallbacks(
-                        ready = readinessResultWhenAutomaticRefreshDefers(
+                        readinessResultWhenAutomaticRefreshDefers(
                             configurationStillValidated = validatedConfiguration == config,
                             setupStatus = _state.value.setupStatus,
                         ),
@@ -1636,7 +1651,13 @@ class SettingsViewModel(
                     },
                     isError = false,
                 )
-                completeReadinessCallbacks(ready = statusAllowsCheckout(status))
+                completeReadinessCallbacks(
+                    if (statusAllowsCheckout(status)) {
+                        ReadinessRefreshResult.FRESH_READY
+                    } else {
+                        ReadinessRefreshResult.NOT_READY
+                    },
+                )
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -1659,15 +1680,13 @@ class SettingsViewModel(
                         ),
                         isError = false,
                     )
-                    completeReadinessCallbacks(
-                        ready = statusAllowsCheckout(provenState.setupStatus),
-                    )
+                    completeReadinessCallbacks(ReadinessRefreshResult.PRESERVED)
                 } else {
                     _state.value = load(
                         terminalRpcFailureMessage(error, "Unable to validate terminal readiness"),
                         isError = true,
                     )
-                    completeReadinessCallbacks(ready = false)
+                    completeReadinessCallbacks(ReadinessRefreshResult.NOT_READY)
                 }
             } finally {
                 if (generation == refreshGeneration) {
@@ -1759,8 +1778,8 @@ class SettingsViewModel(
         refreshPriority = null
     }
 
-    private fun completeReadinessCallbacks(ready: Boolean) {
-        refreshCompletionCallbacks.complete(ready)
+    private fun completeReadinessCallbacks(result: ReadinessRefreshResult) {
+        refreshCompletionCallbacks.complete(result)
     }
 
     class Factory(

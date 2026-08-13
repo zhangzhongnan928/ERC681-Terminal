@@ -111,11 +111,11 @@ fun AppNavigation(
                     },
                     onProfileSelection = { sequence, profileId ->
                         settingsViewModel.refreshOperatorStatusAfterProfileSelection(
-                            { ready ->
+                            { result ->
                                 invoiceViewModel.completeProfileSelectionReadinessRefresh(
                                     sequence = sequence,
                                     profileId = profileId,
-                                    ready = ready,
+                                    result = result,
                                 )
                             },
                         )

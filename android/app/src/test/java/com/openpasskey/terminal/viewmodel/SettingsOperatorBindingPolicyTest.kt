@@ -35,13 +35,15 @@ class SettingsOperatorBindingPolicyTest {
                 refreshActive = false,
             ),
         )
-        assertTrue(
+        assertEquals(
+            ReadinessRefreshResult.PRESERVED,
             readinessResultWhenAutomaticRefreshDefers(
                 configurationStillValidated = true,
                 setupStatus = TerminalSetupStatus.READY,
             ),
         )
-        assertFalse(
+        assertEquals(
+            ReadinessRefreshResult.NOT_READY,
             readinessResultWhenAutomaticRefreshDefers(
                 configurationStillValidated = false,
                 setupStatus = TerminalSetupStatus.READY,

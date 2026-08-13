@@ -66,6 +66,7 @@ final class AppModel: ObservableObject {
             settlementCoordinator = nil
             settlementCoordinatorKey = nil
             operatorStatus = nil
+            clearReadinessPreservation()
         }
     }
     @Published private(set) var validationMessage = "On-chain validation required"
@@ -77,6 +78,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var operatorAddress: EthereumAddress?
     @Published private(set) var operatorStatus: OperatorChainStatus?
     @Published private(set) var operatorStatusMessage: String?
+    /// Non-nil while readiness rests on a preserved (not freshly re-proven) validation proof or
+    /// operator status because the RPC provider could not be reached. Rendered by Checkout,
+    /// Settings, and Settlement alongside the cached values.
+    @Published private(set) var preservedReadinessNotice: String?
+    private var validationProofIsPreserved = false
+    private var operatorStatusIsPreserved = false
     @Published private(set) var validatedConfigurationFingerprint: String?
     @Published private(set) var provisioningMessage: String?
     @Published private(set) var rpcEndpointMessage: String?
@@ -716,6 +723,7 @@ final class AppModel: ObservableObject {
         provisioningMessage = "Unreadable setup quarantined. Scan the merchant portal setup QR again."
         operatorStatus = nil
         operatorStatusMessage = nil
+        clearReadinessPreservation()
         errorMessage = nil
         if adminPINConfigured { lockAdmin() }
     }
@@ -821,6 +829,7 @@ final class AppModel: ObservableObject {
         isBusy = true
         defer { isBusy = false }
         let snapshot = settings
+        let provenFingerprint = validatedConfigurationFingerprint
         do {
             let configuration = try operationalConfiguration(
                 for: snapshot.configuration()
@@ -832,10 +841,27 @@ final class AppModel: ObservableObject {
             )
             guard settings == snapshot else { throw AppSafetyError.configurationChanged }
             validatedConfigurationFingerprint = snapshot.validationFingerprint
+            validationProofIsPreserved = false
+            updatePreservedReadinessNotice()
             errorMessage = nil
             return true
         } catch {
+            // "The chain could not be asked" is not "the chain said no". A transient
+            // re-validation failure for the unchanged readiness identity keeps the previously
+            // proven fingerprint (and with it the preserved operator status) instead of
+            // demoting checkout to validationRequired.
+            if settings == snapshot,
+               provenFingerprint != nil,
+               provenFingerprint == snapshot.validationFingerprint,
+               ReadinessRetryPolicy.isTransient(error) {
+                validationProofIsPreserved = true
+                updatePreservedReadinessNotice()
+                validationMessage = "Last validation retained"
+                return true
+            }
             validatedConfigurationFingerprint = nil
+            validationProofIsPreserved = false
+            updatePreservedReadinessNotice()
             validationMessage = "Validation failed"
             errorMessage = error.localizedDescription
             return false
@@ -1293,6 +1319,7 @@ final class AppModel: ObservableObject {
             )
             self.operatorAddress = nil
             operatorStatus = nil
+            clearReadinessPreservation()
             operatorStatusMessage = nil
             validatedConfigurationFingerprint = nil
             settings = settings.clearingProvisioning()
@@ -1326,11 +1353,13 @@ final class AppModel: ObservableObject {
     private func refreshOperatorStatusWithoutRPCGate() async {
         guard let operatorAddress else {
             operatorStatus = nil
+            clearReadinessPreservation()
             operatorStatusMessage = "Create the operator wallet to enable native settlement."
             return
         }
         guard settings.isProvisioned else {
             operatorStatus = nil
+            clearReadinessPreservation()
             operatorStatusMessage = "Scan the portal provisioning QR to bind a vault."
             return
         }
@@ -1347,6 +1376,8 @@ final class AppModel: ObservableObject {
                   self.operatorAddress == operatorAddress
             else { throw AppSafetyError.configurationChanged }
             operatorStatus = status
+            operatorStatusIsPreserved = false
+            updatePreservedReadinessNotice()
             operatorStatusMessage = nil
         } catch {
             // "The chain could not be asked" is not "the chain said no". A transient read
@@ -1354,12 +1385,16 @@ final class AppModel: ObservableObject {
             // configuration; only an explicit verdict or a local failure demotes it.
             if settings == settingsSnapshot,
                self.operatorAddress == operatorAddress,
-               PaymentMonitorRetryPolicy.shouldRetry(error),
+               ReadinessRetryPolicy.isTransient(error),
                terminalReadiness.allowsCheckout {
+                operatorStatusIsPreserved = true
+                updatePreservedReadinessNotice()
                 operatorStatusMessage = Self.preservedOperatorStatusNotice
                 return
             }
             operatorStatus = nil
+            operatorStatusIsPreserved = false
+            updatePreservedReadinessNotice()
             operatorStatusMessage = error.localizedDescription
         }
     }
@@ -1367,6 +1402,20 @@ final class AppModel: ObservableObject {
     static let preservedOperatorStatusNotice =
         "The latest status re-check could not reach the RPC provider; "
             + "showing the last validated result."
+
+    private func updatePreservedReadinessNotice() {
+        preservedReadinessNotice = if validationProofIsPreserved || operatorStatusIsPreserved {
+            Self.preservedOperatorStatusNotice
+        } else {
+            nil
+        }
+    }
+
+    private func clearReadinessPreservation() {
+        validationProofIsPreserved = false
+        operatorStatusIsPreserved = false
+        updatePreservedReadinessNotice()
+    }
 
     func prepareSettlement(
         for invoices: [StoredInvoice],
@@ -2595,6 +2644,7 @@ final class AppModel: ObservableObject {
         settlementCoordinator = nil
         settlementCoordinatorKey = nil
         operatorStatus = nil
+        clearReadinessPreservation()
         operatorStatusMessage = "RPC endpoint changed. Refresh readiness before accepting payments."
     }
 
