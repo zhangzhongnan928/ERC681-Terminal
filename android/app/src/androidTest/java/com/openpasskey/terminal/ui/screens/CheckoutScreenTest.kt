@@ -146,7 +146,7 @@ class CheckoutScreenTest {
             "least 0.0001 ETH so settlement can run."
         composeRule.setContent {
             CheckoutReadyScreen(
-                amount = "",
+                amount = "12.34",
                 profile = PROFILE,
                 profiles = listOf(PROFILE),
                 error = null,
@@ -162,9 +162,32 @@ class CheckoutScreenTest {
         composeRule.onNodeWithTag("checkout_stale_readiness_notice").assertIsDisplayed()
         composeRule.onNodeWithText(staleNotice).assertIsDisplayed()
         composeRule.onNodeWithText(lowGas).assertIsDisplayed()
-        // The stale notice never blocks the sale surface: keypad and CTA stay present.
-        composeRule.onNodeWithTag("checkout_cta").assertIsNotEnabled()
+        // Preserved readiness never blocks the sale: a valid amount keeps the CTA enabled.
+        composeRule.onNodeWithTag("checkout_cta")
+            .assertContentDescriptionEquals("Show payment QR for 12.34 AUD")
+            .assertIsEnabled()
         composeRule.onNodeWithTag("checkout_key_one").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun withoutPreservationNoStaleNoticeRendersInsideReadyCheckout() {
+        composeRule.setContent {
+            CheckoutReadyScreen(
+                amount = "12.34",
+                profile = PROFILE,
+                profiles = listOf(PROFILE),
+                error = null,
+                staleReadinessNotice = null,
+                lowGasWarning = null,
+                isCreating = false,
+                onAmountChanged = {},
+                onProfileSelected = {},
+                onCreateInvoice = {},
+            )
+        }
+
+        composeRule.onNodeWithTag("checkout_stale_readiness_notice").assertDoesNotExist()
+        composeRule.onNodeWithTag("checkout_cta").assertIsEnabled()
     }
 
     @Test

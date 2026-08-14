@@ -84,7 +84,7 @@ fun InvoiceScreen(
     terminalStatusMessage: String?,
     terminalRefreshing: Boolean,
     terminalConfigurationValidated: Boolean,
-    terminalReadinessPreserved: Boolean,
+    terminalStaleReadinessNotice: String?,
     onRefreshTerminalStatus: () -> Unit,
     onProfileSelection: (sequence: Long, profileId: String) -> Unit,
     onRecoverFromInvoiceFailure: () -> Unit,
@@ -173,7 +173,7 @@ fun InvoiceScreen(
         profile = requireNotNull(selectedProfile),
         profiles = state.profiles,
         error = state.error,
-        staleReadinessNotice = if (terminalReadinessPreserved) terminalStatusMessage else null,
+        staleReadinessNotice = terminalStaleReadinessNotice,
         lowGasWarning = if (terminalStatus == TerminalSetupStatus.AWAITING_GAS) {
             lowGasCheckoutWarningMessage(selectedProfile)
         } else {

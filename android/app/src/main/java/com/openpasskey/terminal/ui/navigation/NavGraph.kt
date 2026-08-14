@@ -104,7 +104,7 @@ fun AppNavigation(
                     terminalStatusMessage = settingsState.message,
                     terminalRefreshing = settingsState.refreshingOperator,
                     terminalConfigurationValidated = settingsState.configurationValidated,
-                    terminalReadinessPreserved = settingsState.readinessPreserved,
+                    terminalStaleReadinessNotice = settingsState.preservedReadinessNotice,
                     onRefreshTerminalStatus = {
                         settingsViewModel.refreshOperatorStatusAutomatically(
                             invoiceViewModel::completeReadinessRefresh,

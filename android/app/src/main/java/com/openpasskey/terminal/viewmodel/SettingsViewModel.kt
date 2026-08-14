@@ -164,6 +164,34 @@ internal fun preservedReadinessNoticeMessage(
         "showing the last validated result."
 }
 
+/**
+ * Owns the preserved-readiness banner independently of generic status messages. Every state
+ * rebuild re-emits [current] through load(), so unrelated settings updates (admin lock/unlock,
+ * receipt saves, endpoint edits) can neither rewrite Checkout's notice text nor silently end
+ * the preserved window. Only a fresh on-chain proof, a terminal demotion, or configuration
+ * invalidation are lifecycle events.
+ */
+internal class PreservedReadinessNotice {
+    var current: String? = null
+        private set
+
+    fun beginPreservation(notice: String) {
+        current = notice
+    }
+
+    fun endAfterFreshProof() {
+        current = null
+    }
+
+    fun endAfterDemotion() {
+        current = null
+    }
+
+    fun endAfterInvalidation() {
+        current = null
+    }
+}
+
 /** Main-thread callback ownership for one readiness generation. Cancellation is NOT_READY. */
 internal class ReadinessRefreshCallbacks {
     private val callbacks = mutableListOf<(ReadinessRefreshResult) -> Unit>()
@@ -216,8 +244,8 @@ data class SettingsState(
     val operatorBalanceWei: String? = null,
     val operatorAuthorized: Boolean? = null,
     val configurationValidated: Boolean = false,
-    /** True while the shown readiness rests on a preserved proof because the RPC was unreachable. */
-    val readinessPreserved: Boolean = false,
+    /** Non-null while the shown readiness rests on a preserved proof (RPC unreachable). */
+    val preservedReadinessNotice: String? = null,
     val settlementTargetVerified: Boolean = false,
     val walletHardwareBacked: Boolean = false,
     val walletStrongBoxBacked: Boolean = false,
@@ -401,6 +429,7 @@ class SettingsViewModel(
     private var autoSweepEnrollmentAuthorizationEpoch: Long? = null
     private var validatedConfiguration: TerminalConfigSnapshot? = null
     private val refreshCompletionCallbacks = ReadinessRefreshCallbacks()
+    private val preservedReadiness = PreservedReadinessNotice()
     private val readinessRpcScheduler = ReadinessRpcScheduler(rpcWorkCoordinator)
     private var migrationNoticeMessage = run {
         // snapshot() performs any v2 -> v3 migration before the notice is queried.
@@ -544,6 +573,7 @@ class SettingsViewModel(
             operatorPairingPayload = pairing,
             operatorFundingPayload = operatorFundingPayload(config, wallet),
             configurationValidated = validatedConfiguration == config,
+            preservedReadinessNotice = preservedReadiness.current,
             settlementTargetVerified = operatorBindingMatches && wallet.isVerifiedFor(
                 config.chainId,
                 config.vaultAddress,
@@ -1523,11 +1553,13 @@ class SettingsViewModel(
         val provenConfigurationUnchanged = provenConfiguration == config
         if (priority == ReadinessRpcPriority.INTERACTIVE) validatedConfiguration = null
         if (wallet.availability != OperatorWalletAvailability.READY || address == null || !config.provisioned) {
+            preservedReadiness.endAfterDemotion()
             _state.value = load()
             completeReadinessCallbacks(ReadinessRefreshResult.NOT_READY)
             return
         }
         if (config.provisionedOperatorAddress?.equals(address, true) != true) {
+            preservedReadiness.endAfterDemotion()
             _state.value = load(
                 "Provisioned operator does not match the local terminal wallet",
                 isError = true,
@@ -1538,6 +1570,7 @@ class SettingsViewModel(
         val networkPolicy = try {
             KnownChainPolicy.requireProfile(config.chainId)
         } catch (error: Exception) {
+            preservedReadiness.endAfterDemotion()
             _state.value = load(error.message ?: "Unsupported terminal network", isError = true)
             completeReadinessCallbacks(ReadinessRefreshResult.NOT_READY)
             return
@@ -1633,6 +1666,7 @@ class SettingsViewModel(
                 }
                 if (generation != refreshGeneration) return@launch
                 validatedConfiguration = config
+                preservedReadiness.endAfterFreshProof()
                 _state.value = load().copy(
                     setupStatus = status,
                     operatorBalanceWei = result.balance.toString(),
@@ -1671,20 +1705,22 @@ class SettingsViewModel(
                     )
                 ) {
                     validatedConfiguration = config
+                    val notice = preservedReadinessNoticeMessage(
+                        provenState.setupStatus,
+                        networkPolicy,
+                    )
+                    preservedReadiness.beginPreservation(notice)
                     _state.value = load().copy(
                         setupStatus = provenState.setupStatus,
                         operatorBalanceWei = provenState.operatorBalanceWei,
                         operatorAuthorized = provenState.operatorAuthorized,
-                        readinessPreserved = true,
                         refreshingOperator = false,
-                        message = preservedReadinessNoticeMessage(
-                            provenState.setupStatus,
-                            networkPolicy,
-                        ),
+                        message = notice,
                         isError = false,
                     )
                     completeReadinessCallbacks(ReadinessRefreshResult.PRESERVED)
                 } else {
+                    preservedReadiness.endAfterDemotion()
                     _state.value = load(
                         terminalRpcFailureMessage(error, "Unable to validate terminal readiness"),
                         isError = true,
@@ -1771,7 +1807,11 @@ class SettingsViewModel(
     private fun invalidateReadinessRefresh() {
         refreshGeneration += 1
         validatedConfiguration = null
-        _state.value = _state.value.copy(configurationValidated = false)
+        preservedReadiness.endAfterInvalidation()
+        _state.value = _state.value.copy(
+            configurationValidated = false,
+            preservedReadinessNotice = null,
+        )
         // A cancelled pass completes as not ready. Generic callbacks cannot release profile
         // selection, while the exact sequence/profile-owned callback can terminate its pending
         // state without making checkout ready.
