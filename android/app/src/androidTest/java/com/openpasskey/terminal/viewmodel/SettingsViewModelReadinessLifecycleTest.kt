@@ -1,6 +1,7 @@
 package com.openpasskey.terminal.viewmodel
 
 import android.content.Context
+import android.os.ParcelFileDescriptor
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.openpasskey.erc681.RpcTransportException
@@ -48,7 +49,23 @@ class SettingsViewModelReadinessLifecycleTest {
     )
 
     @Before
-    fun clearPreferences() {
+    fun clearPreferencesAndSecureDevice() {
+        preferenceFiles.forEach { name ->
+            assertTrue(
+                context.getSharedPreferences(name, Context.MODE_PRIVATE)
+                    .edit().clear().commit(),
+            )
+        }
+        // The production wrapping key requires a secure lock screen and a device-credential
+        // authentication within its 30-second window, so the test manages both itself right
+        // before wallet creation instead of relying on emulator provisioning.
+        shell("locksettings set-pin $DEVICE_PIN")
+        shell("locksettings verify --old $DEVICE_PIN")
+    }
+
+    @After
+    fun cleanUpPreferencesAndLockScreen() {
+        shell("locksettings clear --old $DEVICE_PIN")
         preferenceFiles.forEach { name ->
             assertTrue(
                 context.getSharedPreferences(name, Context.MODE_PRIVATE)
@@ -57,8 +74,12 @@ class SettingsViewModelReadinessLifecycleTest {
         }
     }
 
-    @After
-    fun cleanUpPreferences() = clearPreferences()
+    private fun shell(command: String) {
+        val output = InstrumentationRegistry.getInstrumentation()
+            .uiAutomation
+            .executeShellCommand(command)
+        ParcelFileDescriptor.AutoCloseInputStream(output).use { it.readBytes() }
+    }
 
     @Test
     fun preservedNoticeSurvivesUnrelatedUpdatesAndEndsOnlyOnLifecycleEvents() = runBlocking {
@@ -199,6 +220,7 @@ class SettingsViewModelReadinessLifecycleTest {
 
     private companion object {
         const val PIN = "123456"
+        const val DEVICE_PIN = "1234"
         const val STATE_TIMEOUT_MILLIS = 10_000L
     }
 }
