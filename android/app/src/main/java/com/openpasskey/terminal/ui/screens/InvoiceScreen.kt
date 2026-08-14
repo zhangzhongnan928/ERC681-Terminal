@@ -84,6 +84,7 @@ fun InvoiceScreen(
     terminalStatusMessage: String?,
     terminalRefreshing: Boolean,
     terminalConfigurationValidated: Boolean,
+    terminalReadinessPreserved: Boolean,
     onRefreshTerminalStatus: () -> Unit,
     onProfileSelection: (sequence: Long, profileId: String) -> Unit,
     onRecoverFromInvoiceFailure: () -> Unit,
@@ -172,6 +173,7 @@ fun InvoiceScreen(
         profile = requireNotNull(selectedProfile),
         profiles = state.profiles,
         error = state.error,
+        staleReadinessNotice = if (terminalReadinessPreserved) terminalStatusMessage else null,
         lowGasWarning = if (terminalStatus == TerminalSetupStatus.AWAITING_GAS) {
             lowGasCheckoutWarningMessage(selectedProfile)
         } else {
@@ -191,6 +193,7 @@ internal fun CheckoutReadyScreen(
     profile: TerminalPaymentProfile,
     profiles: List<TerminalPaymentProfile>,
     error: String?,
+    staleReadinessNotice: String?,
     lowGasWarning: String?,
     isCreating: Boolean,
     onAmountChanged: (String) -> Unit,
@@ -244,6 +247,7 @@ internal fun CheckoutReadyScreen(
                     onSelected = onProfileSelected,
                 )
             }
+            staleReadinessNotice?.let { CheckoutStaleReadinessNotice(it) }
             lowGasWarning?.let { CheckoutWarning(it) }
             error?.let { CheckoutError(it) }
             CheckoutKeypad(
@@ -573,6 +577,23 @@ internal fun lowGasCheckoutWarningMessage(selectedProfile: TerminalPaymentProfil
         ?: "the network's required native gas reserve"
     return "Operator gas is low. Checkout still works; fund the operator with at least " +
         "$reserve so settlement can run."
+}
+
+@Composable
+private fun CheckoutStaleReadinessNotice(message: String) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("checkout_stale_readiness_notice"),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Text(
+            message,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+        )
+    }
 }
 
 @Composable

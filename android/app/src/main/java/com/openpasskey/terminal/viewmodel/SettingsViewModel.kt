@@ -216,6 +216,8 @@ data class SettingsState(
     val operatorBalanceWei: String? = null,
     val operatorAuthorized: Boolean? = null,
     val configurationValidated: Boolean = false,
+    /** True while the shown readiness rests on a preserved proof because the RPC was unreachable. */
+    val readinessPreserved: Boolean = false,
     val settlementTargetVerified: Boolean = false,
     val walletHardwareBacked: Boolean = false,
     val walletStrongBoxBacked: Boolean = false,
@@ -1673,6 +1675,7 @@ class SettingsViewModel(
                         setupStatus = provenState.setupStatus,
                         operatorBalanceWei = provenState.operatorBalanceWei,
                         operatorAuthorized = provenState.operatorAuthorized,
+                        readinessPreserved = true,
                         refreshingOperator = false,
                         message = preservedReadinessNoticeMessage(
                             provenState.setupStatus,

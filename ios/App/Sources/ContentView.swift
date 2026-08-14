@@ -622,21 +622,35 @@ private struct CheckoutStatusHeader: View {
     }
 }
 
+/// Notice text must stay readable for low-vision cashiers: body copy always uses the semantic
+/// label color and only the icon carries the accent. Orange footnote text over the 12%-orange
+/// banner background is roughly 2:1 contrast and fails WCAG 4.5:1 for normal text.
+enum CheckoutNoticePalette {
+    static let text: Color = .primary
+    static let lowGasIcon: Color = .orange
+    static let staleIcon: Color = .secondary
+}
+
 private struct CheckoutStaleReadinessNoticeView: View {
     let message: String
 
     var body: some View {
-        Label(message, systemImage: "arrow.clockwise.circle")
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(
-                Color(.secondarySystemGroupedBackground),
-                in: RoundedRectangle(cornerRadius: 12)
-            )
-            .accessibilityIdentifier("checkoutStaleReadinessNotice")
+        Label {
+            Text(message)
+                .foregroundStyle(CheckoutNoticePalette.text)
+        } icon: {
+            Image(systemName: "arrow.clockwise.circle")
+                .foregroundStyle(CheckoutNoticePalette.staleIcon)
+        }
+        .font(.footnote)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            Color(.secondarySystemGroupedBackground),
+            in: RoundedRectangle(cornerRadius: 12)
+        )
+        .accessibilityIdentifier("checkoutStaleReadinessNotice")
     }
 }
 
@@ -644,14 +658,19 @@ private struct CheckoutLowGasWarningView: View {
     let message: String
 
     var body: some View {
-        Label(message, systemImage: "fuelpump.fill")
-            .font(.footnote)
-            .foregroundStyle(.orange)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
-            .accessibilityIdentifier("checkoutLowGasWarning")
+        Label {
+            Text(message)
+                .foregroundStyle(CheckoutNoticePalette.text)
+        } icon: {
+            Image(systemName: "fuelpump.fill")
+                .foregroundStyle(CheckoutNoticePalette.lowGasIcon)
+        }
+        .font(.footnote)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityIdentifier("checkoutLowGasWarning")
     }
 }
 

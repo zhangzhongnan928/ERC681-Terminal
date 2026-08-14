@@ -162,6 +162,8 @@ jobs:
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testActiveMonitorKeepsWrongChainTerminalAndCancellationSilent \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testTransientStatusRefreshFailurePreservesProvenCheckoutCapableStatus \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testExpiredProofTransientValidationFailurePreservesCheckout \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testSuccessfulSaleClearsPreservedReadinessNotice \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testCheckoutNoticeTextUsesSemanticLabelColor \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testReadinessRequiresCurrentValidationAuthorizationAndMinimumGas \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testFirstRunWalletCreationRemainsAvailableBeforeAdminPIN \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testNewPaymentRouteUsesKnownNetworkDefaultWithoutLeakingFallbackFinality \

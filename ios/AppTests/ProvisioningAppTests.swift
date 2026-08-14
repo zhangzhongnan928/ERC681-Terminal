@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import OPKTerminalApp
 import OPKTerminalCore
@@ -2019,11 +2020,122 @@ final class ProvisioningAppTests: XCTestCase {
         XCTAssertTrue(model.terminalReadiness.isReady)
         XCTAssertNil(model.preservedReadinessNotice)
 
-        // A terminal validation failure still demotes and blocks checkout.
+        // The production validator's fixed-head bracket moving is chain progress, not a
+        // verdict: an expired proof must survive ConfigurationValidationError.canonicalBlockChanged.
+        clock.advance(by: 3_600)
+        await validationScript.failNext(
+            with: ConfigurationValidationError.canonicalBlockChanged(blockNumber: 123)
+        )
+        await model.refreshReadiness()
+        XCTAssertTrue(model.terminalReadiness.allowsCheckout)
+        XCTAssertEqual(
+            model.preservedReadinessNotice,
+            AppModel.preservedOperatorStatusNotice
+        )
+        await model.refreshReadiness()
+        XCTAssertTrue(model.terminalReadiness.isReady)
+        XCTAssertNil(model.preservedReadinessNotice)
+
+        // Terminal validation failures still demote and block checkout.
         clock.advance(by: 3_600)
         await validationScript.failNext(with: OperatorRPCError.malformedResponse)
         await model.refreshReadiness()
         XCTAssertFalse(model.terminalReadiness.allowsCheckout)
+
+        await model.refreshReadiness()
+        XCTAssertTrue(model.terminalReadiness.isReady)
+        clock.advance(by: 3_600)
+        await validationScript.failNext(
+            with: ConfigurationValidationError.wrongChain(expected: profile.chainID, actual: 1)
+        )
+        await model.refreshReadiness()
+        XCTAssertFalse(model.terminalReadiness.allowsCheckout)
+    }
+
+    @MainActor
+    func testSuccessfulSaleClearsPreservedReadinessNotice() async throws {
+        let savedSettings = AppPreferences.loadSettings()
+        defer { AppPreferences.saveSettings(savedSettings) }
+        AppPreferences.saveSettings(AppSettings())
+        let profile = TerminalKnownChainProfile.baseMainnet
+        let operatorAddress = try address("0x1111111111111111111111111111111111111111")
+        let statusScript = OperatorStatusScript(
+            provenBalance: profile.minimumOperatorNativeReserve
+        )
+        let validationScript = ConfigurationValidationScript()
+        let blockHash = try Bytes32(hex: "0x" + String(repeating: "ab", count: 32))
+        let container = try appTestContainer()
+        let model = AppModel(
+            container: container,
+            operatorWallet: KeychainOperatorWallet(
+                service: "com.openpasskey.terminal.operator-wallet.preserved-sale-tests.\(UUID())"
+            ),
+            operatorWalletLifecycle: BlockingOperatorWalletLifecycle(address: operatorAddress),
+            provisioningValidator: SuccessfulProvisioningValidator(),
+            adminPINStore: InMemoryAdminPINStore(pin: "123456"),
+            currentConfigurationValidation: { _ in try await validationScript.next() },
+            operatorStatusReader: { configuration, _ in
+                try await statusScript.next(chainID: configuration.chainID)
+            },
+            receiverFreshnessReader: { _, _, _ in
+                ReceiverFreshnessProof(
+                    blockNumber: 100,
+                    blockHash: blockHash,
+                    receiverCode: Data(),
+                    tokenBalance: UInt256(0)
+                )
+            },
+            paymentObservationSampler: { request, _, _, _ in
+                PaymentObservation(
+                    invoiceID: request.invoiceID,
+                    blockNumber: 100,
+                    blockHash: blockHash,
+                    balance: UInt256(0),
+                    status: .waiting,
+                    thresholdBlock: nil,
+                    thresholdBlockHash: nil
+                )
+            },
+            paymentMonitorPollIntervalNanoseconds: 3_600_000_000_000
+        )
+        model.unlockAdmin(with: "123456")
+        let payload = try TerminalProvisioningPayload(
+            chainID: profile.chainID,
+            vault: profile.create2TestVector.vault,
+            token: NativeAsset.address,
+            operatorAddress: operatorAddress
+        )
+        await model.provision(payload)
+        XCTAssertTrue(model.terminalReadiness.isReady)
+
+        // Enter preserved readiness via a transient production status failure.
+        await statusScript.failNext(with: OperatorRPCError.invalidHTTPStatus(429))
+        await model.refreshOperatorStatus()
+        XCTAssertEqual(
+            model.preservedReadinessNotice,
+            AppModel.preservedOperatorStatusNotice
+        )
+
+        // A successful sale commits mandatory fresh configuration and status proofs, so the
+        // stale-readiness notice must clear everywhere it is rendered.
+        await model.createSale(displayAmount: "10.50")
+        XCTAssertNil(model.errorMessage)
+        XCTAssertNotNil(model.activeRequest)
+        XCTAssertNil(model.preservedReadinessNotice)
+        XCTAssertEqual(
+            try container.mainContext.fetch(FetchDescriptor<StoredInvoice>()).count,
+            1
+        )
+        model.closeActiveSale()
+    }
+
+    func testCheckoutNoticeTextUsesSemanticLabelColor() {
+        // The 12%-orange banner with orange footnote text is roughly 2:1 contrast and fails
+        // WCAG 4.5:1 for normal text: body copy must stay on the semantic label color, with
+        // the accent limited to the icon.
+        XCTAssertEqual(CheckoutNoticePalette.text, Color.primary)
+        XCTAssertNotEqual(CheckoutNoticePalette.text, Color.orange)
+        XCTAssertEqual(CheckoutNoticePalette.lowGasIcon, Color.orange)
     }
 
     func testAdminPINFormatAndThrottlePolicy() {

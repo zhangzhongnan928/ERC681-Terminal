@@ -43,6 +43,7 @@ class CheckoutScreenTest {
                 profile = PROFILE,
                 profiles = listOf(PROFILE),
                 error = null,
+                staleReadinessNotice = null,
                 lowGasWarning = null,
                 isCreating = false,
                 onAmountChanged = { amount = it },
@@ -121,6 +122,7 @@ class CheckoutScreenTest {
                 profile = PROFILE.copy(token = TOKEN.copy(decimals = 0)),
                 profiles = listOf(PROFILE.copy(token = TOKEN.copy(decimals = 0))),
                 error = null,
+                staleReadinessNotice = null,
                 lowGasWarning = null,
                 isCreating = false,
                 onAmountChanged = {},
@@ -137,6 +139,35 @@ class CheckoutScreenTest {
     }
 
     @Test
+    fun preservedReadinessAndLowGasNoticesRenderInsideReadyCheckout() {
+        val staleNotice = "Terminal is ready to create payments. The latest status re-check " +
+            "could not reach the RPC provider; showing the last validated result."
+        val lowGas = "Operator gas is low. Checkout still works; fund the operator with at " +
+            "least 0.0001 ETH so settlement can run."
+        composeRule.setContent {
+            CheckoutReadyScreen(
+                amount = "",
+                profile = PROFILE,
+                profiles = listOf(PROFILE),
+                error = null,
+                staleReadinessNotice = staleNotice,
+                lowGasWarning = lowGas,
+                isCreating = false,
+                onAmountChanged = {},
+                onProfileSelected = {},
+                onCreateInvoice = {},
+            )
+        }
+
+        composeRule.onNodeWithTag("checkout_stale_readiness_notice").assertIsDisplayed()
+        composeRule.onNodeWithText(staleNotice).assertIsDisplayed()
+        composeRule.onNodeWithText(lowGas).assertIsDisplayed()
+        // The stale notice never blocks the sale surface: keypad and CTA stay present.
+        composeRule.onNodeWithTag("checkout_cta").assertIsNotEnabled()
+        composeRule.onNodeWithTag("checkout_key_one").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
     fun sameSymbolAndVaultProfilesExposeTokenAddressAndCanBeSelected() {
         val second = PROFILE.copy(
             token = TOKEN.copy(address = "0x5555555555555555555555555555555555555555"),
@@ -148,6 +179,7 @@ class CheckoutScreenTest {
                 profile = selected,
                 profiles = listOf(PROFILE, second),
                 error = null,
+                staleReadinessNotice = null,
                 lowGasWarning = null,
                 isCreating = false,
                 onAmountChanged = {},

@@ -113,6 +113,11 @@ final class AppModel: ObservableObject {
         TerminalConfiguration,
         EthereumAddress
     ) async throws -> OperatorChainStatus)?
+    private let receiverFreshnessReader: (@Sendable (
+        TerminalConfiguration,
+        EthereumAddress,
+        EthereumAddress
+    ) async throws -> ReceiverFreshnessProof)?
     private let operatorResetBalanceReader: (@Sendable (
         TerminalConfiguration,
         EthereumAddress
@@ -179,6 +184,11 @@ final class AppModel: ObservableObject {
             TerminalConfiguration,
             EthereumAddress
         ) async throws -> OperatorChainStatus)? = nil,
+        receiverFreshnessReader: (@Sendable (
+            TerminalConfiguration,
+            EthereumAddress,
+            EthereumAddress
+        ) async throws -> ReceiverFreshnessProof)? = nil,
         operatorResetBalanceReader: (@Sendable (
             TerminalConfiguration,
             EthereumAddress
@@ -209,6 +219,7 @@ final class AppModel: ObservableObject {
         self.persistMainContext = persistMainContext
         self.currentConfigurationValidation = currentConfigurationValidation
         self.operatorStatusReader = operatorStatusReader
+        self.receiverFreshnessReader = receiverFreshnessReader
         self.operatorResetBalanceReader = operatorResetBalanceReader
         self.validationNow = validationNow
         self.configurationValidationTTL = max(0, configurationValidationTTL)
@@ -902,9 +913,6 @@ final class AppModel: ObservableObject {
                 profile: paymentProfile,
                 expiresAt: Date().addingTimeInterval(15 * 60)
             )
-            let rpc = try EthereumRPCClientPool.shared.client(
-                for: configuration.rpcEndpoints[0]
-            )
             // These proofs are independent read-only operations. Launch them together so the
             // slowest fixed-head proof, rather than their sum, controls checkout latency. Every
             // result remains mandatory and the settings/operator snapshot is checked before any
@@ -918,10 +926,10 @@ final class AppModel: ObservableObject {
                 configuration: configuration,
                 operatorAddress: operatorAddress
             )
-            async let freshnessProof = ReceiverFreshnessValidator(rpc: rpc).validate(
+            async let freshnessProof = fetchReceiverFreshness(
+                configuration: configuration,
                 receiver: request.receiver,
-                token: token.address,
-                expectedChainID: configuration.chainID
+                token: token.address
             )
             let concurrentProofs: (Void, OperatorChainStatus, ReceiverFreshnessProof)
             do {
@@ -945,6 +953,9 @@ final class AppModel: ObservableObject {
             validatedConfigurationFingerprint = settingsSnapshot.validationFingerprint
             operatorStatus = liveStatus
             operatorStatusMessage = nil
+            // The sale just proved configuration and operator status freshly; any earlier
+            // preserved-readiness notice no longer describes the published state.
+            clearReadinessPreservation()
             let readiness = TerminalReadiness.evaluate(
                 settings: settingsSnapshot,
                 operatorAddress: operatorAddress,
@@ -2446,6 +2457,24 @@ final class AppModel: ObservableObject {
         guard !hasUnresolvedNonce else {
             throw AppSettlementError.unresolvedOperatorNonce
         }
+    }
+
+    private func fetchReceiverFreshness(
+        configuration: TerminalConfiguration,
+        receiver: EthereumAddress,
+        token: EthereumAddress
+    ) async throws -> ReceiverFreshnessProof {
+        if let receiverFreshnessReader {
+            return try await receiverFreshnessReader(configuration, receiver, token)
+        }
+        let rpc = try EthereumRPCClientPool.shared.client(
+            for: configuration.rpcEndpoints[0]
+        )
+        return try await ReceiverFreshnessValidator(rpc: rpc).validate(
+            receiver: receiver,
+            token: token,
+            expectedChainID: configuration.chainID
+        )
     }
 
     private func fetchOperatorStatus(

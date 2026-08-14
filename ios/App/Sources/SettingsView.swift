@@ -920,10 +920,15 @@ private struct ReadinessLabel: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             if let staleNotice {
-                Label(staleNotice, systemImage: "arrow.clockwise.circle")
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
-                    .accessibilityIdentifier("settingsStaleReadinessNotice")
+                Label {
+                    Text(staleNotice)
+                        .foregroundStyle(.primary)
+                } icon: {
+                    Image(systemName: "arrow.clockwise.circle")
+                        .foregroundStyle(.orange)
+                }
+                .font(.footnote)
+                .accessibilityIdentifier("settingsStaleReadinessNotice")
             }
         }
     }

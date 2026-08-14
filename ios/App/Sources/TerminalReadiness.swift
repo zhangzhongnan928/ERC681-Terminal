@@ -9,6 +9,12 @@ import OPKTerminalRPC
 /// monitor's classification of `JSONRPCError`, `URLError`, and deadline failures.
 enum ReadinessRetryPolicy {
     static func isTransient(_ error: any Error) -> Bool {
+        if let validationError = error as? ConfigurationValidationError {
+            // The fixed-head bracket moving underneath a re-validation is chain progress, not
+            // a verdict; every other configuration case is an explicit on-chain rejection.
+            if case .canonicalBlockChanged = validationError { return true }
+            return false
+        }
         if let operatorError = error as? OperatorRPCError {
             switch operatorError {
             case let .invalidHTTPStatus(status):
