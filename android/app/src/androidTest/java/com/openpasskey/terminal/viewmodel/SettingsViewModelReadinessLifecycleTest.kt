@@ -161,11 +161,19 @@ class SettingsViewModelReadinessLifecycleTest {
         }
         assertEquals(notice, savedReceipt.preservedReadinessNotice)
 
-        // lockAdmin() replaces the generic message; the dedicated notice must survive verbatim
-        // so Checkout can never present the admin status line as an RPC-staleness banner.
+        // The receipt save auto-locks the admin session; the notice survives that rebuild too.
+        val autoLocked = awaitState(viewModel) { !it.adminUnlocked }
+        assertEquals(notice, autoLocked.preservedReadinessNotice)
+
+        // Re-unlock so lockAdmin() exercises the explicit message-replacement path: the
+        // dedicated notice must survive verbatim so Checkout can never present the admin
+        // status line as an RPC-staleness banner.
+        viewModel.unlockAdmin(PIN)
+        awaitState(viewModel) { it.adminUnlocked }
         viewModel.lockAdmin()
-        val locked = awaitState(viewModel) { !it.adminUnlocked && it.message != notice }
-        assertEquals("Admin/setup controls locked.", locked.message)
+        val locked = awaitState(viewModel) {
+            !it.adminUnlocked && it.message == "Admin/setup controls locked."
+        }
         assertEquals(notice, locked.preservedReadinessNotice)
 
         // A fresh successful proof ends the preserved window.
