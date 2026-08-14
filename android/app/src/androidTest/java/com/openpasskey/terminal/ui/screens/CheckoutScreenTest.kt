@@ -43,6 +43,8 @@ class CheckoutScreenTest {
                 profile = PROFILE,
                 profiles = listOf(PROFILE),
                 error = null,
+                staleReadinessNotice = null,
+                lowGasWarning = null,
                 isCreating = false,
                 onAmountChanged = { amount = it },
                 onProfileSelected = {},
@@ -120,6 +122,8 @@ class CheckoutScreenTest {
                 profile = PROFILE.copy(token = TOKEN.copy(decimals = 0)),
                 profiles = listOf(PROFILE.copy(token = TOKEN.copy(decimals = 0))),
                 error = null,
+                staleReadinessNotice = null,
+                lowGasWarning = null,
                 isCreating = false,
                 onAmountChanged = {},
                 onProfileSelected = {},
@@ -135,6 +139,58 @@ class CheckoutScreenTest {
     }
 
     @Test
+    fun preservedReadinessAndLowGasNoticesRenderInsideReadyCheckout() {
+        val staleNotice = "Terminal is ready to create payments. The latest status re-check " +
+            "could not reach the RPC provider; showing the last validated result."
+        val lowGas = "Operator gas is low. Checkout still works; fund the operator with at " +
+            "least 0.0001 ETH so settlement can run."
+        composeRule.setContent {
+            CheckoutReadyScreen(
+                amount = "12.34",
+                profile = PROFILE,
+                profiles = listOf(PROFILE),
+                error = null,
+                staleReadinessNotice = staleNotice,
+                lowGasWarning = lowGas,
+                isCreating = false,
+                onAmountChanged = {},
+                onProfileSelected = {},
+                onCreateInvoice = {},
+            )
+        }
+
+        composeRule.onNodeWithTag("checkout_stale_readiness_notice").assertIsDisplayed()
+        composeRule.onNodeWithText(staleNotice).assertIsDisplayed()
+        composeRule.onNodeWithText(lowGas).assertIsDisplayed()
+        // Preserved readiness never blocks the sale: a valid amount keeps the CTA enabled.
+        composeRule.onNodeWithTag("checkout_cta")
+            .assertContentDescriptionEquals("Show payment QR for 12.34 AUD")
+            .assertIsEnabled()
+        composeRule.onNodeWithTag("checkout_key_one").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun withoutPreservationNoStaleNoticeRendersInsideReadyCheckout() {
+        composeRule.setContent {
+            CheckoutReadyScreen(
+                amount = "12.34",
+                profile = PROFILE,
+                profiles = listOf(PROFILE),
+                error = null,
+                staleReadinessNotice = null,
+                lowGasWarning = null,
+                isCreating = false,
+                onAmountChanged = {},
+                onProfileSelected = {},
+                onCreateInvoice = {},
+            )
+        }
+
+        composeRule.onNodeWithTag("checkout_stale_readiness_notice").assertDoesNotExist()
+        composeRule.onNodeWithTag("checkout_cta").assertIsEnabled()
+    }
+
+    @Test
     fun sameSymbolAndVaultProfilesExposeTokenAddressAndCanBeSelected() {
         val second = PROFILE.copy(
             token = TOKEN.copy(address = "0x5555555555555555555555555555555555555555"),
@@ -146,6 +202,8 @@ class CheckoutScreenTest {
                 profile = selected,
                 profiles = listOf(PROFILE, second),
                 error = null,
+                staleReadinessNotice = null,
+                lowGasWarning = null,
                 isCreating = false,
                 onAmountChanged = {},
                 onProfileSelected = { selected = it },

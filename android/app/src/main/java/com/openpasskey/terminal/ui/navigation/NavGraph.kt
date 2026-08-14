@@ -104,6 +104,7 @@ fun AppNavigation(
                     terminalStatusMessage = settingsState.message,
                     terminalRefreshing = settingsState.refreshingOperator,
                     terminalConfigurationValidated = settingsState.configurationValidated,
+                    terminalStaleReadinessNotice = settingsState.preservedReadinessNotice,
                     onRefreshTerminalStatus = {
                         settingsViewModel.refreshOperatorStatusAutomatically(
                             invoiceViewModel::completeReadinessRefresh,
@@ -111,11 +112,11 @@ fun AppNavigation(
                     },
                     onProfileSelection = { sequence, profileId ->
                         settingsViewModel.refreshOperatorStatusAfterProfileSelection(
-                            { ready ->
+                            { result ->
                                 invoiceViewModel.completeProfileSelectionReadinessRefresh(
                                     sequence = sequence,
                                     profileId = profileId,
-                                    ready = ready,
+                                    result = result,
                                 )
                             },
                         )

@@ -61,18 +61,40 @@ interface RpcRateLimit {
     val retryAfterMillis: Long?
 }
 
+/**
+ * Marker for failures where repeating the read may succeed without any configuration or trust
+ * change: transport interruptions, call deadlines, transient HTTP statuses, provider throttles,
+ * and canonical-block movement during a bracketed read. Malformed or protocol-violating
+ * responses and explicit on-chain verdicts never carry it.
+ */
+interface RpcTransientFailure
+
 /** A provider JSON-RPC throttle that remains catch-compatible with [RpcResponseException]. */
 class RpcRateLimitResponseException(
     rpcCode: Int,
     rpcMessage: String,
     override val retryAfterMillis: Long? = null,
-) : RpcResponseException(rpcCode, rpcMessage), RpcRateLimit
+) : RpcResponseException(rpcCode, rpcMessage), RpcRateLimit, RpcTransientFailure
 
 /** An HTTP 429 provider throttle. */
 class RpcHttpRateLimitException(
     override val retryAfterMillis: Long? = null,
-) : RpcException("RPC HTTP request failed with status 429"), RpcRateLimit {
+) : RpcException("RPC HTTP request failed with status 429"), RpcRateLimit, RpcTransientFailure {
     val httpStatus: Int = 429
 }
+
+/** The connection-level transport failed; the sanitized message never carries the endpoint. */
+class RpcTransportException : RpcException("JSON-RPC transport failed"), RpcTransientFailure
+
+/** The whole-call transport deadline elapsed before a response completed. */
+class RpcCallDeadlineException :
+    RpcException("RPC HTTP call exceeded its deadline"), RpcTransientFailure
+
+/** A retryable HTTP status (408, 425, or 5xx) that is not a throttle. */
+class RpcHttpTransientStatusException(status: Int) :
+    RpcException("RPC HTTP request failed with status $status"), RpcTransientFailure
+
+/** The canonical block anchor moved or vanished while a bracketed read was sampling. */
+class RpcCanonicalBlockException(message: String) : RpcException(message), RpcTransientFailure
 
 class NetworkConfigurationException(message: String) : RpcException(message)

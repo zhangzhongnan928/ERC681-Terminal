@@ -130,12 +130,14 @@ class InvoiceProfileSelectionStateTest {
             operatorWalletReady = true,
         )
         val callbacks = ReadinessRefreshCallbacks()
-        callbacks.add { ready -> refreshed = refreshed.afterReadinessRefresh(ready) }
-        callbacks.add { ready ->
+        callbacks.add { result ->
+            refreshed = refreshed.afterReadinessRefresh(result.clearsInvoiceFailure())
+        }
+        callbacks.add { result ->
             refreshed = refreshed.afterProfileSelectionReadinessRefresh(
                 sequence = 12,
                 profileId = selected.id,
-                ready = ready,
+                ready = result.clearsInvoiceFailure(),
             )
         }
 
@@ -144,7 +146,7 @@ class InvoiceProfileSelectionStateTest {
         assertFalse(refreshed.profileSelectionPending)
 
         val cancelled = refreshed
-        callbacks.complete(ready = true)
+        callbacks.complete(ReadinessRefreshResult.FRESH_READY)
         assertEquals(
             "Cancelled generation cannot complete again later",
             cancelled,

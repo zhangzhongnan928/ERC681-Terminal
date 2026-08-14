@@ -66,6 +66,7 @@ final class AppModel: ObservableObject {
             settlementCoordinator = nil
             settlementCoordinatorKey = nil
             operatorStatus = nil
+            clearReadinessPreservation()
         }
     }
     @Published private(set) var validationMessage = "On-chain validation required"
@@ -77,6 +78,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var operatorAddress: EthereumAddress?
     @Published private(set) var operatorStatus: OperatorChainStatus?
     @Published private(set) var operatorStatusMessage: String?
+    /// Non-nil while readiness rests on a preserved (not freshly re-proven) validation proof or
+    /// operator status because the RPC provider could not be reached. Rendered by Checkout,
+    /// Settings, and Settlement alongside the cached values.
+    @Published private(set) var preservedReadinessNotice: String?
+    private var validationProofIsPreserved = false
+    private var operatorStatusIsPreserved = false
     @Published private(set) var validatedConfigurationFingerprint: String?
     @Published private(set) var provisioningMessage: String?
     @Published private(set) var rpcEndpointMessage: String?
@@ -106,6 +113,11 @@ final class AppModel: ObservableObject {
         TerminalConfiguration,
         EthereumAddress
     ) async throws -> OperatorChainStatus)?
+    private let receiverFreshnessReader: (@Sendable (
+        TerminalConfiguration,
+        EthereumAddress,
+        EthereumAddress
+    ) async throws -> ReceiverFreshnessProof)?
     private let operatorResetBalanceReader: (@Sendable (
         TerminalConfiguration,
         EthereumAddress
@@ -172,6 +184,11 @@ final class AppModel: ObservableObject {
             TerminalConfiguration,
             EthereumAddress
         ) async throws -> OperatorChainStatus)? = nil,
+        receiverFreshnessReader: (@Sendable (
+            TerminalConfiguration,
+            EthereumAddress,
+            EthereumAddress
+        ) async throws -> ReceiverFreshnessProof)? = nil,
         operatorResetBalanceReader: (@Sendable (
             TerminalConfiguration,
             EthereumAddress
@@ -202,6 +219,7 @@ final class AppModel: ObservableObject {
         self.persistMainContext = persistMainContext
         self.currentConfigurationValidation = currentConfigurationValidation
         self.operatorStatusReader = operatorStatusReader
+        self.receiverFreshnessReader = receiverFreshnessReader
         self.operatorResetBalanceReader = operatorResetBalanceReader
         self.validationNow = validationNow
         self.configurationValidationTTL = max(0, configurationValidationTTL)
@@ -716,6 +734,7 @@ final class AppModel: ObservableObject {
         provisioningMessage = "Unreadable setup quarantined. Scan the merchant portal setup QR again."
         operatorStatus = nil
         operatorStatusMessage = nil
+        clearReadinessPreservation()
         errorMessage = nil
         if adminPINConfigured { lockAdmin() }
     }
@@ -821,6 +840,7 @@ final class AppModel: ObservableObject {
         isBusy = true
         defer { isBusy = false }
         let snapshot = settings
+        let provenFingerprint = validatedConfigurationFingerprint
         do {
             let configuration = try operationalConfiguration(
                 for: snapshot.configuration()
@@ -832,10 +852,27 @@ final class AppModel: ObservableObject {
             )
             guard settings == snapshot else { throw AppSafetyError.configurationChanged }
             validatedConfigurationFingerprint = snapshot.validationFingerprint
+            validationProofIsPreserved = false
+            updatePreservedReadinessNotice()
             errorMessage = nil
             return true
         } catch {
+            // "The chain could not be asked" is not "the chain said no". A transient
+            // re-validation failure for the unchanged readiness identity keeps the previously
+            // proven fingerprint (and with it the preserved operator status) instead of
+            // demoting checkout to validationRequired.
+            if settings == snapshot,
+               provenFingerprint != nil,
+               provenFingerprint == snapshot.validationFingerprint,
+               ReadinessRetryPolicy.isTransient(error) {
+                validationProofIsPreserved = true
+                updatePreservedReadinessNotice()
+                validationMessage = "Last validation retained"
+                return true
+            }
             validatedConfigurationFingerprint = nil
+            validationProofIsPreserved = false
+            updatePreservedReadinessNotice()
             validationMessage = "Validation failed"
             errorMessage = error.localizedDescription
             return false
@@ -876,9 +913,6 @@ final class AppModel: ObservableObject {
                 profile: paymentProfile,
                 expiresAt: Date().addingTimeInterval(15 * 60)
             )
-            let rpc = try EthereumRPCClientPool.shared.client(
-                for: configuration.rpcEndpoints[0]
-            )
             // These proofs are independent read-only operations. Launch them together so the
             // slowest fixed-head proof, rather than their sum, controls checkout latency. Every
             // result remains mandatory and the settings/operator snapshot is checked before any
@@ -892,10 +926,10 @@ final class AppModel: ObservableObject {
                 configuration: configuration,
                 operatorAddress: operatorAddress
             )
-            async let freshnessProof = ReceiverFreshnessValidator(rpc: rpc).validate(
+            async let freshnessProof = fetchReceiverFreshness(
+                configuration: configuration,
                 receiver: request.receiver,
-                token: token.address,
-                expectedChainID: configuration.chainID
+                token: token.address
             )
             let concurrentProofs: (Void, OperatorChainStatus, ReceiverFreshnessProof)
             do {
@@ -919,13 +953,16 @@ final class AppModel: ObservableObject {
             validatedConfigurationFingerprint = settingsSnapshot.validationFingerprint
             operatorStatus = liveStatus
             operatorStatusMessage = nil
+            // The sale just proved configuration and operator status freshly; any earlier
+            // preserved-readiness notice no longer describes the published state.
+            clearReadinessPreservation()
             let readiness = TerminalReadiness.evaluate(
                 settings: settingsSnapshot,
                 operatorAddress: operatorAddress,
                 validatedFingerprint: settingsSnapshot.validationFingerprint,
                 operatorStatus: liveStatus
             )
-            guard readiness.isReady else {
+            guard readiness.allowsCheckout else {
                 throw AppSafetyError.terminalNotReady(readiness.detail)
             }
             guard freshness.receiverCode.isEmpty else {
@@ -1293,6 +1330,7 @@ final class AppModel: ObservableObject {
             )
             self.operatorAddress = nil
             operatorStatus = nil
+            clearReadinessPreservation()
             operatorStatusMessage = nil
             validatedConfigurationFingerprint = nil
             settings = settings.clearingProvisioning()
@@ -1326,16 +1364,18 @@ final class AppModel: ObservableObject {
     private func refreshOperatorStatusWithoutRPCGate() async {
         guard let operatorAddress else {
             operatorStatus = nil
+            clearReadinessPreservation()
             operatorStatusMessage = "Create the operator wallet to enable native settlement."
             return
         }
         guard settings.isProvisioned else {
             operatorStatus = nil
+            clearReadinessPreservation()
             operatorStatusMessage = "Scan the portal provisioning QR to bind a vault."
             return
         }
+        let settingsSnapshot = settings
         do {
-            let settingsSnapshot = settings
             let configuration = try operationalConfiguration(
                 for: settingsSnapshot.configuration()
             )
@@ -1347,11 +1387,45 @@ final class AppModel: ObservableObject {
                   self.operatorAddress == operatorAddress
             else { throw AppSafetyError.configurationChanged }
             operatorStatus = status
+            operatorStatusIsPreserved = false
+            updatePreservedReadinessNotice()
             operatorStatusMessage = nil
         } catch {
+            // "The chain could not be asked" is not "the chain said no". A transient read
+            // failure preserves the last proven checkout-capable status for the unchanged
+            // configuration; only an explicit verdict or a local failure demotes it.
+            if settings == settingsSnapshot,
+               self.operatorAddress == operatorAddress,
+               ReadinessRetryPolicy.isTransient(error),
+               terminalReadiness.allowsCheckout {
+                operatorStatusIsPreserved = true
+                updatePreservedReadinessNotice()
+                operatorStatusMessage = Self.preservedOperatorStatusNotice
+                return
+            }
             operatorStatus = nil
+            operatorStatusIsPreserved = false
+            updatePreservedReadinessNotice()
             operatorStatusMessage = error.localizedDescription
         }
+    }
+
+    static let preservedOperatorStatusNotice =
+        "The latest status re-check could not reach the RPC provider; "
+            + "showing the last validated result."
+
+    private func updatePreservedReadinessNotice() {
+        preservedReadinessNotice = if validationProofIsPreserved || operatorStatusIsPreserved {
+            Self.preservedOperatorStatusNotice
+        } else {
+            nil
+        }
+    }
+
+    private func clearReadinessPreservation() {
+        validationProofIsPreserved = false
+        operatorStatusIsPreserved = false
+        updatePreservedReadinessNotice()
     }
 
     func prepareSettlement(
@@ -2385,6 +2459,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func fetchReceiverFreshness(
+        configuration: TerminalConfiguration,
+        receiver: EthereumAddress,
+        token: EthereumAddress
+    ) async throws -> ReceiverFreshnessProof {
+        if let receiverFreshnessReader {
+            return try await receiverFreshnessReader(configuration, receiver, token)
+        }
+        let rpc = try EthereumRPCClientPool.shared.client(
+            for: configuration.rpcEndpoints[0]
+        )
+        return try await ReceiverFreshnessValidator(rpc: rpc).validate(
+            receiver: receiver,
+            token: token,
+            expectedChainID: configuration.chainID
+        )
+    }
+
     private func fetchOperatorStatus(
         configuration: TerminalConfiguration,
         operatorAddress: EthereumAddress
@@ -2581,6 +2673,7 @@ final class AppModel: ObservableObject {
         settlementCoordinator = nil
         settlementCoordinatorKey = nil
         operatorStatus = nil
+        clearReadinessPreservation()
         operatorStatusMessage = "RPC endpoint changed. Refresh readiness before accepting payments."
     }
 

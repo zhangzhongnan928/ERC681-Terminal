@@ -25,23 +25,22 @@ class InvoiceReadinessPolicyTest {
         assertThrows(IllegalStateException::class.java) {
             requireTerminalReadiness(config(), wallet(), ready().copy(authorized = false))
         }
-        val lowGas = assertThrows(IllegalStateException::class.java) {
-            requireTerminalReadiness(
-                config(),
-                wallet(),
-                ready().copy(
-                    nativeBalance = KnownChainPolicy.requireProfile(84532)
-                        .minimumOperatorNativeReserve - BigInteger.ONE,
-                ),
-            )
-        }
-        org.junit.Assert.assertTrue(lowGas.message?.contains("0.0001 ETH") == true)
-        org.junit.Assert.assertFalse(lowGas.message?.contains("wei") == true)
     }
 
     @Test
     fun exactMinimumAuthorizedProvisionedWalletIsReady() {
         requireTerminalReadiness(config(), wallet(), ready())
+    }
+
+    @Test
+    fun lowGasWarnsButNeverBlocksInvoiceCreation() {
+        // The customer's funds land at the freshly derived receiver regardless of operator gas;
+        // settlement waits until the operator is funded.
+        requireTerminalReadiness(
+            config(),
+            wallet(),
+            ready().copy(nativeBalance = BigInteger.ZERO),
+        )
     }
 
     @Test

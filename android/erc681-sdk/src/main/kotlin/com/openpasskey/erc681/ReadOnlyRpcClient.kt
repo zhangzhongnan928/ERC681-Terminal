@@ -147,7 +147,7 @@ class ReadOnlyRpcClient private constructor(
         }
         val block = result.asJsonObject
         val identity = decodeCanonicalBlockIdentity(result)
-            ?: throw RpcException("Canonical payment block is unavailable")
+            ?: throw RpcCanonicalBlockException("Canonical payment block is unavailable")
         if (identity.number != blockNumber) {
             throw RpcException(
                 "eth_getBlockByNumber returned block ${identity.number} for requested block $blockNumber",
@@ -572,11 +572,11 @@ class ReadOnlyRpcClient private constructor(
         val finalHeadHash = decodeCanonicalBlockHash(
             rpcResult("eth_getBlockByNumber", blockByNumberParams(head)),
             head,
-        ) ?: throw RpcException(
+        ) ?: throw RpcCanonicalBlockException(
             "Canonical block $head became unavailable after validating confirmation cursors",
         )
         if (!finalHeadHash.equals(anchoredHead.hash, ignoreCase = true)) {
-            throw RpcException("Canonical block $head changed while sampling payment balance")
+            throw RpcCanonicalBlockException("Canonical block $head changed while sampling payment balance")
         }
         return PaymentReadSample(
             blockNumber = head,
@@ -698,11 +698,11 @@ class ReadOnlyRpcClient private constructor(
                 blockByNumberParams(anchoredHead.number),
             ),
             anchoredHead.number,
-        ) ?: throw RpcException(
+        ) ?: throw RpcCanonicalBlockException(
             "Canonical block ${anchoredHead.number} became unavailable during checkout validation",
         )
         if (!finalHeadHash.equals(anchoredHead.hash, ignoreCase = true)) {
-            throw RpcException(
+            throw RpcCanonicalBlockException(
                 "Canonical block ${anchoredHead.number} changed during checkout validation",
             )
         }
@@ -981,11 +981,11 @@ class ReadOnlyRpcClient private constructor(
                 retryOnThrottle = retryOnThrottle,
             ),
             anchoredHead.number,
-        ) ?: throw RpcException(
+        ) ?: throw RpcCanonicalBlockException(
             "Canonical block ${anchoredHead.number} became unavailable during network validation",
         )
         if (!finalHeadHash.equals(anchoredHead.hash, ignoreCase = true)) {
-            throw RpcException(
+            throw RpcCanonicalBlockException(
                 "Canonical block ${anchoredHead.number} changed during network validation",
             )
         }
@@ -1295,7 +1295,7 @@ class ReadOnlyRpcClient private constructor(
         } catch (_: Exception) {
             // RPC URLs can carry client credentials. Do not retain the transport exception as a
             // cause because DNS/TLS errors can include the credential-bearing host or full URL.
-            throw RpcException("JSON-RPC transport failed")
+            throw RpcTransportException()
         }
 
         val responseRoot = try {
@@ -1667,7 +1667,7 @@ private class HttpUrlConnectionRpcTransport(
             if (deadlineExpired.get() ||
                 (deadlineNanos != null && System.nanoTime() > deadlineNanos)
             ) {
-                throw RpcException(CALL_DEADLINE_MESSAGE)
+                throw RpcCallDeadlineException()
             }
         }
         val body = requestBody.toByteArray(StandardCharsets.UTF_8)
@@ -1723,7 +1723,7 @@ private class HttpUrlConnectionRpcTransport(
         } catch (error: Exception) {
             // A watchdog disconnect surfaces as an arbitrary transport IOException from whichever
             // blocking call it aborted; report the deadline deterministically instead.
-            if (deadlineExpired.get()) throw RpcException(CALL_DEADLINE_MESSAGE)
+            if (deadlineExpired.get()) throw RpcCallDeadlineException()
             throw error
         } finally {
             watchdog?.cancel(false)
@@ -1750,7 +1750,6 @@ private class HttpUrlConnectionRpcTransport(
         // larger than the earlier metadata-only RPC ceiling. Keep a finite defensive bound.
         private const val MAX_RESPONSE_BYTES = 8 * 1024 * 1024
         private const val NANOS_PER_MILLI = 1_000_000L
-        private const val CALL_DEADLINE_MESSAGE = "RPC HTTP call exceeded its deadline"
 
         // One shared daemon thread arms at most one pending disconnect per in-flight call that
         // configured a whole-call deadline; completed calls cancel their task in a finally block.
@@ -1764,12 +1763,13 @@ internal fun rpcHttpFailure(
     status: Int,
     retryAfterHeader: String?,
     nowEpochMillis: Long,
-): RpcException = if (status == 429) {
-    RpcHttpRateLimitException(
+): RpcException = when {
+    status == 429 -> RpcHttpRateLimitException(
         retryAfterMillis = parseBoundedRetryAfterMillis(retryAfterHeader, nowEpochMillis),
     )
-} else {
-    RpcException("RPC HTTP request failed with status $status")
+    status == 408 || status == 425 || status in 500..599 ->
+        RpcHttpTransientStatusException(status)
+    else -> RpcException("RPC HTTP request failed with status $status")
 }
 
 internal fun parseBoundedRetryAfterMillis(

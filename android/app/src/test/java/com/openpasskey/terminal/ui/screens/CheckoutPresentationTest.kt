@@ -37,6 +37,35 @@ class CheckoutPresentationTest {
     }
 
     @Test
+    fun `low gas warning uses the readable reserve and keeps checkout open`() {
+        val profile = TerminalPaymentProfile(
+            networkName = "Base Sepolia",
+            rpcUrl = "https://sepolia.base.org",
+            chainId = 84_532,
+            factoryAddress = "0x2592fbab9707e65e21ea14d8a9fe298f5e68a37f",
+            receiverImplementationAddress = "0xf2e0d5fc47761cac0eedee6cb1af5f31843a0a18",
+            vaultAddress = "0x1111111111111111111111111111111111111111",
+            confirmationBlocks = 2,
+            token = PaymentToken(
+                "0x2222222222222222222222222222222222222222",
+                "AUDM",
+                18,
+            ),
+            protocolVersion = "1.6",
+        )
+
+        val message = lowGasCheckoutWarningMessage(profile)
+
+        assertTrue(message.contains("Checkout still works"))
+        assertTrue(message.contains("0.0001 ETH"))
+        assertFalse(message.contains("wei"))
+        assertTrue(
+            lowGasCheckoutWarningMessage(null)
+                .contains("the network's required native gas reserve"),
+        )
+    }
+
+    @Test
     fun `early setup blockers lead to the setup flow`() {
         listOf(
             TerminalSetupStatus.CREATE_WALLET,

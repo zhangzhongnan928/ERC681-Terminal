@@ -81,7 +81,7 @@ jobs:
           emulator-options: >-
             -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
             -camera-back none -no-snapshot-save
-          script: ./android/gradlew --no-daemon -p android :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.openpasskey.terminal.data.db.InvoiceDatabaseMigrationTest,com.openpasskey.terminal.chain.ChainConfigSharedPreferencesMigrationTest
+          script: ./android/gradlew --no-daemon -p android :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.openpasskey.terminal.data.db.InvoiceDatabaseMigrationTest,com.openpasskey.terminal.chain.ChainConfigSharedPreferencesMigrationTest,com.openpasskey.terminal.ui.screens.CheckoutScreenTest,com.openpasskey.terminal.viewmodel.SettingsViewModelReadinessLifecycleTest
 
   swift-sdk:
     name: Swift SDK, conformance, and targeted iOS safety tests
@@ -160,6 +160,11 @@ jobs:
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testFailedLegacyMigrationNeverUsesOrReportsPersistedFallback \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testActiveMonitorPreservesLastVerifiedObservationAcrossTransientFailure \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testActiveMonitorKeepsWrongChainTerminalAndCancellationSilent \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testTransientStatusRefreshFailurePreservesProvenCheckoutCapableStatus \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testExpiredProofTransientValidationFailurePreservesCheckout \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testSuccessfulSaleClearsPreservedReadinessNotice \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testCheckoutNoticeTextUsesSemanticLabelColor \
+            -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testReadinessRequiresCurrentValidationAuthorizationAndMinimumGas \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testFirstRunWalletCreationRemainsAvailableBeforeAdminPIN \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testNewPaymentRouteUsesKnownNetworkDefaultWithoutLeakingFallbackFinality \
             -only-testing:OPKTerminalAppTests/ProvisioningAppTests/testReprovisioningSamePaymentRoutePreservesRaisedFinality \

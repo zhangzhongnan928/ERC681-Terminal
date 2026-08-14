@@ -74,6 +74,7 @@ import com.openpasskey.terminal.viewmodel.checkoutActionCopy
 import com.openpasskey.terminal.viewmodel.checkoutAmountDisplay
 import com.openpasskey.terminal.viewmodel.isCheckoutReady
 import com.openpasskey.terminal.viewmodel.isSubmittableCheckoutAmount
+import com.openpasskey.terminal.viewmodel.statusAllowsCheckout
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -83,6 +84,7 @@ fun InvoiceScreen(
     terminalStatusMessage: String?,
     terminalRefreshing: Boolean,
     terminalConfigurationValidated: Boolean,
+    terminalStaleReadinessNotice: String?,
     onRefreshTerminalStatus: () -> Unit,
     onProfileSelection: (sequence: Long, profileId: String) -> Unit,
     onRecoverFromInvoiceFailure: () -> Unit,
@@ -146,16 +148,16 @@ fun InvoiceScreen(
                         state.profileSelectionPending ->
                             TerminalSetupStatus.READY
                         state.readinessInvalidated -> TerminalSetupStatus.ERROR
-                        terminalStatus == TerminalSetupStatus.READY &&
+                        statusAllowsCheckout(terminalStatus) &&
                             (terminalRefreshing || !terminalConfigurationValidated) ->
                             TerminalSetupStatus.READY
-                        terminalStatus == TerminalSetupStatus.READY -> TerminalSetupStatus.ERROR
+                        statusAllowsCheckout(terminalStatus) -> TerminalSetupStatus.ERROR
                         else -> terminalStatus
                     },
                     statusMessage = when {
                         state.profileSelectionPending -> null
                         state.readinessInvalidated -> state.repositoryFailure
-                        terminalStatus == TerminalSetupStatus.READY -> null
+                        statusAllowsCheckout(terminalStatus) -> null
                         else -> terminalStatusMessage
                     },
                     selectedProfile = selectedProfile,
@@ -171,6 +173,12 @@ fun InvoiceScreen(
         profile = requireNotNull(selectedProfile),
         profiles = state.profiles,
         error = state.error,
+        staleReadinessNotice = terminalStaleReadinessNotice,
+        lowGasWarning = if (terminalStatus == TerminalSetupStatus.AWAITING_GAS) {
+            lowGasCheckoutWarningMessage(selectedProfile)
+        } else {
+            null
+        },
         isCreating = state.isCreating,
         onAmountChanged = viewModel::updateAmount,
         onProfileSelected = viewModel::selectProfile,
@@ -185,6 +193,8 @@ internal fun CheckoutReadyScreen(
     profile: TerminalPaymentProfile,
     profiles: List<TerminalPaymentProfile>,
     error: String?,
+    staleReadinessNotice: String?,
+    lowGasWarning: String?,
     isCreating: Boolean,
     onAmountChanged: (String) -> Unit,
     onProfileSelected: (TerminalPaymentProfile) -> Unit,
@@ -237,6 +247,8 @@ internal fun CheckoutReadyScreen(
                     onSelected = onProfileSelected,
                 )
             }
+            staleReadinessNotice?.let { CheckoutStaleReadinessNotice(it) }
+            lowGasWarning?.let { CheckoutWarning(it) }
             error?.let { CheckoutError(it) }
             CheckoutKeypad(
                 amount = amount,
@@ -554,6 +566,49 @@ internal fun checkoutBlockerCopy(
         else -> "Open Settings"
     }
     return CheckoutBlockerCopy(title, detail, actionLabel)
+}
+
+/** Low gas never blocks a sale: funds land at the receiver and settlement waits for funding. */
+internal fun lowGasCheckoutWarningMessage(selectedProfile: TerminalPaymentProfile?): String {
+    val network = selectedProfile?.let { profile ->
+        runCatching { KnownChainPolicy.requireProfile(profile.chainId) }.getOrNull()
+    }
+    val reserve = network?.minimumOperatorNativeReserveDisplay()
+        ?: "the network's required native gas reserve"
+    return "Operator gas is low. Checkout still works; fund the operator with at least " +
+        "$reserve so settlement can run."
+}
+
+@Composable
+private fun CheckoutStaleReadinessNotice(message: String) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("checkout_stale_readiness_notice"),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Text(
+            message,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+        )
+    }
+}
+
+@Composable
+private fun CheckoutWarning(message: String) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Text(
+            message,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+        )
+    }
 }
 
 @Composable

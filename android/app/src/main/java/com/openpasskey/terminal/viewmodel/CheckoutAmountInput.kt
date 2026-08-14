@@ -103,7 +103,7 @@ internal fun isCheckoutReady(
     readinessInvalidated: Boolean,
     operatorWalletReady: Boolean,
     hasSelectedToken: Boolean,
-): Boolean = terminalStatus == TerminalSetupStatus.READY &&
+): Boolean = statusAllowsCheckout(terminalStatus) &&
     configurationValidated && !refreshing && !readinessInvalidated &&
     operatorWalletReady && hasSelectedToken
 

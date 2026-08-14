@@ -7,6 +7,7 @@ import com.openpasskey.erc681.EvmAddress
 import com.openpasskey.erc681.NetworkConfig
 import com.openpasskey.erc681.ReadOnlyRpcClient
 import com.openpasskey.erc681.RpcRateLimit
+import com.openpasskey.erc681.RpcTransientFailure
 import com.openpasskey.terminal.admin.AdminPinStore
 import com.openpasskey.terminal.admin.AdminPinVerification
 import com.openpasskey.terminal.chain.ChainConfig
@@ -112,27 +113,102 @@ internal fun shouldRestartActiveReadinessRefresh(
     refreshActive: Boolean,
 ): Boolean = refreshActive && trigger == ReadinessRefreshTrigger.INVOICE_FAILURE
 
+/** Low operator gas warns but never blocks a sale: funds land at the receiver regardless. */
+internal fun statusAllowsCheckout(status: TerminalSetupStatus): Boolean =
+    status == TerminalSetupStatus.READY || status == TerminalSetupStatus.AWAITING_GAS
+
+/**
+ * How a readiness pass concluded. [FRESH_READY] is a live on-chain proof; [PRESERVED] means the
+ * chain could not be asked and the last proven checkout-capable result is still standing in.
+ * Only a fresh proof may clear a live invoice-creation failure.
+ */
+internal enum class ReadinessRefreshResult { FRESH_READY, PRESERVED, NOT_READY }
+
+/** Only a fresh successful on-chain proof may clear a live invoice-creation failure. */
+internal fun ReadinessRefreshResult.clearsInvoiceFailure(): Boolean =
+    this == ReadinessRefreshResult.FRESH_READY
+
 internal fun readinessResultWhenAutomaticRefreshDefers(
     configurationStillValidated: Boolean,
     setupStatus: TerminalSetupStatus,
-): Boolean = configurationStillValidated && setupStatus == TerminalSetupStatus.READY
+): ReadinessRefreshResult = if (configurationStillValidated && statusAllowsCheckout(setupStatus)) {
+    ReadinessRefreshResult.PRESERVED
+} else {
+    ReadinessRefreshResult.NOT_READY
+}
 
-/** Main-thread callback ownership for one readiness generation. Cancellation is a false result. */
+/**
+ * "The chain could not be asked" is not "the chain said no". Only the SDK's typed transient
+ * failures (transport interruption, call deadline, transient HTTP status, provider throttle,
+ * canonical-block movement) preserve a proven checkout-capable status. Everything else —
+ * explicit on-chain verdicts, malformed or protocol-violating responses, arbitrary JSON-RPC
+ * errors, and local invariant failures — demotes it.
+ */
+internal fun shouldPreserveProvenReadiness(
+    error: Exception,
+    provenConfigurationUnchanged: Boolean,
+    provenStatus: TerminalSetupStatus,
+): Boolean = provenConfigurationUnchanged &&
+    statusAllowsCheckout(provenStatus) &&
+    error is RpcTransientFailure
+
+internal fun preservedReadinessNoticeMessage(
+    provenStatus: TerminalSetupStatus,
+    networkPolicy: KnownChainProfile,
+): String {
+    val provenSummary = when (provenStatus) {
+        TerminalSetupStatus.AWAITING_GAS -> awaitingGasReadinessMessage(networkPolicy)
+        else -> "Terminal is ready to create payments."
+    }
+    return "$provenSummary The latest status re-check could not reach the RPC provider; " +
+        "showing the last validated result."
+}
+
+/**
+ * Owns the preserved-readiness banner independently of generic status messages. Every state
+ * rebuild re-emits [current] through load(), so unrelated settings updates (admin lock/unlock,
+ * receipt saves) can neither rewrite Checkout's notice text nor silently end the preserved
+ * window. Only a fresh on-chain proof, a terminal demotion, or configuration invalidation are
+ * lifecycle events — RPC-endpoint and payment-profile mutations intentionally invalidate
+ * readiness and therefore end the window.
+ */
+internal class PreservedReadinessNotice {
+    var current: String? = null
+        private set
+
+    fun beginPreservation(notice: String) {
+        current = notice
+    }
+
+    fun endAfterFreshProof() {
+        current = null
+    }
+
+    fun endAfterDemotion() {
+        current = null
+    }
+
+    fun endAfterInvalidation() {
+        current = null
+    }
+}
+
+/** Main-thread callback ownership for one readiness generation. Cancellation is NOT_READY. */
 internal class ReadinessRefreshCallbacks {
-    private val callbacks = mutableListOf<(Boolean) -> Unit>()
+    private val callbacks = mutableListOf<(ReadinessRefreshResult) -> Unit>()
 
-    fun add(callback: (Boolean) -> Unit) {
+    fun add(callback: (ReadinessRefreshResult) -> Unit) {
         callbacks += callback
     }
 
-    fun complete(ready: Boolean) {
+    fun complete(result: ReadinessRefreshResult) {
         if (callbacks.isEmpty()) return
         val pending = callbacks.toList()
         callbacks.clear()
-        pending.forEach { callback -> callback(ready) }
+        pending.forEach { callback -> callback(result) }
     }
 
-    fun cancel() = complete(ready = false)
+    fun cancel() = complete(ReadinessRefreshResult.NOT_READY)
 }
 
 data class SettingsState(
@@ -169,6 +245,8 @@ data class SettingsState(
     val operatorBalanceWei: String? = null,
     val operatorAuthorized: Boolean? = null,
     val configurationValidated: Boolean = false,
+    /** Non-null while the shown readiness rests on a preserved proof (RPC unreachable). */
+    val preservedReadinessNotice: String? = null,
     val settlementTargetVerified: Boolean = false,
     val walletHardwareBacked: Boolean = false,
     val walletStrongBoxBacked: Boolean = false,
@@ -326,7 +404,22 @@ internal fun commitAfterAutoSweepRevocation(
     return commitConfiguration()
 }
 
-class SettingsViewModel(
+/** The on-chain readiness proof, decoupled from status mapping so tests can script results. */
+internal data class OperatorChainStatus(val balance: BigInteger, val authorized: Boolean)
+
+/**
+ * Proves configuration and operator readiness on-chain for one refresh pass. Injectable so
+ * ViewModel-level lifecycle tests can drive the production refresh, load(), and preservation
+ * machinery with scripted results instead of a live RPC endpoint.
+ */
+internal fun interface OperatorReadinessProver {
+    suspend fun prove(
+        config: TerminalConfigSnapshot,
+        priority: ReadinessRpcPriority,
+    ): OperatorChainStatus
+}
+
+class SettingsViewModel internal constructor(
     private val chainConfig: ChainConfig,
     private val walletStore: OperatorWalletStore,
     private val adminPinStore: AdminPinStore,
@@ -336,6 +429,7 @@ class SettingsViewModel(
     private val rpcWorkCoordinator: RpcWorkCoordinator,
     private val rpcEndpointStore: RpcEndpointStore,
     private val rpcEndpointVerifier: RpcEndpointVerifier,
+    private val readinessProverOverride: OperatorReadinessProver? = null,
 ) : ViewModel() {
     private val adminSession = AdminSessionGate()
     private var refreshJob: Job? = null
@@ -352,6 +446,7 @@ class SettingsViewModel(
     private var autoSweepEnrollmentAuthorizationEpoch: Long? = null
     private var validatedConfiguration: TerminalConfigSnapshot? = null
     private val refreshCompletionCallbacks = ReadinessRefreshCallbacks()
+    private val preservedReadiness = PreservedReadinessNotice()
     private val readinessRpcScheduler = ReadinessRpcScheduler(rpcWorkCoordinator)
     private var migrationNoticeMessage = run {
         // snapshot() performs any v2 -> v3 migration before the notice is queried.
@@ -495,6 +590,7 @@ class SettingsViewModel(
             operatorPairingPayload = pairing,
             operatorFundingPayload = operatorFundingPayload(config, wallet),
             configurationValidated = validatedConfiguration == config,
+            preservedReadinessNotice = preservedReadiness.current,
             settlementTargetVerified = operatorBindingMatches && wallet.isVerifiedFor(
                 config.chainId,
                 config.vaultAddress,
@@ -1422,17 +1518,17 @@ class SettingsViewModel(
         priority = ReadinessRpcPriority.INTERACTIVE,
     )
 
-    fun refreshOperatorStatus(onComplete: (Boolean) -> Unit) =
+    internal fun refreshOperatorStatus(onComplete: (ReadinessRefreshResult) -> Unit) =
         refreshOperatorStatusInternal(onComplete, ReadinessRpcPriority.INTERACTIVE)
 
     fun refreshOperatorStatusAutomatically() = refreshOperatorStatusInternal(
         priority = ReadinessRpcPriority.AUTOMATIC,
     )
 
-    fun refreshOperatorStatusAutomatically(onComplete: (Boolean) -> Unit) =
+    internal fun refreshOperatorStatusAutomatically(onComplete: (ReadinessRefreshResult) -> Unit) =
         refreshOperatorStatusInternal(onComplete, ReadinessRpcPriority.AUTOMATIC)
 
-    fun refreshOperatorStatusAfterInvoiceFailure(onComplete: (Boolean) -> Unit) {
+    internal fun refreshOperatorStatusAfterInvoiceFailure(onComplete: (ReadinessRefreshResult) -> Unit) {
         if (shouldRestartActiveReadinessRefresh(
                 ReadinessRefreshTrigger.INVOICE_FAILURE,
                 refreshJob?.isActive == true,
@@ -1443,15 +1539,19 @@ class SettingsViewModel(
         refreshOperatorStatusInternal(onComplete, ReadinessRpcPriority.INTERACTIVE)
     }
 
-    fun refreshOperatorStatusAfterProfileSelection(onComplete: (Boolean) -> Unit) {
+    internal fun refreshOperatorStatusAfterProfileSelection(onComplete: (ReadinessRefreshResult) -> Unit) {
         invalidateReadinessRefresh()
         refreshOperatorStatusInternal(onComplete, ReadinessRpcPriority.INTERACTIVE)
     }
 
     private fun refreshOperatorStatusInternal(
-        onComplete: ((Boolean) -> Unit)? = null,
+        onComplete: ((ReadinessRefreshResult) -> Unit)? = null,
         priority: ReadinessRpcPriority,
     ) {
+        // Captured before any invalidation or clearing so an unreachable provider can preserve
+        // the last proven result instead of demoting it to ERROR and blocking checkout.
+        val provenConfiguration = validatedConfiguration
+        val provenState = _state.value
         if (refreshJob?.isActive == true) {
             if (priority == ReadinessRpcPriority.INTERACTIVE &&
                 refreshPriority == ReadinessRpcPriority.AUTOMATIC
@@ -1467,25 +1567,29 @@ class SettingsViewModel(
         val wallet = walletStore.snapshot()
         val address = wallet.address
         val config = chainConfig.snapshot()
+        val provenConfigurationUnchanged = provenConfiguration == config
         if (priority == ReadinessRpcPriority.INTERACTIVE) validatedConfiguration = null
         if (wallet.availability != OperatorWalletAvailability.READY || address == null || !config.provisioned) {
+            preservedReadiness.endAfterDemotion()
             _state.value = load()
-            completeReadinessCallbacks(ready = false)
+            completeReadinessCallbacks(ReadinessRefreshResult.NOT_READY)
             return
         }
         if (config.provisionedOperatorAddress?.equals(address, true) != true) {
+            preservedReadiness.endAfterDemotion()
             _state.value = load(
                 "Provisioned operator does not match the local terminal wallet",
                 isError = true,
             )
-            completeReadinessCallbacks(ready = false)
+            completeReadinessCallbacks(ReadinessRefreshResult.NOT_READY)
             return
         }
         val networkPolicy = try {
             KnownChainPolicy.requireProfile(config.chainId)
         } catch (error: Exception) {
+            preservedReadiness.endAfterDemotion()
             _state.value = load(error.message ?: "Unsupported terminal network", isError = true)
-            completeReadinessCallbacks(ready = false)
+            completeReadinessCallbacks(ReadinessRefreshResult.NOT_READY)
             return
         }
         // Profile selection is owned by ChainConfig and may have changed from Checkout. Reflect
@@ -1502,61 +1606,15 @@ class SettingsViewModel(
         refreshJob = viewModelScope.launch {
             try {
                 val result = readinessRpcScheduler.run(priority) {
-                    val profile = KnownChainPolicy.requireProfile(config.chainId)
-                    profile.requireValidCreate2Fixture()
-                    require(config.factoryAddress.equals(profile.factory.value, true)) { "Factory pin mismatch" }
-                    require(
-                        config.receiverImplementationAddress.equals(
-                            profile.receiverImplementation.value,
-                            true,
-                        ),
-                    ) { "Receiver implementation pin mismatch" }
-                    val token = config.paymentTokens.single()
-                    val retryOnThrottle = retryReadinessOnThrottle(priority)
-                    runInterruptible(Dispatchers.IO) {
-                        val resolvedRpcUrl = rpcEndpointStore.resolve(
-                            config.chainId,
-                            config.rpcUrl,
-                        )
-                        val network = NetworkConfig(
-                            config.chainId,
-                            resolvedRpcUrl,
-                            profile.factory,
-                            profile.receiverImplementation,
-                            EvmAddress.parse(config.vaultAddress),
-                        )
-                        val rpc = if (priority == ReadinessRpcPriority.AUTOMATIC) {
-                            ReadOnlyRpcClient(
-                                network,
-                                connectTimeoutMillis = AUTOMATIC_RPC_CONNECT_TIMEOUT_MILLIS,
-                                readTimeoutMillis = AUTOMATIC_RPC_READ_TIMEOUT_MILLIS,
-                            )
-                        } else {
-                            ReadOnlyRpcClient(network)
-                        }
-                        rpc.validate(
-                            token = EvmAddress.parse(token.address),
-                            expectedDecimals = token.decimals,
-                            expectedSymbol = token.symbol,
-                            retryOnThrottle = retryOnThrottle,
-                        )
-                        val operator = EvmAddress.parse(address)
-                        val readiness = rpc.operatorReadiness(
-                            operator = operator,
-                            retryOnThrottle = retryOnThrottle,
-                        )
-                        OperatorChainStatus(
-                            balance = readiness.nativeBalance,
-                            authorized = readiness.listedOperator || readiness.vaultOwner == operator,
-                        )
-                    }
+                    (readinessProverOverride ?: productionReadinessProver(address))
+                        .prove(config, priority)
                 }
                 if (result == null) {
                     // Checkout or another explicit action won priority, or this best-effort pass
                     // exhausted its bounded lease. Preserve the last proven ready state verbatim.
                     if (generation != refreshGeneration) return@launch
                     completeReadinessCallbacks(
-                        ready = readinessResultWhenAutomaticRefreshDefers(
+                        readinessResultWhenAutomaticRefreshDefers(
                             configurationStillValidated = validatedConfiguration == config,
                             setupStatus = _state.value.setupStatus,
                         ),
@@ -1579,6 +1637,7 @@ class SettingsViewModel(
                 }
                 if (generation != refreshGeneration) return@launch
                 validatedConfiguration = config
+                preservedReadiness.endAfterFreshProof()
                 _state.value = load().copy(
                     setupStatus = status,
                     operatorBalanceWei = result.balance.toString(),
@@ -1599,16 +1658,46 @@ class SettingsViewModel(
                     },
                     isError = false,
                 )
-                completeReadinessCallbacks(ready = status == TerminalSetupStatus.READY)
+                completeReadinessCallbacks(
+                    if (statusAllowsCheckout(status)) {
+                        ReadinessRefreshResult.FRESH_READY
+                    } else {
+                        ReadinessRefreshResult.NOT_READY
+                    },
+                )
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
                 if (generation != refreshGeneration) return@launch
-                _state.value = load(
-                    terminalRpcFailureMessage(error, "Unable to validate terminal readiness"),
-                    isError = true,
-                )
-                completeReadinessCallbacks(ready = false)
+                if (shouldPreserveProvenReadiness(
+                        error,
+                        provenConfigurationUnchanged,
+                        provenState.setupStatus,
+                    )
+                ) {
+                    validatedConfiguration = config
+                    val notice = preservedReadinessNoticeMessage(
+                        provenState.setupStatus,
+                        networkPolicy,
+                    )
+                    preservedReadiness.beginPreservation(notice)
+                    _state.value = load().copy(
+                        setupStatus = provenState.setupStatus,
+                        operatorBalanceWei = provenState.operatorBalanceWei,
+                        operatorAuthorized = provenState.operatorAuthorized,
+                        refreshingOperator = false,
+                        message = notice,
+                        isError = false,
+                    )
+                    completeReadinessCallbacks(ReadinessRefreshResult.PRESERVED)
+                } else {
+                    preservedReadiness.endAfterDemotion()
+                    _state.value = load(
+                        terminalRpcFailureMessage(error, "Unable to validate terminal readiness"),
+                        isError = true,
+                    )
+                    completeReadinessCallbacks(ReadinessRefreshResult.NOT_READY)
+                }
             } finally {
                 if (generation == refreshGeneration) {
                     refreshJob = null
@@ -1686,10 +1775,67 @@ class SettingsViewModel(
         activatedOperatorAddress?.equals(provisionedOperatorAddress, true) == true &&
         address?.equals(provisionedOperatorAddress, true) == true
 
+    /** The live four-wave proof: anchored validation plus operator readiness at one endpoint. */
+    private fun productionReadinessProver(address: String) =
+        OperatorReadinessProver { config, priority ->
+            val profile = KnownChainPolicy.requireProfile(config.chainId)
+            profile.requireValidCreate2Fixture()
+            require(config.factoryAddress.equals(profile.factory.value, true)) { "Factory pin mismatch" }
+            require(
+                config.receiverImplementationAddress.equals(
+                    profile.receiverImplementation.value,
+                    true,
+                ),
+            ) { "Receiver implementation pin mismatch" }
+            val token = config.paymentTokens.single()
+            val retryOnThrottle = retryReadinessOnThrottle(priority)
+            runInterruptible(Dispatchers.IO) {
+                val resolvedRpcUrl = rpcEndpointStore.resolve(
+                    config.chainId,
+                    config.rpcUrl,
+                )
+                val network = NetworkConfig(
+                    config.chainId,
+                    resolvedRpcUrl,
+                    profile.factory,
+                    profile.receiverImplementation,
+                    EvmAddress.parse(config.vaultAddress),
+                )
+                val rpc = if (priority == ReadinessRpcPriority.AUTOMATIC) {
+                    ReadOnlyRpcClient(
+                        network,
+                        connectTimeoutMillis = AUTOMATIC_RPC_CONNECT_TIMEOUT_MILLIS,
+                        readTimeoutMillis = AUTOMATIC_RPC_READ_TIMEOUT_MILLIS,
+                    )
+                } else {
+                    ReadOnlyRpcClient(network)
+                }
+                rpc.validate(
+                    token = EvmAddress.parse(token.address),
+                    expectedDecimals = token.decimals,
+                    expectedSymbol = token.symbol,
+                    retryOnThrottle = retryOnThrottle,
+                )
+                val operator = EvmAddress.parse(address)
+                val readiness = rpc.operatorReadiness(
+                    operator = operator,
+                    retryOnThrottle = retryOnThrottle,
+                )
+                OperatorChainStatus(
+                    balance = readiness.nativeBalance,
+                    authorized = readiness.listedOperator || readiness.vaultOwner == operator,
+                )
+            }
+        }
+
     private fun invalidateReadinessRefresh() {
         refreshGeneration += 1
         validatedConfiguration = null
-        _state.value = _state.value.copy(configurationValidated = false)
+        preservedReadiness.endAfterInvalidation()
+        _state.value = _state.value.copy(
+            configurationValidated = false,
+            preservedReadinessNotice = null,
+        )
         // A cancelled pass completes as not ready. Generic callbacks cannot release profile
         // selection, while the exact sequence/profile-owned callback can terminate its pending
         // state without making checkout ready.
@@ -1699,8 +1845,8 @@ class SettingsViewModel(
         refreshPriority = null
     }
 
-    private fun completeReadinessCallbacks(ready: Boolean) {
-        refreshCompletionCallbacks.complete(ready)
+    private fun completeReadinessCallbacks(result: ReadinessRefreshResult) {
+        refreshCompletionCallbacks.complete(result)
     }
 
     class Factory(
@@ -1727,8 +1873,6 @@ class SettingsViewModel(
             rpcEndpointVerifier,
         ) as T
     }
-
-    private data class OperatorChainStatus(val balance: BigInteger, val authorized: Boolean)
 
     companion object {
         // Anchored validation is three waves; operator readiness is one more. Automatic refresh is

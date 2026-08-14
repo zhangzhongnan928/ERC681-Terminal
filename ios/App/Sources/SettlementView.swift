@@ -142,6 +142,17 @@ struct SettlementView: View {
                         )
                             .foregroundStyle(.orange)
                     }
+                    if let notice = model.preservedReadinessNotice {
+                        Label {
+                            Text(notice)
+                                .foregroundStyle(.primary)
+                        } icon: {
+                            Image(systemName: "arrow.clockwise.circle")
+                                .foregroundStyle(.orange)
+                        }
+                        .font(.footnote)
+                        .accessibilityIdentifier("settlementStaleReadinessNotice")
+                    }
                 } else if let message = model.operatorStatusMessage {
                     Text(message).font(.footnote).foregroundStyle(.secondary)
                 }

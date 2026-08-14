@@ -217,19 +217,21 @@ class InvoiceViewModel(
         }
     }
 
-    fun completeReadinessRefresh(ready: Boolean) {
-        _createState.value = _createState.value.afterReadinessRefresh(ready)
+    internal fun completeReadinessRefresh(result: ReadinessRefreshResult) {
+        // A preserved result keeps checkout open through SettingsState, but it is not a fresh
+        // proof: only FRESH_READY may clear a live invoice-creation failure.
+        _createState.value = _createState.value.afterReadinessRefresh(result.clearsInvoiceFailure())
     }
 
-    fun completeProfileSelectionReadinessRefresh(
+    internal fun completeProfileSelectionReadinessRefresh(
         sequence: Long,
         profileId: String,
-        ready: Boolean,
+        result: ReadinessRefreshResult,
     ) {
         _createState.value = _createState.value.afterProfileSelectionReadinessRefresh(
             sequence = sequence,
             profileId = profileId,
-            ready = ready,
+            ready = result.clearsInvoiceFailure(),
         )
     }
 

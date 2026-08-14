@@ -550,7 +550,10 @@ struct SettingsView: View {
                     value: model.settings.displayedPaymentProfile.displayName
                 )
             }
-            ReadinessLabel(readiness: model.terminalReadiness)
+            ReadinessLabel(
+                readiness: model.terminalReadiness,
+                staleNotice: model.preservedReadinessNotice
+            )
             ValidationStatusLabel(message: model.validationMessage)
             if let status = model.operatorStatus {
                 LabeledContent(
@@ -755,7 +758,10 @@ struct SettingsView: View {
                     value: model.settings.displayedPaymentProfile.displayName
                 )
             }
-            ReadinessLabel(readiness: model.terminalReadiness)
+            ReadinessLabel(
+                readiness: model.terminalReadiness,
+                staleNotice: model.preservedReadinessNotice
+            )
             ValidationStatusLabel(message: model.validationMessage)
             if let status = model.operatorStatus {
                 LabeledContent(
@@ -903,6 +909,7 @@ private func settingsAssetLabel(_ address: String, nativeSymbol: String) -> Stri
 
 private struct ReadinessLabel: View {
     let readiness: TerminalReadiness
+    var staleNotice: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -912,6 +919,17 @@ private struct ReadinessLabel: View {
             Text(readiness.detail)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+            if let staleNotice {
+                Label {
+                    Text(staleNotice)
+                        .foregroundStyle(.primary)
+                } icon: {
+                    Image(systemName: "arrow.clockwise.circle")
+                        .foregroundStyle(.orange)
+                }
+                .font(.footnote)
+                .accessibilityIdentifier("settingsStaleReadinessNotice")
+            }
         }
     }
 }

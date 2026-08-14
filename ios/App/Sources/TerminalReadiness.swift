@@ -1,5 +1,38 @@
 import OPKTerminalCore
 import OPKTerminalOperator
+import OPKTerminalRPC
+
+/// Classifies production readiness-read failures for which "the chain could not be asked":
+/// repeating the read may succeed with no configuration or trust change. Protocol violations
+/// (malformed or mismatched responses), explicit verdicts, and unknown errors remain terminal.
+/// The operator-status path throws `OperatorRPCError`; everything else defers to the payment
+/// monitor's classification of `JSONRPCError`, `URLError`, and deadline failures.
+enum ReadinessRetryPolicy {
+    static func isTransient(_ error: any Error) -> Bool {
+        if let validationError = error as? ConfigurationValidationError {
+            // The fixed-head bracket moving underneath a re-validation is chain progress, not
+            // a verdict; every other configuration case is an explicit on-chain rejection.
+            if case .canonicalBlockChanged = validationError { return true }
+            return false
+        }
+        if let operatorError = error as? OperatorRPCError {
+            switch operatorError {
+            case let .invalidHTTPStatus(status):
+                return status == 408
+                    || status == 425
+                    || status == 429
+                    || (500...599).contains(status)
+            case let .server(code, _):
+                // -32005 is the widely used Ethereum provider "limit exceeded" error;
+                // -32016 is used by some public providers for an over-rate-limit response.
+                return code == -32_005 || code == -32_016
+            case .malformedResponse, .mismatchedID:
+                return false
+            }
+        }
+        return PaymentMonitorRetryPolicy.shouldRetry(error)
+    }
+}
 
 enum TerminalReadiness: Equatable {
     case walletRequired
@@ -17,6 +50,20 @@ enum TerminalReadiness: Equatable {
     case ready
 
     var isReady: Bool { self == .ready }
+
+    /// Low operator gas warns but never blocks a sale: customer funds land at the one-time
+    /// receiver regardless, and settlement (which keeps its reserve check) waits for funding.
+    var allowsCheckout: Bool {
+        if case .gasRequired = self { return true }
+        return isReady
+    }
+
+    var lowGasCheckoutWarning: String? {
+        guard case let .gasRequired(_, required, symbol, decimals) = self else { return nil }
+        return "Operator gas is low. Checkout still works; fund the operator to at least "
+            + "\(TokenAmount(rawValue: required, decimals: decimals).displayString()) \(symbol) "
+            + "so settlement can run."
+    }
 
     var title: String {
         switch self {
