@@ -83,5 +83,5 @@ Reports touching these are especially welcome:
 ## Supported versions
 
 Only the latest published release receives security fixes. At the time of
-writing that is `0.2.0` (build 15). Older builds and forks are not
+writing that is `0.5.2` (build 23). Older builds and forks are not
 supported.

@@ -53,7 +53,7 @@ publication, and both debug and release assembly; checks the shared
 conformance vectors; proves the generated Xcode project is current; and
 compiles the iOS app.
 
-Requirements: JDK 17, Android SDK platform 35, Swift 6.1+, XcodeGen,
+Requirements: JDK 17, Android SDK platform 36, Swift 6.1+, XcodeGen,
 ripgrep, and a full Xcode install with an iOS Simulator SDK.
 
 ## What is likely to be accepted

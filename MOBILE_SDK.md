@@ -423,7 +423,7 @@ Outputs:
 - unsigned, minified release APK: `android/app/build/outputs/apk/release/app-release-unsigned.apk`
 - SDK JAR and sources: `android/erc681-sdk/build/libs/`
 - Maven repository: `android/erc681-sdk/build/repository/`
-- Maven coordinate: `com.openpasskey:opk-erc681-sdk:0.5.1`
+- Maven coordinate: `com.openpasskey:opk-erc681-sdk:0.5.2`
 
 Point a terminal project at the local repository and add the dependency:
 
@@ -433,7 +433,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.openpasskey:opk-erc681-sdk:0.5.1")
+    implementation("com.openpasskey:opk-erc681-sdk:0.5.2")
 }
 ```
 
