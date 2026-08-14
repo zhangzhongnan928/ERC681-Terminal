@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.openpasskey"
-version = "0.5.1"
+version = "0.5.2"
 
 kotlin {
     jvmToolchain(17)
