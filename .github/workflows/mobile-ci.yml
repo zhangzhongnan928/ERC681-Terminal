@@ -81,7 +81,7 @@ jobs:
           emulator-options: >-
             -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
             -camera-back none -no-snapshot-save
-          script: ./android/gradlew --no-daemon -p android :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.openpasskey.terminal.data.db.InvoiceDatabaseMigrationTest,com.openpasskey.terminal.chain.ChainConfigSharedPreferencesMigrationTest,com.openpasskey.terminal.ui.screens.CheckoutScreenTest
+          script: ./android/gradlew --no-daemon -p android :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.openpasskey.terminal.data.db.InvoiceDatabaseMigrationTest,com.openpasskey.terminal.chain.ChainConfigSharedPreferencesMigrationTest,com.openpasskey.terminal.ui.screens.CheckoutScreenTest,com.openpasskey.terminal.viewmodel.SettingsViewModelReadinessLifecycleTest
 
   swift-sdk:
     name: Swift SDK, conformance, and targeted iOS safety tests

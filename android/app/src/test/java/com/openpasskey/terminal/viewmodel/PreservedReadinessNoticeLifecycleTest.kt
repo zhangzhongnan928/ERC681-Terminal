@@ -10,9 +10,11 @@ class PreservedReadinessNoticeLifecycleTest {
         val notice = PreservedReadinessNotice()
         notice.beginPreservation(NOTICE)
 
-        // Admin lock/unlock, receipt saves, and endpoint edits rebuild generic state through
-        // load() without invoking any lifecycle transition, so the notice must survive
-        // verbatim across any number of such rebuilds.
+        // Admin lock/unlock and receipt saves rebuild generic state through load() without
+        // invoking any lifecycle transition, so the notice must survive verbatim across any
+        // number of such rebuilds. (RPC-endpoint and profile mutations intentionally
+        // invalidate readiness instead; SettingsViewModelReadinessLifecycleTest drives the
+        // production paths.)
         repeat(3) {
             assertEquals(NOTICE, notice.current)
         }

@@ -167,9 +167,10 @@ internal fun preservedReadinessNoticeMessage(
 /**
  * Owns the preserved-readiness banner independently of generic status messages. Every state
  * rebuild re-emits [current] through load(), so unrelated settings updates (admin lock/unlock,
- * receipt saves, endpoint edits) can neither rewrite Checkout's notice text nor silently end
- * the preserved window. Only a fresh on-chain proof, a terminal demotion, or configuration
- * invalidation are lifecycle events.
+ * receipt saves) can neither rewrite Checkout's notice text nor silently end the preserved
+ * window. Only a fresh on-chain proof, a terminal demotion, or configuration invalidation are
+ * lifecycle events — RPC-endpoint and payment-profile mutations intentionally invalidate
+ * readiness and therefore end the window.
  */
 internal class PreservedReadinessNotice {
     var current: String? = null
@@ -403,7 +404,22 @@ internal fun commitAfterAutoSweepRevocation(
     return commitConfiguration()
 }
 
-class SettingsViewModel(
+/** The on-chain readiness proof, decoupled from status mapping so tests can script results. */
+internal data class OperatorChainStatus(val balance: BigInteger, val authorized: Boolean)
+
+/**
+ * Proves configuration and operator readiness on-chain for one refresh pass. Injectable so
+ * ViewModel-level lifecycle tests can drive the production refresh, load(), and preservation
+ * machinery with scripted results instead of a live RPC endpoint.
+ */
+internal fun interface OperatorReadinessProver {
+    suspend fun prove(
+        config: TerminalConfigSnapshot,
+        priority: ReadinessRpcPriority,
+    ): OperatorChainStatus
+}
+
+class SettingsViewModel internal constructor(
     private val chainConfig: ChainConfig,
     private val walletStore: OperatorWalletStore,
     private val adminPinStore: AdminPinStore,
@@ -413,6 +429,7 @@ class SettingsViewModel(
     private val rpcWorkCoordinator: RpcWorkCoordinator,
     private val rpcEndpointStore: RpcEndpointStore,
     private val rpcEndpointVerifier: RpcEndpointVerifier,
+    private val readinessProverOverride: OperatorReadinessProver? = null,
 ) : ViewModel() {
     private val adminSession = AdminSessionGate()
     private var refreshJob: Job? = null
@@ -1589,54 +1606,8 @@ class SettingsViewModel(
         refreshJob = viewModelScope.launch {
             try {
                 val result = readinessRpcScheduler.run(priority) {
-                    val profile = KnownChainPolicy.requireProfile(config.chainId)
-                    profile.requireValidCreate2Fixture()
-                    require(config.factoryAddress.equals(profile.factory.value, true)) { "Factory pin mismatch" }
-                    require(
-                        config.receiverImplementationAddress.equals(
-                            profile.receiverImplementation.value,
-                            true,
-                        ),
-                    ) { "Receiver implementation pin mismatch" }
-                    val token = config.paymentTokens.single()
-                    val retryOnThrottle = retryReadinessOnThrottle(priority)
-                    runInterruptible(Dispatchers.IO) {
-                        val resolvedRpcUrl = rpcEndpointStore.resolve(
-                            config.chainId,
-                            config.rpcUrl,
-                        )
-                        val network = NetworkConfig(
-                            config.chainId,
-                            resolvedRpcUrl,
-                            profile.factory,
-                            profile.receiverImplementation,
-                            EvmAddress.parse(config.vaultAddress),
-                        )
-                        val rpc = if (priority == ReadinessRpcPriority.AUTOMATIC) {
-                            ReadOnlyRpcClient(
-                                network,
-                                connectTimeoutMillis = AUTOMATIC_RPC_CONNECT_TIMEOUT_MILLIS,
-                                readTimeoutMillis = AUTOMATIC_RPC_READ_TIMEOUT_MILLIS,
-                            )
-                        } else {
-                            ReadOnlyRpcClient(network)
-                        }
-                        rpc.validate(
-                            token = EvmAddress.parse(token.address),
-                            expectedDecimals = token.decimals,
-                            expectedSymbol = token.symbol,
-                            retryOnThrottle = retryOnThrottle,
-                        )
-                        val operator = EvmAddress.parse(address)
-                        val readiness = rpc.operatorReadiness(
-                            operator = operator,
-                            retryOnThrottle = retryOnThrottle,
-                        )
-                        OperatorChainStatus(
-                            balance = readiness.nativeBalance,
-                            authorized = readiness.listedOperator || readiness.vaultOwner == operator,
-                        )
-                    }
+                    (readinessProverOverride ?: productionReadinessProver(address))
+                        .prove(config, priority)
                 }
                 if (result == null) {
                     // Checkout or another explicit action won priority, or this best-effort pass
@@ -1804,6 +1775,59 @@ class SettingsViewModel(
         activatedOperatorAddress?.equals(provisionedOperatorAddress, true) == true &&
         address?.equals(provisionedOperatorAddress, true) == true
 
+    /** The live four-wave proof: anchored validation plus operator readiness at one endpoint. */
+    private fun productionReadinessProver(address: String) =
+        OperatorReadinessProver { config, priority ->
+            val profile = KnownChainPolicy.requireProfile(config.chainId)
+            profile.requireValidCreate2Fixture()
+            require(config.factoryAddress.equals(profile.factory.value, true)) { "Factory pin mismatch" }
+            require(
+                config.receiverImplementationAddress.equals(
+                    profile.receiverImplementation.value,
+                    true,
+                ),
+            ) { "Receiver implementation pin mismatch" }
+            val token = config.paymentTokens.single()
+            val retryOnThrottle = retryReadinessOnThrottle(priority)
+            runInterruptible(Dispatchers.IO) {
+                val resolvedRpcUrl = rpcEndpointStore.resolve(
+                    config.chainId,
+                    config.rpcUrl,
+                )
+                val network = NetworkConfig(
+                    config.chainId,
+                    resolvedRpcUrl,
+                    profile.factory,
+                    profile.receiverImplementation,
+                    EvmAddress.parse(config.vaultAddress),
+                )
+                val rpc = if (priority == ReadinessRpcPriority.AUTOMATIC) {
+                    ReadOnlyRpcClient(
+                        network,
+                        connectTimeoutMillis = AUTOMATIC_RPC_CONNECT_TIMEOUT_MILLIS,
+                        readTimeoutMillis = AUTOMATIC_RPC_READ_TIMEOUT_MILLIS,
+                    )
+                } else {
+                    ReadOnlyRpcClient(network)
+                }
+                rpc.validate(
+                    token = EvmAddress.parse(token.address),
+                    expectedDecimals = token.decimals,
+                    expectedSymbol = token.symbol,
+                    retryOnThrottle = retryOnThrottle,
+                )
+                val operator = EvmAddress.parse(address)
+                val readiness = rpc.operatorReadiness(
+                    operator = operator,
+                    retryOnThrottle = retryOnThrottle,
+                )
+                OperatorChainStatus(
+                    balance = readiness.nativeBalance,
+                    authorized = readiness.listedOperator || readiness.vaultOwner == operator,
+                )
+            }
+        }
+
     private fun invalidateReadinessRefresh() {
         refreshGeneration += 1
         validatedConfiguration = null
@@ -1849,8 +1873,6 @@ class SettingsViewModel(
             rpcEndpointVerifier,
         ) as T
     }
-
-    private data class OperatorChainStatus(val balance: BigInteger, val authorized: Boolean)
 
     companion object {
         // Anchored validation is three waves; operator readiness is one more. Automatic refresh is
