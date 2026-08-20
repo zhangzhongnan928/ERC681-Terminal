@@ -1,7 +1,22 @@
 # OPK Terminal public-store submission pack
 
-This directory contains English (Australia) metadata and submission checklists for the existing
-OPK Terminal `0.1.12` build/version-code `13` store candidate.
+This directory contains English (Australia) metadata and submission checklists for the
+OPK Terminal `0.1.12` build/version-code `13` store candidate. That candidate is the build that
+reached the public App Store; it is not the current source tree.
+
+## Version pointer
+
+| What | Version | Where |
+| --- | --- | --- |
+| Live on the Apple App Store | `0.1.12` | [App Store listing](https://apps.apple.com/app/opk-terminal/id6792404106), first released 18 August 2026, listing last updated 19 August 2026 |
+| Source tree on `main` | `0.5.2` / build `23` | `ios/project.yml`, `android/app/build.gradle.kts`, tag `v0.5.2` (14 August 2026) |
+
+The source tree is 49 commits and four minor releases ahead of the shipped candidate. No `0.5.x`
+binary has been uploaded to either console. Every version, build, screenshot, and declaration
+statement in this pack describes the shipped `0.1.12` build `13` candidate and must be re-derived
+against the actual binary before any `0.5.x` submission. Apple's public listing metadata exposes
+only the marketing version, so the live build number is taken from App Store Connect, not from
+this record.
 
 ## Status
 
@@ -16,8 +31,16 @@ list. `zhangzhongnan928@gmail.com` still needs to accept the invitation at
 
 App Store Connect has iOS `0.1.12` build `13` attached, five build-13 iPhone 6.9-inch screenshots,
 and four build-13 iPad 13-inch screenshots. The listing and App Review contact metadata are saved.
-The app is Free, Public, Business, rated 4+, and available in 175 countries or regions. It remains
-**Prepare for Submission** because the App Privacy response is an unpublished draft.
+The app is Free, Public, Business, rated 4+, and available in 175 countries or regions.
+
+**This version is no longer Prepare for Submission.** Apple's public listing metadata, checked on
+20 August 2026, shows OPK Terminal `0.1.12` released on 18 August 2026 and last updated on
+19 August 2026, published by OPENPASSKEY PTY LTD with a minimum of iOS 17.0. Passing review means
+the App Privacy response was published, so the Apple-side gate recorded below is closed. Read the
+published App Privacy answer in App Store Connect before reusing any wording from this pack: the
+draft it describes said Data Not Collected, which this pack judged indefensible.
+
+The Google Play state in this file has not been re-verified since 26 July 2026.
 
 Build 13 predates the isolated offline product tour. It opens the normal Checkout, History,
 Settlement, and Settings tabs and must never be described as containing the build-14 demo. A
@@ -65,10 +88,12 @@ already-uploaded build 13 and no new binary is authorised for this release.
    provider. This product classification does not remove store privacy categories for transaction
    or wallet data sent off-device. Final territories and any legal/compliance determinations
    remain owner decisions.
-6. **Finish the platform gates.** Apple App Privacy needs an accurate published response before
-   build 13 can be added for review. Play still needs the IARC Terms acceptance and questionnaire,
-   a policy-consistent Data safety response, and a qualifying closed test with 12 continuously
-   opted-in testers for 14 days; only one candidate email is currently supplied.
+6. **Finish the platform gates.** The Apple gate is closed: `0.1.12` passed review and is public
+   as of 18 August 2026, which required a published App Privacy response. Play still needs the
+   IARC Terms acceptance and questionnaire, a policy-consistent Data safety response, and a
+   qualifying closed test with 12 continuously opted-in testers for 14 days; only one candidate
+   email was supplied as of the 26 July 2026 snapshot, and the Play state has not been
+   re-verified since.
 7. **The dedicated support destination is live.** `https://www.openpasskey.com/support` provides
    setup guidance, troubleshooting, a monitored contact route, and a warning not to send private
    keys, PINs, or provisioning QRs.

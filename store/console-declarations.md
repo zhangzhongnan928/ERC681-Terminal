@@ -1,10 +1,15 @@
 # App Store Connect and Play Console declaration record
 
-Evidence snapshot: 26 July 2026.
+Evidence snapshot: 26 July 2026. Apple listing state re-checked 20 August 2026; Google Play state
+not re-checked since the original snapshot.
 
 Release candidate: OPK Terminal `0.1.12` build `13`, source commit `0414d70`.
 This record applies only to the build already present in App Store Connect and Google Play. Do not
 substitute build 14 behavior, reviewer instructions, screenshots, or declarations.
+
+`main` now carries `0.5.2` / build `23` (tag `v0.5.2`, 14 August 2026), which has not been
+submitted to either console. Do not reuse the code-grounded claims below for a `0.5.x` build
+without re-deriving them from that source tree.
 
 This is a code- and console-grounded submission record, not legal advice. The owner must approve
 legal attestations, privacy publication, and final store submissions.
@@ -19,17 +24,23 @@ legal attestations, privacy publication, and final store submissions.
 - Distribution: **Public**, available in **175 regions**.
 - Age rating: **4+**.
 - Version `0.1.12`, build `13`, is attached.
-- Version status: **Prepare for Submission**.
+- Version status: **Ready for Sale**. The public listing
+  (https://apps.apple.com/app/opk-terminal/id6792404106) shows `0.1.12` released 18 August 2026 and
+  last updated 19 August 2026, minimum iOS 17.0, seller OPENPASSKEY PTY LTD. Verified 20 August
+  2026 from Apple's public listing metadata, which does not expose the build number; confirm the
+  live build in App Store Connect.
 - Version metadata and App Review contact metadata are saved.
-- Release remains owner-controlled.
-- App Privacy currently says **Data Not Collected**, but only as an unpublished draft. That answer
-  is not defensible for build 13 and must not be published.
+- App Privacy: the July snapshot recorded an unpublished **Data Not Collected** draft and judged it
+  indefensible for build 13. Review passed, so some answer was published. Read the published answer
+  in App Store Connect and correct it there if it still claims no collection; the off-device
+  handling recorded in this file (Base public JSON-RPC, bundled ML Kit telemetry) is unchanged.
 
 ### Google Play Console
 
 - Developer: personal account `zhangzhongnan928@gmail.com`.
 - Price: **Free**.
-- Version `0.1.12` (`13`) targets Android API 35 and is active on internal testing.
+- Version `0.1.12` (`13`) targets Android API 35 and is active on internal testing, as of the
+  26 July 2026 snapshot. Not re-verified since.
 - The IARC content-rating questionnaire and Data safety form remain pending.
 - The app is classified as a merchant payment tool, not a financial-services provider or
   general-purpose cryptocurrency wallet.

@@ -1,6 +1,9 @@
 # Apple App Store — English (Australia)
 
-Release target: the already-uploaded OPK Terminal `0.1.12` build `13`.
+Release target: the already-uploaded OPK Terminal `0.1.12` build `13`. This version is live on
+the App Store: released 18 August 2026, listing last updated 19 August 2026. The metadata below
+is the submitted draft for that version; check App Store Connect for the text actually
+published. `main` is now on `0.5.2` / build `23`, which has not been submitted.
 
 ## Product details
 
