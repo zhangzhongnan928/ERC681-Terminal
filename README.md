@@ -16,6 +16,12 @@ JSON-RPC. After confirmation, the native app may sign exactly one allowed contra
 `ClearingVault.sweepSessions`. The receiver contract then moves the payment into the merchant vault;
 the terminal never chooses a payout destination or uses receiver funds for gas.
 
+## Download
+
+| App | Platform | Listing |
+| --- | --- | --- |
+| OPK Terminal | iOS | [App Store](https://apps.apple.com/app/opk-terminal/id6792404106) |
+
 ## For wallet developers
 
 Terminals present one of two canonical ERC-681 forms. ERC-20 invoices use:
