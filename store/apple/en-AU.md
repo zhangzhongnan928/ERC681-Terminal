@@ -7,6 +7,7 @@ Release target: the already-uploaded OPK Terminal `0.1.12` build `13`.
 | Field | Draft value |
 | --- | --- |
 | App name (30 max) | OPK Terminal |
+| App Store listing | https://apps.apple.com/app/opk-terminal/id6792404106 |
 | Subtitle (30 max) | Base Sepolia merchant terminal |
 | Primary language | English (Australia) |
 | Primary category | Business |
